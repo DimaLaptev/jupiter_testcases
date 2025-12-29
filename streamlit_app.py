@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import plotly.express as px
 
 
 DATA_PATH = Path("data/processed/operations_from_history.csv")
@@ -157,5 +158,64 @@ if not df_month.empty:
     st.line_chart(chart_data)
 else:
     st.write("Недостаточно данных для построения графика.")
+
+
+st.subheader("Тепловая карта (heatmap) ошибок по разрезам")
+
+metric_sel = st.selectbox(
+    "Метрика (metric)",
+    options=["MAE", "RMSE", "MAPE_%", "large_error_share"],
+    index=0,
+)
+
+source_sel = st.selectbox(
+    "Источник прогноза (source)",
+    options=["ai", "baseline"],
+    index=0,
+)
+
+slice_sel = st.selectbox(
+    "Разрез (slice)",
+    options=["Подразделение × месяц", "Модель (resist_id) × месяц"],
+    index=0,
+)
+
+pred_col = "ai_pred" if source_sel == "ai" else "baseline_pred"
+
+if slice_sel.startswith("Подразделение"):
+    group_keys = ["division_title", "month"]
+    row_key = "division_title"
+else:
+    group_keys = ["resist_id", "month"]
+    row_key = "resist_id"
+
+rows = []
+for keys, grp in df_filt.groupby(group_keys):
+    m = compute_metrics(grp["fact"], grp[pred_col])
+    rows.append(
+        {
+            row_key: keys[0],
+            "month": keys[1],
+            metric_sel: m[metric_sel],
+        }
+    )
+
+df_h = pd.DataFrame(rows)
+
+if df_h.empty:
+    st.write("Недостаточно данных для построения тепловой карты.")
+else:
+    pivot = df_h.pivot(index=row_key, columns="month", values=metric_sel)
+    pivot.columns = pivot.columns.astype(str)
+
+    fig = px.imshow(
+        pivot,
+        aspect="auto",
+        color_continuous_scale="RdYlGn_r",
+        labels={"color": metric_sel},
+    )
+    fig.update_layout(xaxis_title="Месяц (month)", yaxis_title=row_key)
+    st.plotly_chart(fig, use_container_width=True)
+
 
 
