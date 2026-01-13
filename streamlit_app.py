@@ -6,6 +6,7 @@ import plotly.express as px
 
 
 DATA_PATH = Path("data/processed/operations_from_history.csv")
+WORKLOAD_PATH = Path("data/processed/workload_from_history.csv")
 
 
 @st.cache_data
@@ -35,6 +36,78 @@ def add_baseline(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.merge(prev, on=key + ["month_prev"], how="left")
     df["baseline_pred"] = df["fact_prev"]
+    return df
+
+
+def add_hybrid_baseline(
+    df: pd.DataFrame,
+    group_keys: list[str],
+    window: int = 6,
+    min_periods: int = 3,
+) -> pd.DataFrame:
+    """Гибридный baseline (hybrid baseline) с fallback (fallback ladder).
+
+    Приоритет:
+    1) year_ago: факт год назад (t-12)
+    2) rolling_median: медиана последних N месяцев (без текущего), если есть >= min_periods
+    3) last_value: факт прошлого месяца
+    4) global_median: медиана по всей истории в группе
+    """
+    df = df.copy()
+    df = df.sort_values(group_keys + ["month"])
+
+    # year_ago (year-over-year)
+    df["month_prev"] = df["month"] - 12
+    prev = (
+        df[group_keys + ["month", "fact"]]
+        .rename(columns={"month": "month_prev", "fact": "fact_prev"})
+    )
+    df = df.merge(prev, on=group_keys + ["month_prev"], how="left")
+    year_ago = df["fact_prev"]
+
+    # rolling median (rolling median)
+    rolling_med = (
+        df.groupby(group_keys, dropna=False)["fact"]
+        .transform(lambda s: s.shift(1).rolling(window=window, min_periods=min_periods).median())
+    )
+
+    # last value (last observation)
+    last_val = df.groupby(group_keys, dropna=False)["fact"].transform(lambda s: s.shift(1))
+
+    # global median (global median)
+    global_med = df.groupby(group_keys, dropna=False)["fact"].transform("median")
+
+    baseline = year_ago.copy()
+    baseline_rule = np.where(~year_ago.isna(), "year_ago", None)
+
+    mask = baseline.isna()
+    baseline.loc[mask] = rolling_med.loc[mask]
+    baseline_rule = np.where(mask & ~rolling_med.isna(), "rolling_median", baseline_rule)
+
+    mask = baseline.isna()
+    baseline.loc[mask] = last_val.loc[mask]
+    baseline_rule = np.where(mask & ~last_val.isna(), "last_value", baseline_rule)
+
+    mask = baseline.isna()
+    baseline.loc[mask] = global_med.loc[mask]
+    baseline_rule = np.where(mask & ~global_med.isna(), "global_median", baseline_rule)
+
+    df["baseline_pred"] = baseline.clip(lower=0)
+    df["baseline_rule"] = baseline_rule
+    return df
+
+
+@st.cache_data
+def load_workload_data(path: Path) -> pd.DataFrame:
+    """Загрузка датасета по нагрузке (workload dataset)."""
+    df = pd.read_csv(path, parse_dates=["period"])
+    df = df.rename(
+        columns={
+            "workload_fact": "fact",
+            "workload_ai": "ai_pred",
+        }
+    )
+    df["month"] = df["period"].dt.to_period("M").dt.to_timestamp()
     return df
 
 
@@ -72,8 +145,20 @@ def compute_metrics(y_true, y_pred, large_abs=100, large_pct=0.3):
     }
 
 
-df = load_data(DATA_PATH)
-df = add_baseline(df)
+mode = st.sidebar.selectbox(
+    "Режим (mode)",
+    options=["Operations (кол-во операций)", "Workload (нагрузка, %)"],
+    index=0,
+)
+
+if mode.startswith("Workload"):
+    df = load_workload_data(WORKLOAD_PATH)
+    # baseline по нагрузке строим на уровне resist_id
+    df = add_hybrid_baseline(df, group_keys=["resist_id"], window=6, min_periods=3)
+else:
+    df = load_data(DATA_PATH)
+    # baseline по операциям строим на уровне resist_id + operation_id
+    df = add_hybrid_baseline(df, group_keys=["resist_id", "operation_id"], window=6, min_periods=3)
 
 
 st.sidebar.header("Фильтры (filters)")
@@ -108,27 +193,52 @@ sources = {
     "baseline": df_filt["baseline_pred"],
 }
 
+df_common = df_filt[df_filt["baseline_pred"].notna()].copy()
+coverage = (len(df_common) / len(df_filt)) if len(df_filt) else np.nan
+
 rows = []
-for name, y_pred in sources.items():
-    m = compute_metrics(df_filt["fact"], y_pred)
-    m["source"] = name
-    rows.append(m)
+
+# AI на всех данных (ai_all)
+m_ai_all = compute_metrics(df_filt["fact"], df_filt["ai_pred"])
+m_ai_all["source"] = "ai_all"
+rows.append(m_ai_all)
+
+# AI на общем пересечении с baseline (ai_common)
+m_ai_common = compute_metrics(df_common["fact"], df_common["ai_pred"])
+m_ai_common["source"] = "ai_common"
+rows.append(m_ai_common)
+
+# baseline на общем пересечении (baseline_common)
+m_bl_common = compute_metrics(df_common["fact"], df_common["baseline_pred"])
+m_bl_common["source"] = "baseline_common"
+rows.append(m_bl_common)
 
 df_sources = pd.DataFrame(rows).set_index("source")
 
 st.subheader("Глобальные метрики по источникам (sources)")
 st.dataframe(df_sources.style.format("{:.2f}"))
+st.caption(f"Покрытие baseline (coverage): {coverage:.2%}" if not np.isnan(coverage) else "Покрытие baseline (coverage): n/a")
+
+if "baseline_rule" in df_filt.columns:
+    st.subheader("Как часто сработало правило baseline (baseline rule distribution)")
+    st.dataframe(df_filt["baseline_rule"].value_counts(dropna=False).to_frame("count"))
 
 
 st.subheader("Метрики по подразделениям (divisions)")
 
 rows = []
 for div, grp in df_filt.groupby("division_title"):
-    for name, col in [("ai", "ai_pred"), ("baseline", "baseline_pred")]:
-        m = compute_metrics(grp["fact"], grp[col])
-        m["division_title"] = div
-        m["source"] = name
-        rows.append(m)
+    grp_common = grp[grp["baseline_pred"].notna()]
+
+    m_ai = compute_metrics(grp_common["fact"], grp_common["ai_pred"])
+    m_ai["division_title"] = div
+    m_ai["source"] = "ai"
+    rows.append(m_ai)
+
+    m_bl = compute_metrics(grp_common["fact"], grp_common["baseline_pred"])
+    m_bl["division_title"] = div
+    m_bl["source"] = "baseline"
+    rows.append(m_bl)
 
 df_div = pd.DataFrame(rows)
 
@@ -145,8 +255,9 @@ st.subheader("Динамика MAE по месяцам (months)")
 
 rows = []
 for month, grp in df_filt.groupby("month"):
+    grp_common = grp[grp["baseline_pred"].notna()]
     for name, col in [("ai", "ai_pred"), ("baseline", "baseline_pred")]:
-        m = compute_metrics(grp["fact"], grp[col])
+        m = compute_metrics(grp_common["fact"], grp_common[col])
         m["month"] = month
         m["source"] = name
         rows.append(m)
@@ -181,6 +292,7 @@ slice_sel = st.selectbox(
 )
 
 pred_col = "ai_pred" if source_sel == "ai" else "baseline_pred"
+df_h_base = df_filt if source_sel == "ai" else df_common
 
 if slice_sel.startswith("Подразделение"):
     group_keys = ["division_title", "month"]
@@ -190,7 +302,7 @@ else:
     row_key = "resist_id"
 
 rows = []
-for keys, grp in df_filt.groupby(group_keys):
+for keys, grp in df_h_base.groupby(group_keys):
     m = compute_metrics(grp["fact"], grp[pred_col])
     rows.append(
         {
