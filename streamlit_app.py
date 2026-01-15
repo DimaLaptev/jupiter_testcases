@@ -7,6 +7,7 @@ import plotly.express as px
 
 DATA_PATH = Path("data/processed/operations_from_history.csv")
 WORKLOAD_PATH = Path("data/processed/workload_from_history.csv")
+EXCEL_SVOD_CSV = Path("data/processed/excel_svod_workload.csv")
 
 
 @st.cache_data
@@ -27,7 +28,7 @@ def add_baseline(df: pd.DataFrame) -> pd.DataFrame:
     """Построение baseline (baseline model): факт год назад по той же операции."""
     key = ["resist_id", "operation_id"]
     df = df.copy()
-    df["month_prev"] = df["month"] - 12
+    df["month_prev"] = df["month"] - pd.DateOffset(months=12)
 
     prev = (
         df[key + ["month", "fact"]]
@@ -57,7 +58,7 @@ def add_hybrid_baseline(
     df = df.sort_values(group_keys + ["month"])
 
     # year_ago (year-over-year)
-    df["month_prev"] = df["month"] - 12
+    df["month_prev"] = df["month"] - pd.DateOffset(months=12)
     prev = (
         df[group_keys + ["month", "fact"]]
         .rename(columns={"month": "month_prev", "fact": "fact_prev"})
@@ -155,6 +156,20 @@ if mode.startswith("Workload"):
     df = load_workload_data(WORKLOAD_PATH)
     # baseline по нагрузке строим на уровне resist_id
     df = add_hybrid_baseline(df, group_keys=["resist_id"], window=6, min_periods=3)
+
+    if EXCEL_SVOD_CSV.exists():
+        st.subheader("Excel (Excel): сводный отчёт (summary report) по нагрузке (workload)")
+        df_excel = pd.read_csv(EXCEL_SVOD_CSV, parse_dates=["month"])
+        excel_divs = sorted(df_excel["division_title"].dropna().unique().tolist())
+        excel_div_sel = st.selectbox("Подразделение из Excel (division from Excel)", excel_divs)
+        df_excel_div = df_excel[df_excel["division_title"] == excel_div_sel].sort_values("month")
+
+        st.dataframe(df_excel_div)
+
+        chart = df_excel_div.set_index("month")[["workload_ml_pct", "workload_manual_pct"]]
+        st.line_chart(chart)
+    else:
+        st.caption("Нет Excel CSV: data/processed/excel_svod_workload.csv (сначала запусти notebooks/export_svod_to_csv.ipynb)")
 else:
     df = load_data(DATA_PATH)
     # baseline по операциям строим на уровне resist_id + operation_id
@@ -184,7 +199,10 @@ if division_sel != "(все)":
 df_filt = df[mask].copy()
 
 
-st.title("Оценка качества прогноза количества операций (operations)")
+if mode.startswith("Workload"):
+    st.title("Оценка качества прогноза нагрузки (workload, %)")
+else:
+    st.title("Оценка качества прогноза количества операций (operations)")
 st.write(f"Строк после фильтрации: {len(df_filt):,}")
 
 
