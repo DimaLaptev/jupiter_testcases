@@ -168,6 +168,79 @@ if mode.startswith("Workload"):
 
         chart = df_excel_div.set_index("month")[["workload_ml_pct", "workload_manual_pct"]]
         st.line_chart(chart)
+
+        # --- Сопоставление (mapping) Excel ↔ БД (DB) по месяцам (month) ---
+        st.subheader("Сравнение Excel (Excel) и БД (DB) по месяцам (month)")
+
+        db_divs = sorted(df["division_title"].dropna().unique().tolist())
+        default_db_div = excel_div_sel if excel_div_sel in db_divs else "(не найдено)"
+        db_div_options = ["(не найдено)"] + db_divs
+        db_div_sel = st.selectbox(
+            "Подразделение в БД (division in DB) для сравнения",
+            options=db_div_options,
+            index=db_div_options.index(default_db_div) if default_db_div in db_div_options else 0,
+        )
+
+        if db_div_sel == "(не найдено)":
+            st.warning(
+                "Не нашёл точного совпадения названия подразделения (division title) между Excel и БД. "
+                "Выбери подразделение в БД вручную."
+            )
+        else:
+            # В БД (DB) в режиме Workload строки на уровне resist_id,
+            # поэтому агрегируем по месяцу (month) средним (mean).
+            df_db_div = (
+                df[df["division_title"] == db_div_sel]
+                .groupby("month", as_index=False)
+                .agg(
+                    db_fact=("fact", "mean"),
+                    db_ai=("ai_pred", "mean"),
+                    db_baseline=("baseline_pred", "mean"),
+                )
+            )
+
+            df_excel_cmp = (
+                df_excel_div.rename(
+                    columns={
+                        "workload_ml_pct": "excel_ml",
+                        "workload_manual_pct": "excel_manual",
+                    }
+                )[["month", "excel_ml", "excel_manual"]]
+            )
+
+            df_cmp = df_db_div.merge(df_excel_cmp, on="month", how="outer").sort_values("month")
+            st.dataframe(df_cmp)
+
+            st.subheader("График (chart): DB vs Excel")
+            chart2 = df_cmp.set_index("month")[
+                ["db_fact", "db_ai", "db_baseline", "excel_ml", "excel_manual"]
+            ]
+            st.line_chart(chart2)
+
+            st.subheader("Метрики (metrics) относительно DB fact (fact)")
+            rows_m = []
+            for src, col in [
+                ("db_ai", "db_ai"),
+                ("db_baseline", "db_baseline"),
+                ("excel_ml", "excel_ml"),
+                ("excel_manual", "excel_manual"),
+            ]:
+                m = compute_metrics(df_cmp["db_fact"], df_cmp[col])
+                m["source"] = src
+                rows_m.append(m)
+            st.dataframe(pd.DataFrame(rows_m).set_index("source").style.format("{:.2f}"))
+
+            st.subheader("Метрики (metrics) относительно Excel manual (manual)")
+            rows_m2 = []
+            for src, col in [
+                ("db_ai", "db_ai"),
+                ("db_baseline", "db_baseline"),
+                ("excel_ml", "excel_ml"),
+            ]:
+                m = compute_metrics(df_cmp["excel_manual"], df_cmp[col])
+                m["source"] = src
+                rows_m2.append(m)
+            st.dataframe(pd.DataFrame(rows_m2).set_index("source").style.format("{:.2f}"))
     else:
         st.caption("Нет Excel CSV: data/processed/excel_svod_workload.csv (сначала запусти notebooks/export_svod_to_csv.ipynb)")
 else:
