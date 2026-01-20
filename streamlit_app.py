@@ -8,6 +8,7 @@ import plotly.express as px
 DATA_PATH = Path("data/processed/operations_from_history.csv")
 WORKLOAD_PATH = Path("data/processed/workload_from_history.csv")
 EXCEL_SVOD_CSV = Path("data/processed/excel_svod_workload.csv")
+CATBOOST_PRED_CSV = Path("data/processed/model_predictions_catboost_v1.csv")
 
 
 @st.cache_data
@@ -112,6 +113,19 @@ def load_workload_data(path: Path) -> pd.DataFrame:
     return df
 
 
+@st.cache_data
+def load_catboost_predictions(path: Path) -> pd.DataFrame:
+    """Загрузка предсказаний (predictions) CatBoost (CatBoost)."""
+    df = pd.read_csv(path, parse_dates=["period", "cutoff"])
+    # Если есть несколько прогнозов на один месяц, берём последний cutoff (latest cutoff).
+    df = df.sort_values(["resist_id", "period", "cutoff"]).drop_duplicates(
+        ["resist_id", "period"], keep="last"
+    )
+    df = df.rename(columns={"y_pred": "catboost_pred"})
+    df["month"] = df["period"].dt.to_period("M").dt.to_timestamp()
+    return df
+
+
 def compute_metrics(y_true, y_pred, large_abs=100, large_pct=0.3):
     """Расчёт базовых метрик (metrics) ошибки прогноза."""
     y_true = np.asarray(y_true, dtype=float)
@@ -157,6 +171,16 @@ if mode.startswith("Workload"):
     # baseline по нагрузке строим на уровне resist_id
     df = add_hybrid_baseline(df, group_keys=["resist_id"], window=6, min_periods=3)
 
+    if CATBOOST_PRED_CSV.exists():
+        df_cb = load_catboost_predictions(CATBOOST_PRED_CSV)
+        df = df.merge(
+            df_cb[["resist_id", "period", "catboost_pred"]],
+            on=["resist_id", "period"],
+            how="left",
+        )
+    else:
+        st.caption("Нет CSV (CSV) с CatBoost (CatBoost): data/processed/model_predictions_catboost_v1.csv")
+
     if EXCEL_SVOD_CSV.exists():
         st.subheader("Excel (Excel): сводный отчёт (summary report) по нагрузке (workload)")
         df_excel = pd.read_csv(EXCEL_SVOD_CSV, parse_dates=["month"])
@@ -189,14 +213,18 @@ if mode.startswith("Workload"):
         else:
             # В БД (DB) в режиме Workload строки на уровне resist_id,
             # поэтому агрегируем по месяцу (month) средним (mean).
+            agg_map = {
+                "db_fact": ("fact", "mean"),
+                "db_ai": ("ai_pred", "mean"),
+                "db_baseline": ("baseline_pred", "mean"),
+            }
+            if "catboost_pred" in df.columns:
+                agg_map["db_catboost"] = ("catboost_pred", "mean")
+
             df_db_div = (
                 df[df["division_title"] == db_div_sel]
                 .groupby("month", as_index=False)
-                .agg(
-                    db_fact=("fact", "mean"),
-                    db_ai=("ai_pred", "mean"),
-                    db_baseline=("baseline_pred", "mean"),
-                )
+                .agg(**agg_map)
             )
 
             df_excel_cmp = (
@@ -212,19 +240,19 @@ if mode.startswith("Workload"):
             st.dataframe(df_cmp)
 
             st.subheader("График (chart): DB vs Excel")
-            chart2 = df_cmp.set_index("month")[
-                ["db_fact", "db_ai", "db_baseline", "excel_ml", "excel_manual"]
-            ]
+            chart_cols = ["db_fact", "db_ai", "db_baseline", "excel_ml", "excel_manual"]
+            if "db_catboost" in df_cmp.columns:
+                chart_cols.insert(3, "db_catboost")
+            chart2 = df_cmp.set_index("month")[chart_cols]
             st.line_chart(chart2)
 
             st.subheader("Метрики (metrics) относительно DB fact (fact)")
             rows_m = []
-            for src, col in [
-                ("db_ai", "db_ai"),
-                ("db_baseline", "db_baseline"),
-                ("excel_ml", "excel_ml"),
-                ("excel_manual", "excel_manual"),
-            ]:
+            sources_db = [("db_ai", "db_ai"), ("db_baseline", "db_baseline")]
+            if "db_catboost" in df_cmp.columns:
+                sources_db.insert(1, ("db_catboost", "db_catboost"))
+            sources_db += [("excel_ml", "excel_ml"), ("excel_manual", "excel_manual")]
+            for src, col in sources_db:
                 m = compute_metrics(df_cmp["db_fact"], df_cmp[col])
                 m["source"] = src
                 rows_m.append(m)
@@ -232,11 +260,11 @@ if mode.startswith("Workload"):
 
             st.subheader("Метрики (metrics) относительно Excel manual (manual)")
             rows_m2 = []
-            for src, col in [
-                ("db_ai", "db_ai"),
-                ("db_baseline", "db_baseline"),
-                ("excel_ml", "excel_ml"),
-            ]:
+            sources_m = [("db_ai", "db_ai"), ("db_baseline", "db_baseline")]
+            if "db_catboost" in df_cmp.columns:
+                sources_m.insert(1, ("db_catboost", "db_catboost"))
+            sources_m += [("excel_ml", "excel_ml")]
+            for src, col in sources_m:
                 m = compute_metrics(df_cmp["excel_manual"], df_cmp[col])
                 m["source"] = src
                 rows_m2.append(m)
@@ -283,6 +311,8 @@ sources = {
     "ai": df_filt["ai_pred"],
     "baseline": df_filt["baseline_pred"],
 }
+if "catboost_pred" in df_filt.columns:
+    sources["catboost_v1"] = df_filt["catboost_pred"]
 
 df_common = df_filt[df_filt["baseline_pred"].notna()].copy()
 coverage = (len(df_common) / len(df_filt)) if len(df_filt) else np.nan
@@ -293,6 +323,13 @@ rows = []
 m_ai_all = compute_metrics(df_filt["fact"], df_filt["ai_pred"])
 m_ai_all["source"] = "ai_all"
 rows.append(m_ai_all)
+
+# CatBoost на всех данных (catboost_all)
+if "catboost_pred" in df_filt.columns:
+    df_cb = df_filt[df_filt["catboost_pred"].notna()]
+    m_cb_all = compute_metrics(df_cb["fact"], df_cb["catboost_pred"])
+    m_cb_all["source"] = "catboost_v1"
+    rows.append(m_cb_all)
 
 # AI на общем пересечении с baseline (ai_common)
 m_ai_common = compute_metrics(df_common["fact"], df_common["ai_pred"])
@@ -309,6 +346,9 @@ df_sources = pd.DataFrame(rows).set_index("source")
 st.subheader("Глобальные метрики по источникам (sources)")
 st.dataframe(df_sources.style.format("{:.2f}"))
 st.caption(f"Покрытие baseline (coverage): {coverage:.2%}" if not np.isnan(coverage) else "Покрытие baseline (coverage): n/a")
+if "catboost_pred" in df_filt.columns:
+    cb_cov = (df_filt["catboost_pred"].notna().mean()) if len(df_filt) else np.nan
+    st.caption(f"Покрытие catboost (coverage): {cb_cov:.2%}" if not np.isnan(cb_cov) else "Покрытие catboost (coverage): n/a")
 
 if "baseline_rule" in df_filt.columns:
     st.subheader("Как часто сработало правило baseline (baseline rule distribution)")
@@ -331,6 +371,14 @@ for div, grp in df_filt.groupby("division_title"):
     m_bl["source"] = "baseline"
     rows.append(m_bl)
 
+    if "catboost_pred" in grp.columns:
+        grp_cb = grp[grp["catboost_pred"].notna()]
+        if len(grp_cb):
+            m_cb = compute_metrics(grp_cb["fact"], grp_cb["catboost_pred"])
+            m_cb["division_title"] = div
+            m_cb["source"] = "catboost_v1"
+            rows.append(m_cb)
+
 df_div = pd.DataFrame(rows)
 
 pivot_div = df_div.pivot_table(
@@ -352,6 +400,13 @@ for month, grp in df_filt.groupby("month"):
         m["month"] = month
         m["source"] = name
         rows.append(m)
+    if "catboost_pred" in grp.columns:
+        grp_cb = grp[grp["catboost_pred"].notna()]
+        if len(grp_cb):
+            m = compute_metrics(grp_cb["fact"], grp_cb["catboost_pred"])
+            m["month"] = month
+            m["source"] = "catboost_v1"
+            rows.append(m)
 
 df_month = pd.DataFrame(rows)
 
@@ -372,7 +427,7 @@ metric_sel = st.selectbox(
 
 source_sel = st.selectbox(
     "Источник прогноза (source)",
-    options=["ai", "baseline"],
+    options=["ai", "baseline"] + (["catboost_v1"] if "catboost_pred" in df_filt.columns else []),
     index=0,
 )
 
@@ -382,8 +437,15 @@ slice_sel = st.selectbox(
     index=0,
 )
 
-pred_col = "ai_pred" if source_sel == "ai" else "baseline_pred"
-df_h_base = df_filt if source_sel == "ai" else df_common
+if source_sel == "ai":
+    pred_col = "ai_pred"
+    df_h_base = df_filt
+elif source_sel == "baseline":
+    pred_col = "baseline_pred"
+    df_h_base = df_common
+else:
+    pred_col = "catboost_pred"
+    df_h_base = df_filt[df_filt["catboost_pred"].notna()]
 
 if slice_sel.startswith("Подразделение"):
     group_keys = ["division_title", "month"]
