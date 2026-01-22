@@ -249,6 +249,31 @@ df_filt = df[mask].copy()
 st.title("Оценка качества прогноза нагрузки (workload, %)")
 st.write(f"Строк после фильтрации: {len(df_filt):,}")
 
+st.subheader("Сравнение значений нагрузки (workload) по месяцам (months)")
+
+# агрегируем по месяцу (mean) и показываем 4 ряда: fact/ai/catboost/baseline
+df_cmp = (
+    df_filt.groupby("month", as_index=False)
+    .agg(
+        fact=("fact_pct", "mean"),
+        ai=("ai_pct", "mean"),
+        baseline=("baseline_pct", "mean"),
+    )
+)
+if "catboost_pct" in df_filt.columns:
+    df_cb_month = (
+        df_filt.groupby("month", as_index=False)
+        .agg(catboost=("catboost_pct", "mean"))
+    )
+    df_cmp = df_cmp.merge(df_cb_month, on="month", how="left")
+
+st.dataframe(df_cmp)
+
+chart_cols = ["fact", "ai", "baseline"]
+if "catboost" in df_cmp.columns:
+    chart_cols.insert(2, "catboost")
+
+st.line_chart(df_cmp.set_index("month")[chart_cols])
 
 sources = {
     "ai": df_filt["ai_pct"],
