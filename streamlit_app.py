@@ -184,11 +184,9 @@ if mode.startswith("Workload"):
     df = df[df["period"].dt.year == 2025].copy()
     st.caption("Режим test (test): данные только за 2025 год (year)")
 
-    # приводим DB к процентам (percent)
+    # приводим DB к процентам (percent) — catboost добавим после merge
     df["fact_pct"] = df["fact"] * 100.0
     df["ai_pct"] = df["ai_pred"] * 100.0
-    if "catboost_pred" in df.columns:
-        df["catboost_pct"] = df["catboost_pred"] * 100.0
     df["baseline_pct"] = df["baseline_pred"] * 100.0
 
     with st.expander("Как считается baseline (baseline)"):
@@ -208,6 +206,8 @@ if mode.startswith("Workload"):
             on=["resist_id", "period"],
             how="left",
         )
+        # теперь можно считать catboost_pct
+        df["catboost_pct"] = df["catboost_pred"] * 100.0
     else:
         st.caption("Нет CSV (CSV) с CatBoost (CatBoost): data/processed/model_predictions_catboost_v1.csv")
 
