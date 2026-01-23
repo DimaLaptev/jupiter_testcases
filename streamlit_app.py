@@ -189,7 +189,7 @@ if mode.startswith("Workload"):
     df["ai_pct"] = df["ai_pred"] * 100.0
     df["baseline_pct"] = df["baseline_pred"] * 100.0
 
-    with st.expander("Как считается baseline (baseline)"):
+    with st.expander("Как считается baseline"):
         st.markdown(
             "- **year_ago (year-over-year)**: `baseline(t) = fact(t - 12 months)`\n"
             "- **rolling_median (rolling median)**: `median(fact(t-1)...fact(t-6))` при >=3 значениях\n"
@@ -197,6 +197,44 @@ if mode.startswith("Workload"):
             "- **global_median (global median)**: `median(fact)` по всей истории (history)\n"
             "\n"
             "Порядок (order): year_ago → rolling_median → last_value → global_median.\n"
+        )
+
+    with st.expander("Как считается MAE"):
+        st.markdown(
+            "**MAE (mean absolute error)** — средняя абсолютная ошибка (absolute error):\n"
+            "\n"
+            "`MAE = mean(|y_pred - y_true|)`\n"
+            "\n"
+            "В нашем случае — средняя ошибка в **процентных пунктах (percentage points)**.\n"
+        )
+
+    with st.expander("Как считается RMSE"):
+        st.markdown(
+            "**RMSE (root mean squared error)** — корень из средней квадратичной ошибки (squared error):\n"
+            "\n"
+            "`RMSE = sqrt(mean((y_pred - y_true)^2))`\n"
+            "\n"
+            "Чувствительна к большим ошибкам (large errors).\n"
+        )
+
+    with st.expander("Как считается MAPE_%"):
+        st.markdown(
+            "**MAPE_% (mean absolute percentage error)** — средняя относительная ошибка в процентах (percent):\n"
+            "\n"
+            "`MAPE = mean(|(y_pred - y_true) / y_true|) * 100%`\n"
+            "\n"
+            "Считается только там, где `y_true != 0`.\n"
+        )
+
+    with st.expander("Как считается large_error_share"):
+        st.markdown(
+            "**large_error_share** — доля больших ошибок (large errors):\n"
+            "\n"
+            "Ошибка считается большой, если:\n"
+            "- `|y_pred - y_true| > 10` **или**\n"
+            "- `|y_pred - y_true| > 0.1 * |y_true|`\n"
+            "\n"
+            "Порог (threshold) сейчас соответствует режиму Workload (workload).\n"
         )
 
     if CATBOOST_PRED_CSV.exists():
@@ -287,9 +325,9 @@ coverage = (len(df_common) / len(df_filt)) if len(df_filt) else np.nan
 
 rows = []
 
-# AI на всех данных (ai_all)
+# AI на всех данных (ai)
 m_ai_all = compute_metrics(df_filt["fact_pct"], df_filt["ai_pct"], **METRICS_KW)
-m_ai_all["source"] = "ai_all"
+m_ai_all["source"] = "ai"
 rows.append(m_ai_all)
 
 # CatBoost на всех данных (catboost_all)
@@ -299,10 +337,7 @@ if "catboost_pct" in df_filt.columns:
     m_cb_all["source"] = "catboost_v1"
     rows.append(m_cb_all)
 
-# AI на общем пересечении с baseline (ai_common)
-m_ai_common = compute_metrics(df_common["fact_pct"], df_common["ai_pct"], **METRICS_KW)
-m_ai_common["source"] = "ai_common"
-rows.append(m_ai_common)
+# AI на общем пересечении с baseline (ai_common) — убираем из отображения
 
 # baseline на общем пересечении (baseline_common)
 m_bl_common = compute_metrics(df_common["fact_pct"], df_common["baseline_pct"], **METRICS_KW)
