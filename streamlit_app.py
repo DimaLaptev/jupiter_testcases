@@ -287,7 +287,7 @@ df_filt = df[mask].copy()
 st.title("Оценка качества прогноза нагрузки (workload, %)")
 st.write(f"Строк после фильтрации: {len(df_filt):,}")
 
-st.subheader("Сравнение значений нагрузки (workload) по месяцам (months)")
+st.subheader("Сравнение значений нагрузки (workload, %) по месяцам (months)")
 
 # агрегируем по месяцу (mean) и показываем 4 ряда: fact/ai/catboost/baseline
 df_cmp = (
@@ -305,13 +305,22 @@ if "catboost_pct" in df_filt.columns:
     )
     df_cmp = df_cmp.merge(df_cb_month, on="month", how="left")
 
-st.dataframe(df_cmp)
+df_cmp_display = df_cmp.copy()
+# месяц в формате YYYY-MM
+df_cmp_display["month"] = df_cmp_display["month"].dt.strftime("%Y-%m")
+# округляем значения до целых
+num_cols = [c for c in df_cmp_display.columns if c != "month"]
+df_cmp_display[num_cols] = df_cmp_display[num_cols].round(0)
+st.dataframe(df_cmp_display)
 
 chart_cols = ["fact", "ai", "baseline"]
 if "catboost" in df_cmp.columns:
     chart_cols.insert(2, "catboost")
 
-st.line_chart(df_cmp.set_index("month")[chart_cols])
+# подписи месяцев для оси (axis)
+df_cmp_chart = df_cmp.copy()
+df_cmp_chart["month_label"] = df_cmp_chart["month"].dt.strftime("%b %Y")
+st.line_chart(df_cmp_chart.set_index("month_label")[chart_cols])
 
 sources = {
     "ai": df_filt["ai_pct"],
@@ -420,7 +429,7 @@ else:
     st.write("Недостаточно данных для построения графика.")
 
 
-st.subheader("Тепловая карта (heatmap) ошибок по разрезам")
+st.subheader("Тепловая карта (heatmap) ошибок по разрезам: Модель (resist_id) × месяц")
 
 metric_sel = st.selectbox(
     "Метрика (metric)",
@@ -434,28 +443,22 @@ source_sel = st.selectbox(
     index=0,
 )
 
-slice_sel = st.selectbox(
-    "Разрез (slice)",
-    options=["Подразделение × месяц", "Модель (resist_id) × месяц"],
-    index=0,
-)
-
 if source_sel == "ai":
     pred_col = "ai_pct"
-    df_h_base = df_filt
 elif source_sel == "baseline":
     pred_col = "baseline_pct"
-    df_h_base = df_common
 else:
     pred_col = "catboost_pct"
-    df_h_base = df_filt[df_filt["catboost_pct"].notna()]
 
-if slice_sel.startswith("Подразделение"):
-    group_keys = ["division_title", "month"]
-    row_key = "division_title"
-else:
-    group_keys = ["resist_id", "month"]
-    row_key = "resist_id"
+# общий набор (common set) для всех источников
+common_cols = ["fact_pct", "ai_pct", "baseline_pct"]
+if "catboost_pct" in df_filt.columns:
+    common_cols.append("catboost_pct")
+df_h_base = df_filt.dropna(subset=common_cols).copy()
+
+# фиксированный разрез: resist_id × month
+group_keys = ["resist_id", "month"]
+row_key = "resist_id"
 
 rows = []
 for keys, grp in df_h_base.groupby(group_keys):
