@@ -11,6 +11,7 @@ WORKLOAD_PATH = Path("data/processed/workload_from_history.csv")
 EXCEL_SVOD_CSV = Path("data/processed/excel_svod_workload.csv")
 CATBOOST_PRED_CSV = Path("data/processed/model_predictions_catboost_v1.csv")
 SHOW_EXCEL_BLOCK = False  # вернуть Excel блок -> поставь True
+PREDICT_COMMENT = "first_predict_value_record"
 
 
 @st.cache_data
@@ -309,6 +310,19 @@ if division_sel != "(все)":
 
 df_filt = df[mask].copy()
 
+df_metrics = df_filt.copy()
+if mode.startswith("Operations"):
+    # исключаем строки с сохранённым прогнозом (forecast) вместо факта (fact)
+    if "comment" in df_metrics.columns:
+        df_metrics = df_metrics[df_metrics["comment"] != PREDICT_COMMENT]
+    if "forecast" in df_metrics.columns:
+        df_metrics = df_metrics[~df_metrics["forecast"].fillna(False)]
+    if df_metrics.empty:
+        st.warning(
+            "Нет строк с фактом (fact) для операций (operations) после фильтров. "
+            "Метрики (metrics) могут быть некорректны."
+        )
+
 
 if mode.startswith("Workload"):
     st.title("Оценка качества прогноза нагрузки (workload, %)")
@@ -352,25 +366,25 @@ df_cmp_chart["month_label"] = df_cmp_chart["month"].dt.strftime("%b %Y")
 st.line_chart(df_cmp_chart.set_index("month_label")[chart_cols])
 
 sources = {
-    "ai": df_filt[ai_col],
-    "baseline": df_filt[baseline_col],
+    "ai": df_metrics[ai_col],
+    "baseline": df_metrics[baseline_col],
 }
-if catboost_col in df_filt.columns:
-    sources["catboost_v1"] = df_filt[catboost_col]
+if catboost_col in df_metrics.columns:
+    sources["catboost_v1"] = df_metrics[catboost_col]
 
-df_common = df_filt[df_filt["baseline_pred"].notna()].copy()
-coverage = (len(df_common) / len(df_filt)) if len(df_filt) else np.nan
+df_common = df_metrics[df_metrics["baseline_pred"].notna()].copy()
+coverage = (len(df_common) / len(df_metrics)) if len(df_metrics) else np.nan
 
 rows = []
 
 # AI на всех данных (ai)
-m_ai_all = compute_metrics(df_filt[fact_col], df_filt[ai_col], **METRICS_KW)
+m_ai_all = compute_metrics(df_metrics[fact_col], df_metrics[ai_col], **METRICS_KW)
 m_ai_all["source"] = "ai"
 rows.append(m_ai_all)
 
 # CatBoost на всех данных (catboost_all)
-if catboost_col in df_filt.columns:
-    df_cb = df_filt[df_filt[catboost_col].notna()]
+if catboost_col in df_metrics.columns:
+    df_cb = df_metrics[df_metrics[catboost_col].notna()]
     m_cb_all = compute_metrics(df_cb[fact_col], df_cb[catboost_col], **METRICS_KW)
     m_cb_all["source"] = "catboost_v1"
     rows.append(m_cb_all)
@@ -399,7 +413,7 @@ if "baseline_rule" in df_filt.columns:
 st.subheader("Метрики по подразделениям (divisions)")
 
 rows = []
-for div, grp in df_filt.groupby("division_title"):
+for div, grp in df_metrics.groupby("division_title"):
     grp_common = grp[grp["baseline_pred"].notna()]
 
     m_ai = compute_metrics(grp_common[fact_col], grp_common[ai_col], **METRICS_KW)
@@ -434,7 +448,7 @@ st.dataframe(pivot_div.style.format("{:.2f}"))
 st.subheader("Динамика MAE по месяцам (months)")
 
 rows = []
-for month, grp in df_filt.groupby("month"):
+for month, grp in df_metrics.groupby("month"):
     grp_common = grp[grp["baseline_pred"].notna()]
     for name, col in [("ai", ai_col), ("baseline", baseline_col)]:
         m = compute_metrics(grp_common[fact_col], grp_common[col], **METRICS_KW)
@@ -481,9 +495,9 @@ else:
 
 # общий набор (common set) для всех источников
 common_cols = [fact_col, ai_col, baseline_col]
-if catboost_col in df_filt.columns:
+if catboost_col in df_metrics.columns:
     common_cols.append(catboost_col)
-df_h_base = df_filt.dropna(subset=common_cols).copy()
+df_h_base = df_metrics.dropna(subset=common_cols).copy()
 
 # фиксированный разрез: resist_id × month
 group_keys = ["resist_id", "month"]
