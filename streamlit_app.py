@@ -468,6 +468,13 @@ if mode.startswith("Operations") and "operation_id" in df_metrics.columns:
         )
         st.dataframe(pivot_op.style.format("{:.2f}"))
 
+        st.subheader("Средние метрики по всем операциям (operation_id)")
+        avg_metrics = (
+            df_op.groupby("source")[["MAE", "RMSE", "MAPE_%", "large_error_share"]]
+            .mean()
+        )
+        st.dataframe(avg_metrics.style.format("{:.2f}"))
+
     st.subheader("Метрики по операциям и месяцам (operation_id × month)")
     rows = []
     for (op_id, month), grp in df_metrics.groupby(["operation_id", "month"]):
