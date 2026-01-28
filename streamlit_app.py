@@ -442,6 +442,57 @@ pivot_div = df_div.pivot_table(
 
 st.dataframe(pivot_div.style.format("{:.2f}"))
 
+if mode.startswith("Operations") and "operation_id" in df_metrics.columns:
+    st.subheader("Метрики по операциям (operation_id)")
+
+    rows = []
+    for op_id, grp in df_metrics.groupby("operation_id"):
+        m_ai = compute_metrics(grp[fact_col], grp[ai_col], **METRICS_KW)
+        m_ai["operation_id"] = op_id
+        m_ai["source"] = "ai"
+        rows.append(m_ai)
+
+        m_bl = compute_metrics(grp[fact_col], grp[baseline_col], **METRICS_KW)
+        m_bl["operation_id"] = op_id
+        m_bl["source"] = "baseline"
+        rows.append(m_bl)
+
+    df_op = pd.DataFrame(rows)
+    if df_op.empty:
+        st.write("Недостаточно данных для метрик по операциям (operation_id).")
+    else:
+        pivot_op = df_op.pivot_table(
+            index="operation_id",
+            columns="source",
+            values=["MAE", "RMSE", "MAPE_%", "large_error_share"],
+        )
+        st.dataframe(pivot_op.style.format("{:.2f}"))
+
+    st.subheader("Метрики по операциям и месяцам (operation_id × month)")
+    rows = []
+    for (op_id, month), grp in df_metrics.groupby(["operation_id", "month"]):
+        m = compute_metrics(grp[fact_col], grp[ai_col], **METRICS_KW)
+        rows.append({"operation_id": op_id, "month": month, **m})
+    df_op_month = pd.DataFrame(rows)
+    if df_op_month.empty:
+        st.write("Недостаточно данных для метрик по операциям и месяцам.")
+    else:
+        df_op_month = df_op_month.sort_values(["operation_id", "month"])
+        df_op_month["month"] = df_op_month["month"].dt.strftime("%Y-%m")
+        st.dataframe(df_op_month.set_index(["operation_id", "month"]).style.format("{:.2f}"))
+
+    st.subheader("Метрики по операциям за 2025 (operation_id, year total)")
+    rows = []
+    for op_id, grp in df_metrics.groupby("operation_id"):
+        m = compute_metrics(grp[fact_col], grp[ai_col], **METRICS_KW)
+        rows.append({"operation_id": op_id, **m})
+    df_op_year = pd.DataFrame(rows)
+    if df_op_year.empty:
+        st.write("Недостаточно данных для метрик по операциям за год.")
+    else:
+        df_op_year = df_op_year.sort_values("operation_id")
+        st.dataframe(df_op_year.set_index("operation_id").style.format("{:.2f}"))
+
 
 st.subheader("Динамика MAE по месяцам (months)")
 
