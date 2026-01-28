@@ -312,16 +312,9 @@ df_filt = df[mask].copy()
 
 df_metrics = df_filt.copy()
 if mode.startswith("Operations"):
-    # исключаем строки с сохранённым прогнозом (forecast) вместо факта (fact)
-    if "comment" in df_metrics.columns:
-        df_metrics = df_metrics[df_metrics["comment"] != PREDICT_COMMENT]
-    if "forecast" in df_metrics.columns:
-        df_metrics = df_metrics[~df_metrics["forecast"].fillna(False)]
-    if df_metrics.empty:
-        st.warning(
-            "Нет строк с фактом (fact) для операций (operations) после фильтров. "
-            "Метрики (metrics) могут быть некорректны."
-        )
+    # Примечание: фильтрацию прогнозных записей (forecast records) намеренно отключили.
+    # Это может занижать ошибки (errors), так как fact и ai_pred совпадают в таких строках.
+    pass
 
 
 if mode.startswith("Workload"):
@@ -329,22 +322,26 @@ if mode.startswith("Workload"):
 else:
     st.title("Оценка качества прогноза количества операций (operations)")
 st.write(f"Строк после фильтрации: {len(df_filt):,}")
+if mode.startswith("Operations") and "operation_id" in df_metrics.columns:
+    op_count = df_metrics["operation_id"].nunique(dropna=True)
+    st.write(f"Количество видов операций (operation_id): {op_count:,}")
 
 st.subheader(f"Сравнение значений {value_label} по месяцам (months)")
 
-# агрегируем по месяцу (mean) и показываем 4 ряда: fact/ai/catboost/baseline
+# агрегируем по месяцу: для Operations (operations) суммируем, для Workload (workload) усредняем
+agg_fn = "sum" if mode.startswith("Operations") else "mean"
 df_cmp = (
     df_filt.groupby("month", as_index=False)
     .agg(
-        fact=(fact_col, "mean"),
-        ai=(ai_col, "mean"),
-        baseline=(baseline_col, "mean"),
+        fact=(fact_col, agg_fn),
+        ai=(ai_col, agg_fn),
+        baseline=(baseline_col, agg_fn),
     )
 )
 if catboost_col in df_filt.columns:
     df_cb_month = (
         df_filt.groupby("month", as_index=False)
-        .agg(catboost=(catboost_col, "mean"))
+        .agg(catboost=(catboost_col, agg_fn))
     )
     df_cmp = df_cmp.merge(df_cb_month, on="month", how="left")
 
@@ -362,6 +359,7 @@ if "catboost" in df_cmp.columns:
 
 # подписи месяцев для оси (axis)
 df_cmp_chart = df_cmp.copy()
+df_cmp_chart = df_cmp_chart.sort_values("month")
 df_cmp_chart["month_label"] = df_cmp_chart["month"].dt.strftime("%b %Y")
 st.line_chart(df_cmp_chart.set_index("month_label")[chart_cols])
 
@@ -471,6 +469,19 @@ if not df_month.empty:
 else:
     st.write("Недостаточно данных для построения графика.")
 
+st.subheader("Динамика метрик по месяцам (ai vs fact)")
+rows = []
+for month, grp in df_metrics.groupby("month"):
+    m = compute_metrics(grp[fact_col], grp[ai_col], **METRICS_KW)
+    rows.append({"month": month, **m})
+
+df_month_metrics = pd.DataFrame(rows)
+if df_month_metrics.empty:
+    st.write("Недостаточно данных для расчёта метрик по месяцам.")
+else:
+    df_month_metrics = df_month_metrics.sort_values("month")
+    df_month_metrics["month"] = df_month_metrics["month"].dt.strftime("%Y-%m")
+    st.dataframe(df_month_metrics.set_index("month").style.format("{:.2f}"))
 
 st.subheader("Тепловая карта (heatmap) ошибок по разрезам: Модель (resist_id) × месяц")
 
