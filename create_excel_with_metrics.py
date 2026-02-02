@@ -1,64 +1,171 @@
 import pandas as pd
-import openpyxl
+import numpy as np
+from openpyxl import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+from openpyxl.utils import get_column_letter
 
-# Создаем структуру таблицы
-columns = [
-    "ID (A)", 
-    "Название операции (B)", 
-    "Хронометраж, мин (C)", 
-    "Коэфф. ПШЕ (D)", 
-    "Факт, шт (E)", 
-    "Прогноз, шт (F)", 
-    "Разница, шт (G)", 
-    "MAPE % (шт) (H)",
-    "Факт, ПШЕ (I)",
-    "Прогноз, ПШЕ (J)",
-    "Разница, ПШЕ (K)",
-    "MAPE % (ПШЕ) (L)",
-    "Квадрат ошибки (M)"
+# --- 1. Генерация тестовых данных (Заглушка) ---
+# Создаем список из 10 операций для примера
+months = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 
+          'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь']
+num_ops = 10
+ids = np.arange(1001, 1001 + num_ops)
+names = [f"Операция {i}" for i in range(1, num_ops + 1)]
+
+# Случайные данные факта и прогноза
+data_fact = np.random.randint(50, 500, size=(num_ops, 12))
+data_forecast = data_fact + np.random.randint(-50, 50, size=(num_ops, 12)) # Прогноз с ошибкой
+chronometry = np.random.randint(5, 120, size=num_ops) # Хронометраж в минутах
+
+# Создаем DataFrames
+df_fact = pd.DataFrame(data_fact, columns=months)
+df_fact.insert(0, 'Название операции', names)
+df_fact.insert(0, 'ID', ids)
+
+df_forecast = pd.DataFrame(data_forecast, columns=months)
+df_forecast.insert(0, 'Название операции', names)
+df_forecast.insert(0, 'ID', ids)
+
+# --- 2. Создание Excel файла ---
+wb = Workbook()
+
+# === ЛИСТ 1: Фактические значения ===
+ws1 = wb.active
+ws1.title = "Fact_Values"
+
+# Записываем заголовки
+headers_vals = ['ID', 'Название операции'] + months + ['Итого за год']
+ws1.append(headers_vals)
+
+# Записываем данные построчно
+for r in dataframe_to_rows(df_fact, index=False, header=False):
+    ws1.append(r)
+
+# Добавляем формулы сумм построчно (столбец O - это 15-й столбец)
+max_row = len(df_fact) + 1
+for row in range(2, max_row + 1):
+    # Формула суммы с C (3) по N (14)
+    ws1[f'O{row}'] = f"=SUM(C{row}:N{row})"
+
+# Итого внизу столбца "Итого за год"
+ws1[f'A{max_row + 1}'] = "ОБЩИЙ ИТОГ:"
+ws1[f'O{max_row + 1}'] = f"=SUM(O2:O{max_row})"
+ws1[f'O{max_row + 1}'].font = Font(bold=True)
+
+
+# === ЛИСТ 2: Прогнозные значения ===
+ws2 = wb.create_sheet("Forecast_Values")
+
+# Заголовки
+ws2.append(headers_vals)
+
+# Данные
+for r in dataframe_to_rows(df_forecast, index=False, header=False):
+    ws2.append(r)
+
+# Формулы сумм построчно
+for row in range(2, max_row + 1):
+    ws2[f'O{row}'] = f"=SUM(C{row}:N{row})"
+
+# Итого внизу
+ws2[f'A{max_row + 1}'] = "ОБЩИЙ ИТОГ:"
+ws2[f'O{max_row + 1}'] = f"=SUM(O2:O{max_row})"
+ws2[f'O{max_row + 1}'].font = Font(bold=True)
+
+
+# === ЛИСТ 3: Метрики и расчеты ===
+ws3 = wb.create_sheet("Metrics_Calculation")
+
+# Заголовки метрик
+headers_metrics = [
+    'ID', 
+    'Название операции', 
+    'Хронометраж (мин)', 
+    'Коэфф. ПШЕ', 
+    'Разница (Факт-Прогноз) шт', 
+    'Разница (Факт-Прогноз) ПШЕ', 
+    'MAPE % (шт)', 
+    'MAPE % (ПШЕ)', 
+    'Квадрат ошибки (ПШЕ)' # Нужно для RMSE
 ]
+ws3.append(headers_metrics)
 
-# Создаем пустой DataFrame
-df = pd.DataFrame(columns=columns)
+# Заполняем формулами
+for i in range(num_ops):
+    row = i + 2
+    
+    # Ссылки на ID и Имя (берем с листа Fact)
+    ws3[f'A{row}'] = f"='Fact_Values'!A{row}"
+    ws3[f'B{row}'] = f"='Fact_Values'!B{row}"
+    
+    # Хронометраж (вставляем значение)
+    ws3[f'C{row}'] = chronometry[i]
+    
+    # Коэффициент ПШЕ: мин / 60 / 148.3
+    ws3[f'D{row}'] = f"=C{row}/60/148.3"
+    
+    # Разница ШТ: (Итого факт - Итого прогноз)
+    # Ссылаемся на столбец O (15-й) в листах факта и прогноза
+    ws3[f'E{row}'] = f"='Fact_Values'!O{row} - 'Forecast_Values'!O{row}"
+    
+    # Разница ПШЕ: Разница ШТ * Коэфф
+    ws3[f'F{row}'] = f"=E{row}*D{row}"
+    
+    # MAPE % (шт): ABS(Разница) / Факт. IFERROR для защиты от деления на 0
+    ws3[f'G{row}'] = f"=IFERROR(ABS(E{row})/'Fact_Values'!O{row}, 0)"
+    ws3[f'G{row}'].number_format = '0.00%'
+    
+    # MAPE % (ПШЕ): ABS(Разница ПШЕ) / (Факт ШТ * Коэфф)
+    # Математически равно MAPE шт, но разнесем для наглядности формул
+    ws3[f'H{row}'] = f"=IFERROR(ABS(F{row})/('Fact_Values'!O{row}*D{row}), 0)"
+    ws3[f'H{row}'].number_format = '0.00%'
+    
+    # Квадрат ошибки ПШЕ (для RMSE): (Разница ПШЕ)^2
+    ws3[f'I{row}'] = f"=F{row}^2"
 
-# Сохраняем в Excel, чтобы добавить формулы
-file_path = 'shablon_analiza_modeli.xlsx'
-writer = pd.ExcelWriter(file_path, engine='openpyxl')
-df.to_excel(writer, index=False, sheet_name='Анализ точности')
+# === ИТОГИ ВНИЗУ ЛИСТА 3 ===
+footer_row = num_ops + 2
 
-workbook = writer.book
-worksheet = writer.sheets['Анализ точности']
+ws3[f'A{footer_row}'] = "СРЕДНИЕ ПОКАЗАТЕЛИ:"
+ws3[f'A{footer_row}'].font = Font(bold=True)
 
-# Добавляем пример формул для строк 2-100
-# Обратите внимание: Google Sheets/Excel автоматически переведет формулы на русский, если у вас русский интерфейс
-for row in range(2, 102):
-    # Коэффициент перевода в ПШЕ: (Минуты / 60) / 148.3
-    worksheet[f'D{row}'] = f'=C{row}/60/148.3'
-    
-    # Разница в штуках (модуль)
-    worksheet[f'G{row}'] = f'=ABS(E{row}-F{row})'
-    
-    # MAPE % (штуки). IFERROR нужен, чтобы не было ошибки при делении на 0
-    worksheet[f'H{row}'] = f'=IFERROR(G{row}/E{row}, 0)'
-    
-    # Факт ПШЕ (Факт шт * Коэфф)
-    worksheet[f'I{row}'] = f'=E{row}*D{row}'
-    
-    # Прогноз ПШЕ (Прогноз шт * Коэфф)
-    worksheet[f'J{row}'] = f'=F{row}*D{row}'
-    
-    # Разница ПШЕ
-    worksheet[f'K{row}'] = f'=ABS(I{row}-J{row})'
-    
-    # MAPE % (ПШЕ)
-    worksheet[f'L{row}'] = f'=IFERROR(K{row}/I{row}, 0)'
-    
-    # Квадрат ошибки для RMSE
-    worksheet[f'M{row}'] = f'=(I{row}-J{row})^2'
+# Средний MAPE (шт)
+ws3[f'G{footer_row}'] = f"=AVERAGE(G2:G{footer_row-1})"
+ws3[f'G{footer_row}'].number_format = '0.00%'
+ws3[f'G{footer_row}'].font = Font(bold=True)
 
-# Добавляем строку ИТОГО сверху (в строку 1, сдвинув заголовки, но для простоты добавим в ячейки справа от таблицы)
-# В реальном файле лучше закрепить первую строку
+# Средний MAPE (ПШЕ)
+ws3[f'H{footer_row}'] = f"=AVERAGE(H2:H{footer_row-1})"
+ws3[f'H{footer_row}'].number_format = '0.00%'
+ws3[f'H{footer_row}'].font = Font(bold=True)
 
-writer.close()
+# RMSE (ПШЕ)
+# Формула: КОРЕНЬ( СРЗНАЧ( Квадратов ошибок ) )
+ws3[f'I{footer_row}'] = f"=SQRT(AVERAGE(I2:I{footer_row-1}))"
+ws3[f'I{footer_row}'].font = Font(bold=True, color="FF0000") # Выделим красным
+ws3[f'I{footer_row - 1}'] = "(RMSE считаем по этому столбцу)" # Подсказка
 
-print(f"Файл {file_path} успешно создан.")
+
+# --- 3. Оформление (Красота) ---
+thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), 
+                     top=Side(style='thin'), bottom=Side(style='thin'))
+
+for sheet in [ws1, ws2, ws3]:
+    # Автоширина столбцов
+    for column_cells in sheet.columns:
+        length = max(len(str(cell.value)) if cell.value else 0 for cell in column_cells)
+        sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = length + 5
+    
+    # Границы и заголовки
+    for row in sheet.iter_rows():
+        for cell in row:
+            cell.border = thin_border
+            if cell.row == 1:
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="DDDDDD", end_color="DDDDDD", fill_type="solid")
+
+# Сохранение файла
+file_name = "Analysis_Model_Forecast_2025.xlsx"
+wb.save(file_name)
+print(f"Файл '{file_name}' успешно создан! Запустите этот код на своем компьютере.")
