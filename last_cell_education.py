@@ -313,273 +313,130 @@ wmape_hist_cols = [c for c in df_hist.columns if c.startswith("wmape_catboost_ve
 if wmape_hist_cols:
     df_hist = df_hist.drop(columns=wmape_hist_cols)
 
+# Kolonki WAPE po operacijam dlja kazhdogo prognoza na Sheet1 (povtoreno po strokam)
+def _forecast_ver(col):
+    if col == "fact_predict":
+        return 0
+    s = col.replace("predict_catboost_ver", "").split("_")[0]
+    return int(s) if s.isdigit() else 0
+forecast_ops_cols = ["fact_predict"] + [
+    c for c in df_hist.columns
+    if c.startswith("predict_catboost_ver") and not c.endswith("_fts")
+    and c.replace("predict_catboost_ver", "").split("_")[0].isdigit()
+]
+forecast_ops_cols = sorted(set(forecast_ops_cols), key=_forecast_ver)
+for pred_col in forecast_ops_cols:
+    if pred_col not in df_hist.columns:
+        continue
+    wape_val = calc_wmape(df_hist["fact_value"], df_hist[pred_col])
+    wape_col = "wape_fact_predict_ops" if pred_col == "fact_predict" else f"wape_{pred_col}_ops"
+    df_hist[wape_col] = wape_val
+
 df_hist.to_excel(history_xlsx, index=False)
 print("История сохранена:", history_xlsx)
 
-# --- Формирование вкладки metrics с формулами Excel ---
+# --- Metriki: svodnyj list + listy po resist_id (raschety v Python, bez formul Excel) ---
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
 
 
-def _extract_ver(col_name: str) -> int:
-    return int(col_name.replace("predict_catboost_ver", ""))
+def _get_forecast_specs(df_hist_local: pd.DataFrame):
+    specs = [{"forecast_name": "fact_predict", "pred_ops_col": "fact_predict", "mape_fts_col": "mape_fact_predict_fts"}]
+    cat_ops = [c for c in df_hist_local.columns if c.startswith("predict_catboost_ver") and not c.endswith("_fts")
+               and c.replace("predict_catboost_ver", "").split("_")[0].isdigit()]
+    cat_ops = sorted(cat_ops, key=lambda c: int(c.replace("predict_catboost_ver", "").split("_")[0]))
+    for ops_col in cat_ops:
+        mape_col = f"mape_catboost_ver{ops_col.replace('predict_catboost_ver', '').split('_')[0]}_fts"
+        if mape_col in df_hist_local.columns:
+            specs.append({"forecast_name": ops_col, "pred_ops_col": ops_col, "mape_fts_col": mape_col})
+    return specs
 
 
-def _collect_forecasts(df_hist_local: pd.DataFrame):
-    forecasts = [{
-        "forecast_name": "fact_predict",
-        "pred_ops_col": "fact_predict",
-        "pred_fts_col": "predict_fts",
-    }]
+df_hist_num = df_hist.copy()
+df_hist_num["year"] = pd.to_numeric(df_hist_num["year"], errors="coerce")
+df_hist_num["month"] = pd.to_numeric(df_hist_num["month"], errors="coerce")
+df_hist_num = df_hist_num.dropna(subset=["year", "month"])
+df_hist_num["year"] = df_hist_num["year"].astype(int)
+df_hist_num["month"] = df_hist_num["month"].astype(int)
 
-    cat_ops_cols = [
-        c for c in df_hist_local.columns
-        if c.startswith("predict_catboost_ver") and c.replace("predict_catboost_ver", "").isdigit()
-    ]
-    cat_ops_cols = sorted(cat_ops_cols, key=_extract_ver)
-
-    for ops_col in cat_ops_cols:
-        fts_col = f"{ops_col}_fts"
-        if fts_col in df_hist_local.columns:
-            forecasts.append({
-                "forecast_name": ops_col,
-                "pred_ops_col": ops_col,
-                "pred_fts_col": fts_col,
-            })
-
-    return forecasts
-
-
-def _build_metrics_rows(df_hist_local: pd.DataFrame, forecast_specs):
-    rows = []
-
-    years = sorted(pd.to_numeric(df_hist_local["year"], errors="coerce").dropna().astype(int).unique().tolist())
-
-    for spec in forecast_specs:
-        forecast_name = spec["forecast_name"]
-
-        for year in years:
-            df_year = df_hist_local[pd.to_numeric(df_hist_local["year"], errors="coerce") == year]
-            if df_year.empty:
-                continue
-
-            months = sorted(pd.to_numeric(df_year["month"], errors="coerce").dropna().astype(int).unique().tolist())
-
-            # a) по каждой операции за месяц
-            for month in months:
-                df_ym = df_year[pd.to_numeric(df_year["month"], errors="coerce") == month]
-                ops = sorted(df_ym["operation_id"].dropna().astype(str).unique().tolist())
-                for op in ops:
-                    rows.append({
-                        "aggregation_level": "operation",
-                        "year": year,
-                        "period_type": "MONTH",
-                        "month": month,
-                        "group_key": op,
-                        "forecast_name": forecast_name,
-                        "key_col_name": "operation_id",
-                    })
-
-            # a) по каждой операции за год
-            ops_year = sorted(df_year["operation_id"].dropna().astype(str).unique().tolist())
-            for op in ops_year:
-                rows.append({
-                    "aggregation_level": "operation",
-                    "year": year,
-                    "period_type": "YEAR_TOTAL",
-                    "month": "",
-                    "group_key": op,
-                    "forecast_name": forecast_name,
-                    "key_col_name": "operation_id",
-                })
-
-            # b) по каждому подразделению за месяц
-            for month in months:
-                df_ym = df_year[pd.to_numeric(df_year["month"], errors="coerce") == month]
-                divisions = sorted(df_ym["division_title"].dropna().astype(str).unique().tolist())
-                for div in divisions:
-                    rows.append({
-                        "aggregation_level": "division",
-                        "year": year,
-                        "period_type": "MONTH",
-                        "month": month,
-                        "group_key": div,
-                        "forecast_name": forecast_name,
-                        "key_col_name": "division_title",
-                    })
-
-            # b) по каждому подразделению за год
-            divisions_year = sorted(df_year["division_title"].dropna().astype(str).unique().tolist())
-            for div in divisions_year:
-                rows.append({
-                    "aggregation_level": "division",
-                    "year": year,
-                    "period_type": "YEAR_TOTAL",
-                    "month": "",
-                    "group_key": div,
-                    "forecast_name": forecast_name,
-                    "key_col_name": "division_title",
-                })
-
-            # c) по всем подразделениям за месяц
-            for month in months:
-                rows.append({
-                    "aggregation_level": "total",
-                    "year": year,
-                    "period_type": "MONTH",
-                    "month": month,
-                    "group_key": "ALL",
-                    "forecast_name": forecast_name,
-                    # Для Excel-формул используем валидную колонку-ключ,
-                    # но фильтр по group_key для total отключается отдельным множителем.
-                    "key_col_name": "year",
-                })
-
-            # c) по всем подразделениям за год
-            rows.append({
-                "aggregation_level": "total",
-                "year": year,
-                "period_type": "YEAR_TOTAL",
-                "month": "",
-                "group_key": "ALL",
-                "forecast_name": forecast_name,
-                "key_col_name": "year",
-            })
-
-    return pd.DataFrame(rows)
-
-
-required_cols = {
-    "year", "month", "division_title", "operation_id",
-    "fact_value", "fact_fts", "fact_predict", "predict_fts",
-}
-missing_required = [c for c in required_cols if c not in df_hist.columns]
-if missing_required:
-    print("Внимание: пропущены обязательные колонки для metrics:", missing_required)
+required_cols = {"year", "month", "resist_id", "fact_value", "fact_fts", "fact_predict", "predict_fts"}
+missing = [c for c in required_cols if c not in df_hist.columns]
+if missing:
+    print("Vnimanie: net kolonok dlja metrik:", missing)
 else:
-    forecast_specs = _collect_forecasts(df_hist)
-    if len(forecast_specs) == 0:
-        print("Внимание: не найдено ни одного прогноза для metrics")
+    specs = _get_forecast_specs(df_hist)
+    if not specs:
+        print("Vnimanie: ne najdeno ni odnogo prognoza dlja metrik")
     else:
-        metrics_rows = _build_metrics_rows(df_hist, forecast_specs)
-        forecast_map_df = pd.DataFrame(forecast_specs)
-        metrics_rows = metrics_rows.merge(forecast_map_df, on="forecast_name", how="left")
+        summary_rows = []
+        resist_ids = sorted(pd.to_numeric(df_hist_num["resist_id"], errors="coerce").dropna().astype(int).unique().tolist())
+        years = sorted(df_hist_num["year"].unique().tolist())
+        for rid in resist_ids + ["ALL"]:
+            mask_resist = df_hist_num["resist_id"] == rid if rid != "ALL" else pd.Series(True, index=df_hist_num.index)
+            df_r = df_hist_num.loc[mask_resist]
+            if df_r.empty:
+                continue
+            months_in_data = sorted(df_r["month"].unique().tolist())
+            for period_type, month_val in [("MONTH", m) for m in months_in_data] + [("YEAR", "YEAR")]:
+                if period_type == "YEAR":
+                    df_slice = df_r
+                else:
+                    df_slice = df_r[df_r["month"] == month_val]
+                if df_slice.empty:
+                    continue
+                for s in specs:
+                    pred_col = s["pred_ops_col"]
+                    mape_col = s["mape_fts_col"]
+                    if pred_col not in df_slice.columns or mape_col not in df_slice.columns:
+                        continue
+                    wape = calc_wmape(df_slice["fact_value"], df_slice[pred_col])
+                    mape_fts = df_slice[mape_col].mean()
+                    summary_rows.append({
+                        "resist_id": rid,
+                        "month": month_val if period_type == "MONTH" else "YEAR",
+                        "forecast_name": s["forecast_name"],
+                        "wape_ops": round(wape, 2) if pd.notna(wape) else "",
+                        "mape_fts": round(mape_fts, 2) if pd.notna(mape_fts) else "",
+                    })
+        summary_df = pd.DataFrame(summary_rows)
 
         wb = load_workbook(history_xlsx)
-        ws_sheet1 = wb["Sheet1"]
-        sheet1_last_row = max(ws_sheet1.max_row, 2)
-        sheet1_data_range = f"Sheet1!$2:${sheet1_last_row}"
+        for name in list(wb.sheetnames):
+            if name == "metrics" or (name.startswith("resist_") and name[7:].isdigit()):
+                wb.remove(wb[name])
+        if "Metriki_svod" in wb.sheetnames:
+            wb.remove(wb["Metriki_svod"])
 
-        if "metrics" in wb.sheetnames:
-            wb.remove(wb["metrics"])
-        ws = wb.create_sheet("metrics")
+        ws_svod = wb.create_sheet("Metriki_svod", 1)
+        ws_svod.append(["resist_id", "month", "forecast_name", "wape_ops", "mape_fts"])
+        for _, r in summary_df.iterrows():
+            ws_svod.append([r["resist_id"], r["month"], r["forecast_name"], r["wape_ops"], r["mape_fts"]])
 
-        headers = [
-            "aggregation_level", "year", "period_type", "month", "group_key",
-            "forecast_name", "pred_ops_col", "pred_fts_col", "key_col_name",
-            "n_rows", "wape_ops", "mape_fts",
-        ]
-        ws.append(headers)
-
-        # Заполняем базовые поля строк
-        for _, r in metrics_rows.iterrows():
-            ws.append([
-                r["aggregation_level"],
-                int(r["year"]),
-                r["period_type"],
-                r["month"],
-                r["group_key"],
-                r["forecast_name"],
-                r["pred_ops_col"],
-                r["pred_fts_col"],
-                r["key_col_name"],
-                "",  # formula
-                "",  # formula
-                "",  # formula
-            ])
-
-        data_start_row = 2
-        data_end_row = 1 + len(metrics_rows)
-
-        # Формулы в строках метрик
-        for excel_row in range(data_start_row, data_end_row + 1):
-            # n_rows (Excel 2016 compatible)
-            ws.cell(
-                row=excel_row,
-                column=10,
-                value=(
-                    f'=SUMPRODUCT('
-                    f'--(INDEX({sheet1_data_range},0,MATCH("year",Sheet1!$1:$1,0))=$B{excel_row}),' 
-                    f'IF($C{excel_row}="YEAR_TOTAL",1,--(INDEX({sheet1_data_range},0,MATCH("month",Sheet1!$1:$1,0))=$D{excel_row})),'
-                    f'(($A{excel_row}="total")+($A{excel_row}<>"total")*--(INDEX({sheet1_data_range},0,MATCH($I{excel_row},Sheet1!$1:$1,0))=$E{excel_row}))'
-                    f')'
-                )
-            )
-
-            # WAPE по операциям (без таймингов), Excel 2016 compatible
-            ws.cell(
-                row=excel_row,
-                column=11,
-                value=(
-                    f'=IFERROR('
-                    f'SUMPRODUCT('
-                    f'--(INDEX({sheet1_data_range},0,MATCH("year",Sheet1!$1:$1,0))=$B{excel_row}),' 
-                    f'IF($C{excel_row}="YEAR_TOTAL",1,--(INDEX({sheet1_data_range},0,MATCH("month",Sheet1!$1:$1,0))=$D{excel_row})),'
-                    f'(($A{excel_row}="total")+($A{excel_row}<>"total")*--(INDEX({sheet1_data_range},0,MATCH($I{excel_row},Sheet1!$1:$1,0))=$E{excel_row})),'
-                    f'ABS(N(INDEX({sheet1_data_range},0,MATCH("fact_value",Sheet1!$1:$1,0)))-N(INDEX({sheet1_data_range},0,MATCH($G{excel_row},Sheet1!$1:$1,0))))'
-                    f')/'
-                    f'SUMPRODUCT('
-                    f'--(INDEX({sheet1_data_range},0,MATCH("year",Sheet1!$1:$1,0))=$B{excel_row}),' 
-                    f'IF($C{excel_row}="YEAR_TOTAL",1,--(INDEX({sheet1_data_range},0,MATCH("month",Sheet1!$1:$1,0))=$D{excel_row})),'
-                    f'(($A{excel_row}="total")+($A{excel_row}<>"total")*--(INDEX({sheet1_data_range},0,MATCH($I{excel_row},Sheet1!$1:$1,0))=$E{excel_row})),'
-                    f'ABS(N(INDEX({sheet1_data_range},0,MATCH("fact_value",Sheet1!$1:$1,0))))'
-                    f')*100,'
-                    f'NA()'
-                    f')'
-                )
-            )
-
-            # MAPE в FTS, Excel 2016 compatible
-            ws.cell(
-                row=excel_row,
-                column=12,
-                value=(
-                    f'=IFERROR('
-                    f'('
-                    f'SUMPRODUCT('
-                    f'--(INDEX({sheet1_data_range},0,MATCH("year",Sheet1!$1:$1,0))=$B{excel_row}),' 
-                    f'IF($C{excel_row}="YEAR_TOTAL",1,--(INDEX({sheet1_data_range},0,MATCH("month",Sheet1!$1:$1,0))=$D{excel_row})),'
-                    f'(($A{excel_row}="total")+($A{excel_row}<>"total")*--(INDEX({sheet1_data_range},0,MATCH($I{excel_row},Sheet1!$1:$1,0))=$E{excel_row})),'
-                    f'IF(N(INDEX({sheet1_data_range},0,MATCH("fact_fts",Sheet1!$1:$1,0)))=0,'
-                    f'IF(N(INDEX({sheet1_data_range},0,MATCH($H{excel_row},Sheet1!$1:$1,0)))=0,0,100),'
-                    f'ABS(N(INDEX({sheet1_data_range},0,MATCH("fact_fts",Sheet1!$1:$1,0)))-N(INDEX({sheet1_data_range},0,MATCH($H{excel_row},Sheet1!$1:$1,0))))/'
-                    f'ABS(N(INDEX({sheet1_data_range},0,MATCH("fact_fts",Sheet1!$1:$1,0))))*100'
-                    f')'
-                    f')/'
-                    f'SUMPRODUCT('
-                    f'--(INDEX({sheet1_data_range},0,MATCH("year",Sheet1!$1:$1,0))=$B{excel_row}),' 
-                    f'IF($C{excel_row}="YEAR_TOTAL",1,--(INDEX({sheet1_data_range},0,MATCH("month",Sheet1!$1:$1,0))=$D{excel_row})),'
-                    f'(($A{excel_row}="total")+($A{excel_row}<>"total")*--(INDEX({sheet1_data_range},0,MATCH($I{excel_row},Sheet1!$1:$1,0))=$E{excel_row}))'
-                    f')'
-                    f'),' 
-                    f'NA()'
-                    f')'
-                )
-            )
-
-        # Форматирование
-        ws.freeze_panes = "A2"
-        col_widths = {
-            1: 16, 2: 8, 3: 12, 4: 8, 5: 28, 6: 24,
-            7: 22, 8: 24, 9: 16, 10: 10, 11: 12, 12: 12,
-        }
-        for col_idx, width in col_widths.items():
-            ws.column_dimensions[get_column_letter(col_idx)].width = width
-
-        # Скрываем служебные колонки pred_ops_col/pred_fts_col/key_col_name
-        ws.column_dimensions[get_column_letter(7)].hidden = True
-        ws.column_dimensions[get_column_letter(8)].hidden = True
-        ws.column_dimensions[get_column_letter(9)].hidden = True
+        for rid in resist_ids:
+            df_r = df_hist_num[df_hist_num["resist_id"] == rid]
+            if df_r.empty:
+                continue
+            rows_r = []
+            months_in_data = sorted(df_r["month"].unique().tolist())
+            for period_type, month_val in [("MONTH", m) for m in months_in_data] + [("YEAR", "YEAR")]:
+                if period_type == "YEAR":
+                    df_slice = df_r
+                else:
+                    df_slice = df_r[df_r["month"] == month_val]
+                if df_slice.empty:
+                    continue
+                for s in specs:
+                    pred_col = s["pred_ops_col"]
+                    mape_col = s["mape_fts_col"]
+                    if pred_col not in df_slice.columns or mape_col not in df_slice.columns:
+                        continue
+                    wape = calc_wmape(df_slice["fact_value"], df_slice[pred_col])
+                    mape_fts = df_slice[mape_col].mean()
+                    rows_r.append({"month": month_val if period_type == "MONTH" else "YEAR", "forecast_name": s["forecast_name"], "wape_ops": round(wape, 2) if pd.notna(wape) else "", "mape_fts": round(mape_fts, 2) if pd.notna(mape_fts) else ""})
+            if rows_r:
+                ws_res = wb.create_sheet(f"resist_{rid}")
+                ws_res.append(["month", "forecast_name", "wape_ops", "mape_fts"])
+                for r in rows_r:
+                    ws_res.append([r["month"], r["forecast_name"], r["wape_ops"], r["mape_fts"]])
 
         wb.save(history_xlsx)
-        print("Вкладка metrics обновлена:", history_xlsx)
+        print("Listy Metriki_svod i resist_* sozdany (metriki poschitany v Python):", history_xlsx)
