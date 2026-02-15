@@ -208,6 +208,10 @@ if "square_error_catboost_ver1" not in df_pred.columns or df_pred["square_error_
 
 base_pred = df_pred.copy()
 base_pred = base_pred[key_cols + [
+    "fact_value",
+    "fact_fts",
+    "fact_predict",
+    "predict_fts",
     "mape_fact_predict_fts",
     "predict_catboost_ver1",
     "predict_catboost_ver1_fts",
@@ -285,9 +289,20 @@ else:
     if "date" in df_new.columns:
         df_new["date"] = pd.to_datetime(df_new["date"], errors="coerce").dt.date
 
-    # Для не-версионной метрики current forecast обновляем колонку без конфликтных суффиксов.
-    if "mape_fact_predict_fts" in df_hist.columns and "mape_fact_predict_fts" in df_new.columns:
-        df_hist = df_hist.drop(columns=["mape_fact_predict_fts"])
+    # Для не-версионных колонок обновляем значения без конфликтных суффиксов.
+    non_versioned_cols = [
+        "fact_value",
+        "fact_fts",
+        "fact_predict",
+        "predict_fts",
+        "mape_fact_predict_fts",
+    ]
+    cols_to_drop_before_merge = [
+        c for c in non_versioned_cols
+        if c in df_hist.columns and c in df_new.columns
+    ]
+    if cols_to_drop_before_merge:
+        df_hist = df_hist.drop(columns=cols_to_drop_before_merge)
 
     # left-merge к истории по ключам
     df_hist = df_hist.merge(df_new, on=key_cols, how="left")
@@ -415,7 +430,9 @@ def _build_metrics_rows(df_hist_local: pd.DataFrame, forecast_specs):
                     "month": month,
                     "group_key": "ALL",
                     "forecast_name": forecast_name,
-                    "key_col_name": "",
+                    # Для Excel-формул используем валидную колонку-ключ,
+                    # но фильтр по group_key для total отключается отдельным множителем.
+                    "key_col_name": "year",
                 })
 
             # c) по всем подразделениям за год
@@ -426,7 +443,7 @@ def _build_metrics_rows(df_hist_local: pd.DataFrame, forecast_specs):
                 "month": "",
                 "group_key": "ALL",
                 "forecast_name": forecast_name,
-                "key_col_name": "",
+                "key_col_name": "year",
             })
 
     return pd.DataFrame(rows)
@@ -445,8 +462,13 @@ else:
         print("Внимание: не найдено ни одного прогноза для metrics")
     else:
         metrics_rows = _build_metrics_rows(df_hist, forecast_specs)
+        forecast_map_df = pd.DataFrame(forecast_specs)
+        metrics_rows = metrics_rows.merge(forecast_map_df, on="forecast_name", how="left")
 
         wb = load_workbook(history_xlsx)
+        ws_sheet1 = wb["Sheet1"]
+        sheet1_last_row = max(ws_sheet1.max_row, 2)
+        sheet1_data_range = f"Sheet1!$2:${sheet1_last_row}"
 
         if "metrics" in wb.sheetnames:
             wb.remove(wb["metrics"])
@@ -468,8 +490,8 @@ else:
                 r["month"],
                 r["group_key"],
                 r["forecast_name"],
-                "",  # formula
-                "",  # formula
+                r["pred_ops_col"],
+                r["pred_fts_col"],
                 r["key_col_name"],
                 "",  # formula
                 "",  # formula
@@ -479,40 +501,17 @@ else:
         data_start_row = 2
         data_end_row = 1 + len(metrics_rows)
 
-        # Таблица соответствия forecast_name -> pred_ops_col/pred_fts_col
-        map_start_col = 14  # N
-        ws.cell(row=1, column=map_start_col, value="forecast_name")
-        ws.cell(row=1, column=map_start_col + 1, value="pred_ops_col")
-        ws.cell(row=1, column=map_start_col + 2, value="pred_fts_col")
-
-        for idx, spec in enumerate(forecast_specs, start=2):
-            ws.cell(row=idx, column=map_start_col, value=spec["forecast_name"])
-            ws.cell(row=idx, column=map_start_col + 1, value=spec["pred_ops_col"])
-            ws.cell(row=idx, column=map_start_col + 2, value=spec["pred_fts_col"])
-
         # Формулы в строках метрик
         for excel_row in range(data_start_row, data_end_row + 1):
-            # pred_ops_col / pred_fts_col по forecast_name
-            ws.cell(
-                row=excel_row,
-                column=7,
-                value=f'=IFERROR(INDEX($O:$O,MATCH($F{excel_row},$N:$N,0)),"")'
-            )
-            ws.cell(
-                row=excel_row,
-                column=8,
-                value=f'=IFERROR(INDEX($P:$P,MATCH($F{excel_row},$N:$N,0)),"")'
-            )
-
             # n_rows (Excel 2016 compatible)
             ws.cell(
                 row=excel_row,
                 column=10,
                 value=(
                     f'=SUMPRODUCT('
-                    f'--(INDEX(Sheet1!$2:$1048576,0,MATCH("year",Sheet1!$1:$1,0))=$B{excel_row}),' 
-                    f'IF($C{excel_row}="YEAR_TOTAL",1,--(INDEX(Sheet1!$2:$1048576,0,MATCH("month",Sheet1!$1:$1,0))=$D{excel_row})),'
-                    f'IF($I{excel_row}="",1,--(INDEX(Sheet1!$2:$1048576,0,MATCH($I{excel_row},Sheet1!$1:$1,0))=$E{excel_row}))'
+                    f'--(INDEX({sheet1_data_range},0,MATCH("year",Sheet1!$1:$1,0))=$B{excel_row}),' 
+                    f'IF($C{excel_row}="YEAR_TOTAL",1,--(INDEX({sheet1_data_range},0,MATCH("month",Sheet1!$1:$1,0))=$D{excel_row})),'
+                    f'(($A{excel_row}="total")+($A{excel_row}<>"total")*--(INDEX({sheet1_data_range},0,MATCH($I{excel_row},Sheet1!$1:$1,0))=$E{excel_row}))'
                     f')'
                 )
             )
@@ -524,16 +523,16 @@ else:
                 value=(
                     f'=IFERROR('
                     f'SUMPRODUCT('
-                    f'--(INDEX(Sheet1!$2:$1048576,0,MATCH("year",Sheet1!$1:$1,0))=$B{excel_row}),' 
-                    f'IF($C{excel_row}="YEAR_TOTAL",1,--(INDEX(Sheet1!$2:$1048576,0,MATCH("month",Sheet1!$1:$1,0))=$D{excel_row})),'
-                    f'IF($I{excel_row}="",1,--(INDEX(Sheet1!$2:$1048576,0,MATCH($I{excel_row},Sheet1!$1:$1,0))=$E{excel_row})),'
-                    f'ABS(INDEX(Sheet1!$2:$1048576,0,MATCH("fact_value",Sheet1!$1:$1,0))-INDEX(Sheet1!$2:$1048576,0,MATCH($G{excel_row},Sheet1!$1:$1,0)))'
+                    f'--(INDEX({sheet1_data_range},0,MATCH("year",Sheet1!$1:$1,0))=$B{excel_row}),' 
+                    f'IF($C{excel_row}="YEAR_TOTAL",1,--(INDEX({sheet1_data_range},0,MATCH("month",Sheet1!$1:$1,0))=$D{excel_row})),'
+                    f'(($A{excel_row}="total")+($A{excel_row}<>"total")*--(INDEX({sheet1_data_range},0,MATCH($I{excel_row},Sheet1!$1:$1,0))=$E{excel_row})),'
+                    f'ABS(N(INDEX({sheet1_data_range},0,MATCH("fact_value",Sheet1!$1:$1,0)))-N(INDEX({sheet1_data_range},0,MATCH($G{excel_row},Sheet1!$1:$1,0))))'
                     f')/'
                     f'SUMPRODUCT('
-                    f'--(INDEX(Sheet1!$2:$1048576,0,MATCH("year",Sheet1!$1:$1,0))=$B{excel_row}),' 
-                    f'IF($C{excel_row}="YEAR_TOTAL",1,--(INDEX(Sheet1!$2:$1048576,0,MATCH("month",Sheet1!$1:$1,0))=$D{excel_row})),'
-                    f'IF($I{excel_row}="",1,--(INDEX(Sheet1!$2:$1048576,0,MATCH($I{excel_row},Sheet1!$1:$1,0))=$E{excel_row})),'
-                    f'ABS(INDEX(Sheet1!$2:$1048576,0,MATCH("fact_value",Sheet1!$1:$1,0)))'
+                    f'--(INDEX({sheet1_data_range},0,MATCH("year",Sheet1!$1:$1,0))=$B{excel_row}),' 
+                    f'IF($C{excel_row}="YEAR_TOTAL",1,--(INDEX({sheet1_data_range},0,MATCH("month",Sheet1!$1:$1,0))=$D{excel_row})),'
+                    f'(($A{excel_row}="total")+($A{excel_row}<>"total")*--(INDEX({sheet1_data_range},0,MATCH($I{excel_row},Sheet1!$1:$1,0))=$E{excel_row})),'
+                    f'ABS(N(INDEX({sheet1_data_range},0,MATCH("fact_value",Sheet1!$1:$1,0))))'
                     f')*100,'
                     f'NA()'
                     f')'
@@ -548,19 +547,19 @@ else:
                     f'=IFERROR('
                     f'('
                     f'SUMPRODUCT('
-                    f'--(INDEX(Sheet1!$2:$1048576,0,MATCH("year",Sheet1!$1:$1,0))=$B{excel_row}),' 
-                    f'IF($C{excel_row}="YEAR_TOTAL",1,--(INDEX(Sheet1!$2:$1048576,0,MATCH("month",Sheet1!$1:$1,0))=$D{excel_row})),'
-                    f'IF($I{excel_row}="",1,--(INDEX(Sheet1!$2:$1048576,0,MATCH($I{excel_row},Sheet1!$1:$1,0))=$E{excel_row})),'
-                    f'IF(INDEX(Sheet1!$2:$1048576,0,MATCH("fact_fts",Sheet1!$1:$1,0))=0,'
-                    f'IF(INDEX(Sheet1!$2:$1048576,0,MATCH($H{excel_row},Sheet1!$1:$1,0))=0,0,100),'
-                    f'ABS(INDEX(Sheet1!$2:$1048576,0,MATCH("fact_fts",Sheet1!$1:$1,0))-INDEX(Sheet1!$2:$1048576,0,MATCH($H{excel_row},Sheet1!$1:$1,0)))/'
-                    f'ABS(INDEX(Sheet1!$2:$1048576,0,MATCH("fact_fts",Sheet1!$1:$1,0)))*100'
+                    f'--(INDEX({sheet1_data_range},0,MATCH("year",Sheet1!$1:$1,0))=$B{excel_row}),' 
+                    f'IF($C{excel_row}="YEAR_TOTAL",1,--(INDEX({sheet1_data_range},0,MATCH("month",Sheet1!$1:$1,0))=$D{excel_row})),'
+                    f'(($A{excel_row}="total")+($A{excel_row}<>"total")*--(INDEX({sheet1_data_range},0,MATCH($I{excel_row},Sheet1!$1:$1,0))=$E{excel_row})),'
+                    f'IF(N(INDEX({sheet1_data_range},0,MATCH("fact_fts",Sheet1!$1:$1,0)))=0,'
+                    f'IF(N(INDEX({sheet1_data_range},0,MATCH($H{excel_row},Sheet1!$1:$1,0)))=0,0,100),'
+                    f'ABS(N(INDEX({sheet1_data_range},0,MATCH("fact_fts",Sheet1!$1:$1,0)))-N(INDEX({sheet1_data_range},0,MATCH($H{excel_row},Sheet1!$1:$1,0))))/'
+                    f'ABS(N(INDEX({sheet1_data_range},0,MATCH("fact_fts",Sheet1!$1:$1,0))))*100'
                     f')'
                     f')/'
                     f'SUMPRODUCT('
-                    f'--(INDEX(Sheet1!$2:$1048576,0,MATCH("year",Sheet1!$1:$1,0))=$B{excel_row}),' 
-                    f'IF($C{excel_row}="YEAR_TOTAL",1,--(INDEX(Sheet1!$2:$1048576,0,MATCH("month",Sheet1!$1:$1,0))=$D{excel_row})),'
-                    f'IF($I{excel_row}="",1,--(INDEX(Sheet1!$2:$1048576,0,MATCH($I{excel_row},Sheet1!$1:$1,0))=$E{excel_row}))'
+                    f'--(INDEX({sheet1_data_range},0,MATCH("year",Sheet1!$1:$1,0))=$B{excel_row}),' 
+                    f'IF($C{excel_row}="YEAR_TOTAL",1,--(INDEX({sheet1_data_range},0,MATCH("month",Sheet1!$1:$1,0))=$D{excel_row})),'
+                    f'(($A{excel_row}="total")+($A{excel_row}<>"total")*--(INDEX({sheet1_data_range},0,MATCH($I{excel_row},Sheet1!$1:$1,0))=$E{excel_row}))'
                     f')'
                     f'),' 
                     f'NA()'
@@ -573,18 +572,14 @@ else:
         col_widths = {
             1: 16, 2: 8, 3: 12, 4: 8, 5: 28, 6: 24,
             7: 22, 8: 24, 9: 16, 10: 10, 11: 12, 12: 12,
-            14: 24, 15: 24, 16: 24,
         }
         for col_idx, width in col_widths.items():
             ws.column_dimensions[get_column_letter(col_idx)].width = width
 
-        # Скрываем служебные колонки pred_ops_col/pred_fts_col/key_col_name и map-table
+        # Скрываем служебные колонки pred_ops_col/pred_fts_col/key_col_name
         ws.column_dimensions[get_column_letter(7)].hidden = True
         ws.column_dimensions[get_column_letter(8)].hidden = True
         ws.column_dimensions[get_column_letter(9)].hidden = True
-        ws.column_dimensions[get_column_letter(14)].hidden = True
-        ws.column_dimensions[get_column_letter(15)].hidden = True
-        ws.column_dimensions[get_column_letter(16)].hidden = True
 
         wb.save(history_xlsx)
         print("Вкладка metrics обновлена:", history_xlsx)
