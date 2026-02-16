@@ -334,14 +334,15 @@ from openpyxl import load_workbook
 
 
 def _get_forecast_specs(df_hist_local: pd.DataFrame):
-    specs = [{"forecast_name": "fact_predict", "pred_ops_col": "fact_predict", "mape_fts_col": "mape_fact_predict_fts"}]
+    specs = [{"forecast_name": "fact_predict", "pred_ops_col": "fact_predict", "pred_fts_col": "predict_fts", "mape_fts_col": "mape_fact_predict_fts"}]
     cat_ops = [c for c in df_hist_local.columns if c.startswith("predict_catboost_ver") and not c.endswith("_fts")
                and c.replace("predict_catboost_ver", "").split("_")[0].isdigit()]
     cat_ops = sorted(cat_ops, key=lambda c: int(c.replace("predict_catboost_ver", "").split("_")[0]))
     for ops_col in cat_ops:
+        fts_col = f"{ops_col}_fts"
         mape_col = f"mape_catboost_ver{ops_col.replace('predict_catboost_ver', '').split('_')[0]}_fts"
-        if mape_col in df_hist_local.columns:
-            specs.append({"forecast_name": ops_col, "pred_ops_col": ops_col, "mape_fts_col": mape_col})
+        if mape_col in df_hist_local.columns and fts_col in df_hist_local.columns:
+            specs.append({"forecast_name": ops_col, "pred_ops_col": ops_col, "pred_fts_col": fts_col, "mape_fts_col": mape_col})
     return specs
 
 
@@ -362,9 +363,8 @@ else:
     if not specs:
         print("Vnimanie: ne najdeno ni odnogo prognoza dlja metrik")
     else:
-        summary_rows = []
         resist_ids = sorted(df_hist_num["_rid_num"].dropna().astype(int).unique().tolist())
-        years = sorted(df_hist_num["year"].unique().tolist())
+        summary_rows = []
         for rid in resist_ids + ["ALL"]:
             mask_resist = (df_hist_num["_rid_num"] == rid) if rid != "ALL" else pd.Series(True, index=df_hist_num.index)
             df_r = df_hist_num.loc[mask_resist]
@@ -378,33 +378,56 @@ else:
                     df_slice = df_r[df_r["month"] == month_val]
                 if df_slice.empty:
                     continue
+                fact_ops = df_slice["fact_value"].sum()
+                fact_fts = df_slice["fact_fts"].sum()
+                row = {"resist_id": rid, "month": month_val if period_type == "MONTH" else "YEAR", "\u0424\u0430\u043a\u0442, \u0448\u0442.": round(fact_ops, 2) if pd.notna(fact_ops) else "", "\u0424\u0430\u043a\u0442, \u041f\u0428\u0415": round(fact_fts, 2) if pd.notna(fact_fts) else ""}
                 for s in specs:
-                    pred_col = s["pred_ops_col"]
-                    mape_col = s["mape_fts_col"]
-                    if pred_col not in df_slice.columns or mape_col not in df_slice.columns:
+                    pred_ops_col = s["pred_ops_col"]
+                    pred_fts_col = s.get("pred_fts_col")
+                    if pred_ops_col not in df_slice.columns:
                         continue
-                    wape = calc_wmape(df_slice["fact_value"], df_slice[pred_col])
-                    mape_fts = df_slice[mape_col].mean()
-                    summary_rows.append({
-                        "resist_id": rid,
-                        "month": month_val if period_type == "MONTH" else "YEAR",
-                        "forecast_name": s["forecast_name"],
-                        "wape_ops": round(wape, 2) if pd.notna(wape) else "",
-                        "mape_fts": round(mape_fts, 2) if pd.notna(mape_fts) else "",
-                    })
+                    pred_ops_sum = df_slice[pred_ops_col].sum()
+                    pred_fts_sum = df_slice[pred_fts_col].sum() if pred_fts_col and pred_fts_col in df_slice.columns else np.nan
+                    wape_ops = calc_wmape(df_slice["fact_value"], df_slice[pred_ops_col])
+                    if pd.notna(fact_fts) and fact_fts != 0 and pd.notna(pred_fts_sum):
+                        mape_fts_agg = (fact_fts - pred_fts_sum) / fact_fts * 100
+                    else:
+                        mape_fts_agg = np.nan
+                    if s["forecast_name"] == "fact_predict":
+                        prefix = "\u041f\u0440\u043e\u0433\u043e\u0437 \u0422\u0435\u043a\u0443\u0449\u0438\u0439"
+                    else:
+                        ver = s["forecast_name"].replace("predict_catboost_ver", "").split("_")[0]
+                        prefix = f"\u041f\u0440\u043e\u0433\u043e\u0437 \u041d\u043e\u0432\u044b\u0439 {ver}"
+                    row[f"{prefix}, \u0448\u0442."] = round(pred_ops_sum, 2) if pd.notna(pred_ops_sum) else ""
+                    row[f"{prefix}, \u041f\u0428\u0415"] = round(pred_fts_sum, 2) if pd.notna(pred_fts_sum) else ""
+                    row[f"{prefix}, WAPE \u043f\u043e \u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u0443 \u0448\u0442, %"] = round(wape_ops, 2) if pd.notna(wape_ops) else ""
+                    row[f"{prefix}, MAPE \u043f\u043e \u041f\u0428\u0415, %"] = round(mape_fts_agg, 2) if pd.notna(mape_fts_agg) else ""
+                summary_rows.append(row)
         summary_df = pd.DataFrame(summary_rows)
+        if not summary_df.empty:
+            col_order = ["resist_id", "month", "\u0424\u0430\u043a\u0442, \u0448\u0442.", "\u0424\u0430\u043a\u0442, \u041f\u0428\u0415"]
+            for s in specs:
+                if s["forecast_name"] == "fact_predict":
+                    prefix = "\u041f\u0440\u043e\u0433\u043e\u0437 \u0422\u0435\u043a\u0443\u0449\u0438\u0439"
+                else:
+                    ver = s["forecast_name"].replace("predict_catboost_ver", "").split("_")[0]
+                    prefix = f"\u041f\u0440\u043e\u0433\u043e\u0437 \u041d\u043e\u0432\u044b\u0439 {ver}"
+                col_order.extend([f"{prefix}, \u0448\u0442.", f"{prefix}, \u041f\u0428\u0415", f"{prefix}, WAPE \u043f\u043e \u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u0443 \u0448\u0442, %", f"{prefix}, MAPE \u043f\u043e \u041f\u0428\u0415, %"])
+            summary_df = summary_df[[c for c in col_order if c in summary_df.columns]]
 
         wb = load_workbook(history_xlsx)
         for name in list(wb.sheetnames):
             if name == "metrics" or (name.startswith("resist_") and name[7:].isdigit()):
                 wb.remove(wb[name])
-        if "Metriki_svod" in wb.sheetnames:
-            wb.remove(wb["Metriki_svod"])
+        for _n in ["Metriki_svod", "\u041c\u0435\u0442\u0440\u0438\u043a\u0438_\u0441\u0432\u043e\u0434"]:
+            if _n in wb.sheetnames:
+                wb.remove(wb[_n])
 
-        ws_svod = wb.create_sheet("Metriki_svod", 1)
-        ws_svod.append(["resist_id", "month", "forecast_name", "wape_ops", "mape_fts"])
-        for _, r in summary_df.iterrows():
-            ws_svod.append([r["resist_id"], r["month"], r["forecast_name"], r["wape_ops"], r["mape_fts"]])
+        ws_svod = wb.create_sheet("\u041c\u0435\u0442\u0440\u0438\u043a\u0438_\u0441\u0432\u043e\u0434", 1)
+        if not summary_df.empty:
+            ws_svod.append(list(summary_df.columns))
+            for _, r in summary_df.iterrows():
+                ws_svod.append([r[c] for c in summary_df.columns])
 
         # Listy po resist_id: metriki po kazhdoj operacii i po kazhdomu prognozu (format po skrinu)
         MONTH_NAMES_RU = ["\u044f\u043d\u0432\u0430\u0440\u044c", "\u0444\u0435\u0432\u0440\u0430\u043b\u044c", "\u043c\u0430\u0440\u0442", "\u0430\u043f\u0440\u0435\u043b\u044c", "\u043c\u0430\u0439", "\u0438\u044e\u043d\u044c", "\u0438\u044e\u043b\u044c", "\u0430\u0432\u0433\u0443\u0441\u0442", "\u0441\u0435\u043d\u0442\u044f\u0431\u0440\u044c", "\u043e\u043a\u0442\u044f\u0431\u0440\u044c", "\u043d\u043e\u044f\u0431\u0440\u044c", "\u0434\u0435\u043a\u0430\u0431\u0440\u044c"]
