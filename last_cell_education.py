@@ -357,6 +357,7 @@ df_hist_num["month"] = pd.to_numeric(df_hist_num["month"], errors="coerce")
 df_hist_num = df_hist_num.dropna(subset=["year", "month"])
 df_hist_num["year"] = df_hist_num["year"].astype(int)
 df_hist_num["month"] = df_hist_num["month"].astype(int)
+df_hist_num["_rid_num"] = pd.to_numeric(df_hist_num["resist_id"], errors="coerce")
 
 required_cols = {"year", "month", "resist_id", "fact_value", "fact_fts", "fact_predict", "predict_fts"}
 missing = [c for c in required_cols if c not in df_hist.columns]
@@ -368,10 +369,10 @@ else:
         print("Vnimanie: ne najdeno ni odnogo prognoza dlja metrik")
     else:
         summary_rows = []
-        resist_ids = sorted(pd.to_numeric(df_hist_num["resist_id"], errors="coerce").dropna().astype(int).unique().tolist())
+        resist_ids = sorted(df_hist_num["_rid_num"].dropna().astype(int).unique().tolist())
         years = sorted(df_hist_num["year"].unique().tolist())
         for rid in resist_ids + ["ALL"]:
-            mask_resist = df_hist_num["resist_id"] == rid if rid != "ALL" else pd.Series(True, index=df_hist_num.index)
+            mask_resist = (df_hist_num["_rid_num"] == rid) if rid != "ALL" else pd.Series(True, index=df_hist_num.index)
             df_r = df_hist_num.loc[mask_resist]
             if df_r.empty:
                 continue
@@ -417,13 +418,16 @@ else:
         if not specs_avail:
             specs_avail = specs
         n_f = len(specs_avail)
+        print("Sozdanie listov resist_*: resist_ids =", resist_ids, ", n_f =", n_f)
         for rid in resist_ids:
-            df_r = df_hist_num[df_hist_num["resist_id"] == rid].copy()
+            df_r = df_hist_num[df_hist_num["_rid_num"] == rid].copy()
             if df_r.empty or n_f == 0:
+                print("  resist_{} propushen: df_r.empty={}, n_f==0={}".format(rid, df_r.empty, n_f == 0))
                 continue
             year_val = int(df_r["year"].max())
             div_ops_list = df_r.drop_duplicates(subset=["division_title", "operation_id"])[["division_title", "operation_id"]].sort_values(["division_title", "operation_id"]).to_dict("records")
             ws = wb.create_sheet(f"resist_{rid}")
+            print("  Sozdan list resist_{}".format(rid))
             n_cols = 12 * n_f + n_f
             ws.cell(row=1, column=1, value="resist_id")
             ws.cell(row=1, column=2, value="\u041f\u043e\u0434\u0440\u0430\u0437\u0434\u0435\u043b\u0435\u043d\u0438\u0435 (division_title)")
