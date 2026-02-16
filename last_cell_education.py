@@ -313,27 +313,21 @@ wmape_hist_cols = [c for c in df_hist.columns if c.startswith("wmape_catboost_ve
 if wmape_hist_cols:
     df_hist = df_hist.drop(columns=wmape_hist_cols)
 
-# Kolonki WAPE po operacijam dlja kazhdogo prognoza na Sheet1 (povtoreno po strokam)
-def _forecast_ver(col):
-    if col == "fact_predict":
-        return 0
-    s = col.replace("predict_catboost_ver", "").split("_")[0]
-    return int(s) if s.isdigit() else 0
-forecast_ops_cols = ["fact_predict"] + [
-    c for c in df_hist.columns
-    if c.startswith("predict_catboost_ver") and not c.endswith("_fts")
-    and c.replace("predict_catboost_ver", "").split("_")[0].isdigit()
-]
-forecast_ops_cols = sorted(set(forecast_ops_cols), key=_forecast_ver)
-for pred_col in forecast_ops_cols:
-    if pred_col not in df_hist.columns:
-        continue
-    wape_val = calc_wmape(df_hist["fact_value"], df_hist[pred_col])
-    wape_col = "wape_fact_predict_ops" if pred_col == "fact_predict" else f"wape_{pred_col}_ops"
-    df_hist[wape_col] = wape_val
-
-df_hist.to_excel(history_xlsx, index=False)
-print("История сохранена:", history_xlsx)
+# Vygruzka na list "Dannye": pereimenovanie kolonok, bez WAPE-kolonok
+RENAME_SHEET1 = {
+    "fact_value": "\u0424\u0430\u043a\u0442, \u0448\u0442.",
+    "fact_fts": "\u0424\u0430\u043a\u0442, \u041f\u0428\u0415",
+    "fact_predict": "\u041f\u0440\u043e\u0433\u043e\u0437 \u0422\u0435\u043a\u0443\u0449\u0438\u0439, \u0448\u0442.",
+    "predict_fts": "\u041f\u0440\u043e\u0433\u043e\u0437 \u0422\u0435\u043a\u0443\u0449\u0438\u0439, \u041f\u0428\u0415",
+    "mape_fact_predict_fts": "MAPE \u0422\u0435\u043a\u0443\u0449\u0438\u0439, \u041f\u0428\u0415",
+}
+wape_ops_cols = [c for c in df_hist.columns if c == "wape_fact_predict_ops" or (c.startswith("wape_predict_catboost_ver") and c.endswith("_ops"))]
+df_export = df_hist.copy()
+df_export = df_export.rename(columns={k: v for k, v in RENAME_SHEET1.items() if k in df_export.columns})
+if wape_ops_cols:
+    df_export = df_export.drop(columns=[c for c in wape_ops_cols if c in df_export.columns], errors="ignore")
+df_export.to_excel(history_xlsx, index=False, sheet_name="\u0414\u0430\u043d\u043d\u044b\u0435")
+print("\u0418\u0441\u0442\u043e\u0440\u0438\u044f \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0430 (\u043b\u0438\u0441\u0442 \u0414\u0430\u043d\u043d\u044b\u0435):", history_xlsx)
 
 # --- Metriki: svodnyj list + listy po resist_id (raschety v Python, bez formul Excel) ---
 from openpyxl import load_workbook
