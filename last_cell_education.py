@@ -329,8 +329,35 @@ if wape_ops_cols:
 df_export.to_excel(history_xlsx, index=False, sheet_name="\u0414\u0430\u043d\u043d\u044b\u0435")
 print("\u0418\u0441\u0442\u043e\u0440\u0438\u044f \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0430 (\u043b\u0438\u0441\u0442 \u0414\u0430\u043d\u043d\u044b\u0435):", history_xlsx)
 
-# --- Metriki: svodnyj list + listy po resist_id (raschety v Python, bez formul Excel) ---
+# Kolonki "Tochnost' Tekushhij" i "Tochnost' catboost_ver<X>" na liste Dannye (vsegda, do sozdanija ostal'nyh listov)
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
+try:
+    wb_t = load_workbook(history_xlsx)
+    ws_data = wb_t["\u0414\u0430\u043d\u043d\u044b\u0435"]
+    to_add = []
+    for col in range(1, ws_data.max_column + 1):
+        val = ws_data.cell(row=1, column=col).value
+        if val is None:
+            continue
+        val_str = str(val).strip()
+        if val_str == "MAPE \u0422\u0435\u043a\u0443\u0449\u0438\u0439, \u041f\u0428\u0415":
+            to_add.append((col, "\u0422\u043e\u0447\u043d\u043e\u0441\u0442\u044c \u0422\u0435\u043a\u0443\u0449\u0438\u0439"))
+        elif val_str.startswith("mape_catboost_ver") and val_str.endswith("_fts"):
+            ver = val_str.replace("mape_catboost_ver", "").replace("_fts", "").split("_")[0]
+            to_add.append((col, f"\u0422\u043e\u0447\u043d\u043e\u0441\u0442\u044c catboost_ver{ver}"))
+    for col_idx, new_header in sorted(to_add, key=lambda x: -x[0]):
+        ws_data.insert_cols(col_idx + 1)
+        ws_data.cell(row=1, column=col_idx + 1, value=new_header)
+        mape_letter = get_column_letter(col_idx)
+        for row in range(2, ws_data.max_row + 1):
+            ws_data.cell(row=row, column=col_idx + 1, value=f"=MAX(0,100-{mape_letter}{row})")
+    wb_t.save(history_xlsx)
+    print("Kolonki Tochnost' dobavleny na list Dannye")
+except Exception as e:
+    print("Oshibka pri dobavlenii kolonok Tochnost':", e)
+
+# --- Metriki: svodnyj list + listy po resist_id (raschety v Python, bez formul Excel) ---
 
 
 def _get_forecast_specs(df_hist_local: pd.DataFrame):
@@ -422,26 +449,6 @@ else:
         for _n in ["Metriki_svod", "\u041c\u0435\u0442\u0440\u0438\u043a\u0438_\u0441\u0432\u043e\u0434"]:
             if _n in wb.sheetnames:
                 wb.remove(wb[_n])
-
-        from openpyxl.utils import get_column_letter
-        ws_data = wb["\u0414\u0430\u043d\u043d\u044b\u0435"]
-        to_add = []
-        for col in range(1, ws_data.max_column + 1):
-            val = ws_data.cell(row=1, column=col).value
-            if val is None:
-                continue
-            val_str = str(val).strip()
-            if val_str == "MAPE \u0422\u0435\u043a\u0443\u0449\u0438\u0439, \u041f\u0428\u0415":
-                to_add.append((col, "\u0422\u043e\u0447\u043d\u043e\u0441\u0442\u044c \u0422\u0435\u043a\u0443\u0449\u0438\u0439"))
-            elif val_str.startswith("mape_catboost_ver") and val_str.endswith("_fts"):
-                ver = val_str.replace("mape_catboost_ver", "").replace("_fts", "").split("_")[0]
-                to_add.append((col, f"\u0422\u043e\u0447\u043d\u043e\u0441\u0442\u044c catboost_ver{ver}"))
-        for col_idx, new_header in sorted(to_add, key=lambda x: -x[0]):
-            ws_data.insert_cols(col_idx + 1)
-            ws_data.cell(row=1, column=col_idx + 1, value=new_header)
-            mape_letter = get_column_letter(col_idx)
-            for row in range(2, ws_data.max_row + 1):
-                ws_data.cell(row=row, column=col_idx + 1, value=f"=MAX(0,100-{mape_letter}{row})")
 
         ws_svod = wb.create_sheet("\u041c\u0435\u0442\u0440\u0438\u043a\u0438_\u0441\u0432\u043e\u0434", 1)
         if not summary_df.empty:
