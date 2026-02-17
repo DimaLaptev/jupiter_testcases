@@ -241,8 +241,8 @@ except (FileNotFoundError, ValueError):
     df_hist = None
 
 if df_hist is None:
-    # первая версия в истории — начинаем с ver3
-    next_ver = 3
+    # первая версия в истории — начинаем с ver1
+    next_ver = 1
     print("History not found or empty. Start version:", next_ver)
     df_hist = base_pred.rename(columns={
         "predict_catboost_verX": f"predict_catboost_ver{next_ver}",
@@ -390,7 +390,7 @@ else:
                     pred_fts_sum = df_slice[pred_fts_col].sum() if pred_fts_col and pred_fts_col in df_slice.columns else np.nan
                     wape_ops = calc_wmape(df_slice["fact_value"], df_slice[pred_ops_col])
                     if pd.notna(fact_fts) and fact_fts != 0 and pd.notna(pred_fts_sum):
-                        mape_fts_agg = (fact_fts - pred_fts_sum) / fact_fts * 100
+                        mape_fts_agg = abs(fact_fts - pred_fts_sum) / fact_fts * 100
                     else:
                         mape_fts_agg = np.nan
                     if s["forecast_name"] == "fact_predict":
@@ -417,11 +417,31 @@ else:
 
         wb = load_workbook(history_xlsx)
         for name in list(wb.sheetnames):
-            if name == "metrics" or (name.startswith("resist_") and name[7:].isdigit()):
+            if name == "metrics" or name.startswith("resist_"):
                 wb.remove(wb[name])
         for _n in ["Metriki_svod", "\u041c\u0435\u0442\u0440\u0438\u043a\u0438_\u0441\u0432\u043e\u0434"]:
             if _n in wb.sheetnames:
                 wb.remove(wb[_n])
+
+        from openpyxl.utils import get_column_letter
+        ws_data = wb["\u0414\u0430\u043d\u043d\u044b\u0435"]
+        to_add = []
+        for col in range(1, ws_data.max_column + 1):
+            val = ws_data.cell(row=1, column=col).value
+            if val is None:
+                continue
+            val_str = str(val).strip()
+            if val_str == "MAPE \u0422\u0435\u043a\u0443\u0449\u0438\u0439, \u041f\u0428\u0415":
+                to_add.append((col, "\u0422\u043e\u0447\u043d\u043e\u0441\u0442\u044c \u0422\u0435\u043a\u0443\u0449\u0438\u0439"))
+            elif val_str.startswith("mape_catboost_ver") and val_str.endswith("_fts"):
+                ver = val_str.replace("mape_catboost_ver", "").replace("_fts", "").split("_")[0]
+                to_add.append((col, f"\u0422\u043e\u0447\u043d\u043e\u0441\u0442\u044c catboost_ver{ver}"))
+        for col_idx, new_header in sorted(to_add, key=lambda x: -x[0]):
+            ws_data.insert_cols(col_idx + 1)
+            ws_data.cell(row=1, column=col_idx + 1, value=new_header)
+            mape_letter = get_column_letter(col_idx)
+            for row in range(2, ws_data.max_row + 1):
+                ws_data.cell(row=row, column=col_idx + 1, value=f"=MAX(0,100-{mape_letter}{row})")
 
         ws_svod = wb.create_sheet("\u041c\u0435\u0442\u0440\u0438\u043a\u0438_\u0441\u0432\u043e\u0434", 1)
         if not summary_df.empty:
@@ -429,183 +449,114 @@ else:
             for _, r in summary_df.iterrows():
                 ws_svod.append([r[c] for c in summary_df.columns])
 
-        # Listy po resist_id: metriki po kazhdoj operacii i po kazhdomu prognozu (format po skrinu)
+        # Listy po (resist_id, division_title): imja lista = "<resist_id><division_title>", bez drugoy stroki WAPE, bez goda
         MONTH_NAMES_RU = ["\u044f\u043d\u0432\u0430\u0440\u044c", "\u0444\u0435\u0432\u0440\u0430\u043b\u044c", "\u043c\u0430\u0440\u0442", "\u0430\u043f\u0440\u0435\u043b\u044c", "\u043c\u0430\u0439", "\u0438\u044e\u043d\u044c", "\u0438\u044e\u043b\u044c", "\u0430\u0432\u0433\u0443\u0441\u0442", "\u0441\u0435\u043d\u0442\u044f\u0431\u0440\u044c", "\u043e\u043a\u0442\u044f\u0431\u0440\u044c", "\u043d\u043e\u044f\u0431\u0440\u044c", "\u0434\u0435\u043a\u0430\u0431\u0440\u044c"]
-        specs_avail = [s for s in specs if s["pred_ops_col"] in df_hist_num.columns and s["mape_fts_col"] in df_hist_num.columns]
+        specs_avail = [s for s in specs if s["pred_ops_col"] in df_hist_num.columns and (s.get("pred_fts_col") in df_hist_num.columns if s.get("pred_fts_col") else True)]
         if not specs_avail:
-            specs_avail = specs
+            specs_avail = [s for s in specs if s["pred_ops_col"] in df_hist_num.columns]
         n_f = len(specs_avail)
-        print("Sozdanie listov resist_*: resist_ids =", resist_ids, ", n_f =", n_f)
-        for rid in resist_ids:
-            df_r = df_hist_num[df_hist_num["_rid_num"] == rid].copy()
+        cols_per_month = 2 + 4 * n_f
+        n_cols = 12 * cols_per_month
+        rid_div_list = df_hist_num.drop_duplicates(subset=["_rid_num", "division_title"])[["_rid_num", "division_title"]].dropna(subset=["_rid_num"]).to_dict("records")
+        print("Sozdanie listov <rid><division>: n_f =", n_f)
+        for rec in rid_div_list:
+            rid, div = rec["_rid_num"], rec["division_title"]
+            df_r = df_hist_num[(df_hist_num["_rid_num"] == rid) & (df_hist_num["division_title"] == div)].copy()
             if df_r.empty or n_f == 0:
-                print("  resist_{} propushen: df_r.empty={}, n_f==0={}".format(rid, df_r.empty, n_f == 0))
                 continue
-            year_val = int(df_r["year"].max())
-            div_ops_list = df_r.drop_duplicates(subset=["division_title", "operation_id"])[["division_title", "operation_id"]].sort_values(["division_title", "operation_id"]).to_dict("records")
-            ws = wb.create_sheet(f"resist_{rid}")
-            print("  Sozdan list resist_{}".format(rid))
-            n_cols = 12 * n_f + n_f
+            sheet_name = (str(int(rid)) + str(div) if pd.notna(div) else str(int(rid)))[:31]
+            for ch in ":\\/?*[]":
+                sheet_name = sheet_name.replace(ch, "_")
+            if sheet_name in wb.sheetnames:
+                wb.remove(wb[sheet_name])
+            ws = wb.create_sheet(sheet_name)
+            print("  Sozdan list", sheet_name)
             ws.cell(row=1, column=1, value="resist_id")
             ws.cell(row=1, column=2, value="\u041f\u043e\u0434\u0440\u0430\u0437\u0434\u0435\u043b\u0435\u043d\u0438\u0435 (division_title)")
             ws.cell(row=1, column=3, value="\u041e\u043f\u0435\u0440\u0430\u0446\u0438\u044f (operation_id)")
             if n_cols > 0:
-                ws.merge_cells(start_row=1, start_column=4, end_row=1, end_column=3 + 12 * n_f)
+                ws.merge_cells(start_row=1, start_column=4, end_row=1, end_column=3 + n_cols)
                 ws.cell(row=1, column=4, value="\u041c\u0435\u0441\u044f\u0446 (month)")
-                ws.merge_cells(start_row=1, start_column=4 + 12 * n_f, end_row=1, end_column=3 + n_cols)
-                ws.cell(row=1, column=4 + 12 * n_f, value=f"\u0418\u0442\u043e\u0433\u043e \u0437\u0430 {year_val}\u0433.")
             ws.cell(row=2, column=1, value=rid)
-            ws.cell(row=2, column=2, value="")
+            ws.cell(row=2, column=2, value=div if pd.notna(div) else "")
             ws.cell(row=2, column=3, value="")
             for col_m in range(12):
-                c1 = 4 + col_m * n_f
-                c2 = c1 + n_f - 1
-                if c2 >= c1:
-                    ws.merge_cells(start_row=2, start_column=c1, end_row=2, end_column=c2)
+                c1 = 4 + col_m * cols_per_month
+                c2 = c1 + cols_per_month - 1
+                ws.merge_cells(start_row=2, start_column=c1, end_row=2, end_column=c2)
                 ws.cell(row=2, column=c1, value=MONTH_NAMES_RU[col_m])
+                ws.cell(row=3, column=c1, value="\u0424\u0430\u043a\u0442, \u0448\u0442.")
+                ws.cell(row=3, column=c1 + 1, value="\u0424\u0430\u043a\u0442, \u041f\u0428\u0415")
                 for fi, s in enumerate(specs_avail):
-                    ws.cell(row=3, column=c1 + fi, value=s["forecast_name"])
-            c1_y = 4 + 12 * n_f
-            if c1_y <= 3 + n_cols:
-                ws.merge_cells(start_row=2, start_column=c1_y, end_row=2, end_column=3 + n_cols)
-                ws.cell(row=2, column=c1_y, value="\u0418\u0442\u043e\u0433\u043e")
-                for fi, s in enumerate(specs_avail):
-                    ws.cell(row=3, column=c1_y + fi, value=s["forecast_name"])
-            ws.cell(row=2, column=2, value="")
-            ws.cell(row=3, column=2, value="")
-            ws.cell(row=3, column=3, value="")
+                    pre = "\u041f\u0440\u043e\u0433\u043e\u0437 \u0422\u0435\u043a\u0443\u0449\u0438\u0439" if s["forecast_name"] == "fact_predict" else "\u041f\u0440\u043e\u0433\u043e\u0437 \u041d\u043e\u0432\u044b\u0439 " + s["forecast_name"].replace("predict_catboost_ver", "").split("_")[0]
+                    ws.cell(row=3, column=c1 + 2 + 4 * fi, value=f"{pre}, \u0448\u0442.")
+                    ws.cell(row=3, column=c1 + 3 + 4 * fi, value=f"{pre}, \u041f\u0428\u0415")
+                    ws.cell(row=3, column=c1 + 4 + 4 * fi, value=f"{pre}, MAPE \u043f\u043e \u041f\u0428\u0415, %")
+                    ws.cell(row=3, column=c1 + 5 + 4 * fi, value=f"{pre}, WAPE \u043f\u043e \u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u0443 \u0448\u0442, %")
             data_start_row = 4
             current_row = data_start_row
-            prev_div = None
-
-            def _wape_row(fact, pred):
-                if pd.isna(fact) or pd.isna(pred):
-                    return np.nan
-                if fact == 0:
-                    return 0.0 if pred == 0 else 100.0
-                return float(abs(fact - pred) / abs(fact) * 100)
-
-            for rec in div_ops_list:
-                div, op = rec["division_title"], rec["operation_id"]
-                div_str = str(div) if pd.notna(div) else ""
+            div_ops_list = df_r.drop_duplicates(subset=["operation_id"])[["operation_id"]].sort_values("operation_id").to_dict("records")
+            for op_rec in div_ops_list:
+                op = op_rec["operation_id"]
                 op_str = str(op) if pd.notna(op) else ""
-                first_in_div = prev_div is not None and div != prev_div
-                if first_in_div and current_row > data_start_row:
-                    _slice = df_r[df_r["division_title"] == prev_div]
-                    ws.cell(row=current_row, column=2, value="")
-                    ws.cell(row=current_row, column=3, value="\u0418\u0442\u043e\u0433\u043e")
-                    for col_m in range(12):
-                        s = _slice[_slice["month"] == col_m + 1]
-                        for fi, sp in enumerate(specs_avail):
-                            if not s.empty and sp["mape_fts_col"] in s.columns:
-                                ws.cell(row=current_row, column=4 + col_m * n_f + fi, value=round(s[sp["mape_fts_col"]].mean(), 2))
-                            else:
-                                ws.cell(row=current_row, column=4 + col_m * n_f + fi, value="")
-                    for fi, sp in enumerate(specs_avail):
-                        if not _slice.empty and sp["mape_fts_col"] in _slice.columns:
-                            ws.cell(row=current_row, column=4 + 12 * n_f + fi, value=round(_slice[sp["mape_fts_col"]].mean(), 2))
-                        else:
-                            ws.cell(row=current_row, column=4 + 12 * n_f + fi, value="")
-                    current_row += 1
-                    ws.cell(row=current_row, column=2, value="")
-                    ws.cell(row=current_row, column=3, value="WAPE \u043d\u0430 \u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u0435 \u0448\u0442\u0443\u043a")
-                    for col_m in range(12):
-                        s = _slice[_slice["month"] == col_m + 1]
-                        for fi, sp in enumerate(specs_avail):
-                            if not s.empty and sp["pred_ops_col"] in s.columns:
-                                w = calc_wmape(s["fact_value"], s[sp["pred_ops_col"]])
-                                ws.cell(row=current_row, column=4 + col_m * n_f + fi, value=round(w, 2) if pd.notna(w) else "")
-                            else:
-                                ws.cell(row=current_row, column=4 + col_m * n_f + fi, value="")
-                    for fi, sp in enumerate(specs_avail):
-                        if not _slice.empty and sp["pred_ops_col"] in _slice.columns:
-                            w = calc_wmape(_slice["fact_value"], _slice[sp["pred_ops_col"]])
-                            ws.cell(row=current_row, column=4 + 12 * n_f + fi, value=round(w, 2) if pd.notna(w) else "")
-                        else:
-                            ws.cell(row=current_row, column=4 + 12 * n_f + fi, value="")
-                    current_row += 1
-                show_div = (current_row == data_start_row) or (prev_div is not None and div != prev_div)
-                prev_div = div
-                ws.cell(row=current_row, column=2, value=div_str if show_div else "")
+                ws.cell(row=current_row, column=1, value=rid)
+                ws.cell(row=current_row, column=2, value="")
                 ws.cell(row=current_row, column=3, value=op_str)
                 for col_m in range(12):
-                    r = df_r[(df_r["division_title"] == div) & (df_r["operation_id"] == op) & (df_r["month"] == col_m + 1)]
-                    for fi, sp in enumerate(specs_avail):
-                        if not r.empty and sp["mape_fts_col"] in r.columns:
-                            v = r[sp["mape_fts_col"]].mean()
-                            ws.cell(row=current_row, column=4 + col_m * n_f + fi, value=round(v, 2) if pd.notna(v) else "")
-                        else:
-                            ws.cell(row=current_row, column=4 + col_m * n_f + fi, value="")
-                r_year = df_r[(df_r["division_title"] == div) & (df_r["operation_id"] == op)]
-                for fi, sp in enumerate(specs_avail):
-                    if not r_year.empty and sp["mape_fts_col"] in r_year.columns:
-                        ws.cell(row=current_row, column=4 + 12 * n_f + fi, value=round(r_year[sp["mape_fts_col"]].mean(), 2))
+                    r = df_r[(df_r["operation_id"] == op) & (df_r["month"] == col_m + 1)]
+                    c1 = 4 + col_m * cols_per_month
+                    if not r.empty:
+                        ws.cell(row=current_row, column=c1, value=round(r["fact_value"].sum(), 2))
+                        ws.cell(row=current_row, column=c1 + 1, value=round(r["fact_fts"].sum(), 2))
                     else:
-                        ws.cell(row=current_row, column=4 + 12 * n_f + fi, value="")
-                current_row += 1
-                ws.cell(row=current_row, column=2, value="")
-                ws.cell(row=current_row, column=3, value="")
-                for col_m in range(12):
-                    r = df_r[(df_r["division_title"] == div) & (df_r["operation_id"] == op) & (df_r["month"] == col_m + 1)]
+                        ws.cell(row=current_row, column=c1, value="")
+                        ws.cell(row=current_row, column=c1 + 1, value="")
                     for fi, sp in enumerate(specs_avail):
                         if not r.empty and sp["pred_ops_col"] in r.columns:
-                            w = _wape_row(r["fact_value"].iloc[0], r[sp["pred_ops_col"]].iloc[0])
-                            ws.cell(row=current_row, column=4 + col_m * n_f + fi, value=round(w, 2) if pd.notna(w) else "")
+                            ws.cell(row=current_row, column=c1 + 2 + 4 * fi, value=round(r[sp["pred_ops_col"]].sum(), 2))
+                            pred_fts = sp.get("pred_fts_col") and sp["pred_fts_col"] in r.columns
+                            ws.cell(row=current_row, column=c1 + 3 + 4 * fi, value=round(r[sp["pred_fts_col"]].sum(), 2) if pred_fts else "")
+                            mape_v = r[sp["mape_fts_col"]].mean() if sp["mape_fts_col"] in r.columns else np.nan
+                            ws.cell(row=current_row, column=c1 + 4 + 4 * fi, value=round(mape_v, 2) if pd.notna(mape_v) else "")
                         else:
-                            ws.cell(row=current_row, column=4 + col_m * n_f + fi, value="")
-                for fi, sp in enumerate(specs_avail):
-                    if not r_year.empty and sp["pred_ops_col"] in r_year.columns:
-                        w = calc_wmape(r_year["fact_value"], r_year[sp["pred_ops_col"]])
-                        ws.cell(row=current_row, column=4 + 12 * n_f + fi, value=round(w, 2) if pd.notna(w) and r_year["fact_value"].abs().sum() else "")
-                    else:
-                        ws.cell(row=current_row, column=4 + 12 * n_f + fi, value="")
-                current_row += 1
-            if prev_div is not None and current_row > data_start_row:
-                _slice = df_r[df_r["division_title"] == prev_div]
-                ws.cell(row=current_row, column=2, value="")
-                ws.cell(row=current_row, column=3, value="\u0418\u0442\u043e\u0433\u043e")
-                for col_m in range(12):
-                    s = _slice[_slice["month"] == col_m + 1]
-                    for fi, sp in enumerate(specs_avail):
-                        ws.cell(row=current_row, column=4 + col_m * n_f + fi, value=round(s[sp["mape_fts_col"]].mean(), 2) if not s.empty and sp["mape_fts_col"] in s.columns else "")
-                for fi, sp in enumerate(specs_avail):
-                    v = _slice[sp["mape_fts_col"]].mean() if not _slice.empty and sp["mape_fts_col"] in _slice.columns else np.nan
-                    ws.cell(row=current_row, column=4 + 12 * n_f + fi, value=round(v, 2) if pd.notna(v) else "")
-                current_row += 1
-                ws.cell(row=current_row, column=2, value="")
-                ws.cell(row=current_row, column=3, value="WAPE \u043d\u0430 \u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u0435 \u0448\u0442\u0443\u043a")
-                for col_m in range(12):
-                    s = _slice[_slice["month"] == col_m + 1]
-                    for fi, sp in enumerate(specs_avail):
-                        w = calc_wmape(s["fact_value"], s[sp["pred_ops_col"]]) if not s.empty and sp["pred_ops_col"] in s.columns else np.nan
-                        ws.cell(row=current_row, column=4 + col_m * n_f + fi, value=round(w, 2) if pd.notna(w) else "")
-                for fi, sp in enumerate(specs_avail):
-                    w = calc_wmape(_slice["fact_value"], _slice[sp["pred_ops_col"]]) if not _slice.empty and sp["pred_ops_col"] in _slice.columns else np.nan
-                    ws.cell(row=current_row, column=4 + 12 * n_f + fi, value=round(w, 2) if pd.notna(w) else "")
+                            ws.cell(row=current_row, column=c1 + 2 + 4 * fi, value="")
+                            ws.cell(row=current_row, column=c1 + 3 + 4 * fi, value="")
+                            ws.cell(row=current_row, column=c1 + 4 + 4 * fi, value="")
+                        ws.cell(row=current_row, column=c1 + 5 + 4 * fi, value="")
                 current_row += 1
             if current_row > data_start_row:
-                ws.cell(row=current_row, column=1, value="\u0418\u0422\u041e\u0413\u041e")
-                ws.cell(row=current_row, column=2, value="\u0418\u0442\u043e\u0433\u043e MAPE \u0432 \u041f\u0428\u0415")
+                ws.cell(row=current_row, column=2, value="\u0418\u0442\u043e\u0433\u043e")
                 ws.cell(row=current_row, column=3, value="")
                 for col_m in range(12):
-                    slice_all = df_r[df_r["month"] == col_m + 1]
+                    slice_m = df_r[df_r["month"] == col_m + 1]
+                    c1 = 4 + col_m * cols_per_month
+                    if not slice_m.empty:
+                        ws.cell(row=current_row, column=c1, value=round(slice_m["fact_value"].sum(), 2))
+                        ws.cell(row=current_row, column=c1 + 1, value=round(slice_m["fact_fts"].sum(), 2))
                     for fi, sp in enumerate(specs_avail):
-                        v = slice_all[sp["mape_fts_col"]].mean() if not slice_all.empty and sp["mape_fts_col"] in slice_all.columns else np.nan
-                        ws.cell(row=current_row, column=4 + col_m * n_f + fi, value=round(v, 2) if pd.notna(v) else "")
-                for fi, sp in enumerate(specs_avail):
-                    v = df_r[sp["mape_fts_col"]].mean() if sp["mape_fts_col"] in df_r.columns else np.nan
-                    ws.cell(row=current_row, column=4 + 12 * n_f + fi, value=round(v, 2) if pd.notna(v) else "")
+                        if not slice_m.empty and sp["pred_ops_col"] in slice_m.columns:
+                            ws.cell(row=current_row, column=c1 + 2 + 4 * fi, value=round(slice_m[sp["pred_ops_col"]].sum(), 2))
+                            f_fts = slice_m["fact_fts"].sum()
+                            p_fts = slice_m[sp["pred_fts_col"]].sum() if sp.get("pred_fts_col") and sp["pred_fts_col"] in slice_m.columns else 0
+                            mape_agg = abs(f_fts - p_fts) / f_fts * 100 if f_fts and pd.notna(p_fts) else np.nan
+                            ws.cell(row=current_row, column=c1 + 3 + 4 * fi, value=round(slice_m[sp["pred_fts_col"]].sum(), 2) if sp.get("pred_fts_col") and sp["pred_fts_col"] in slice_m.columns else "")
+                            ws.cell(row=current_row, column=c1 + 4 + 4 * fi, value=round(mape_agg, 2) if pd.notna(mape_agg) else "")
+                        else:
+                            ws.cell(row=current_row, column=c1 + 2 + 4 * fi, value="")
+                            ws.cell(row=current_row, column=c1 + 3 + 4 * fi, value="")
+                            ws.cell(row=current_row, column=c1 + 4 + 4 * fi, value="")
+                        ws.cell(row=current_row, column=c1 + 5 + 4 * fi, value="")
                 current_row += 1
-                ws.cell(row=current_row, column=2, value="WAPE \u043d\u0430 \u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u0435 \u0448\u0442\u0443\u043a")
-                ws.cell(row=current_row, column=3, value="")
+                ws.cell(row=current_row, column=3, value="WAPE \u043d\u0430 \u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u0435 \u0448\u0442\u0443\u043a")
                 for col_m in range(12):
-                    slice_all = df_r[df_r["month"] == col_m + 1]
+                    slice_m = df_r[df_r["month"] == col_m + 1]
+                    c1 = 4 + col_m * cols_per_month
                     for fi, sp in enumerate(specs_avail):
-                        w = calc_wmape(slice_all["fact_value"], slice_all[sp["pred_ops_col"]]) if not slice_all.empty and sp["pred_ops_col"] in slice_all.columns else np.nan
-                        ws.cell(row=current_row, column=4 + col_m * n_f + fi, value=round(w, 2) if pd.notna(w) else "")
-                for fi, sp in enumerate(specs_avail):
-                    w = calc_wmape(df_r["fact_value"], df_r[sp["pred_ops_col"]]) if sp["pred_ops_col"] in df_r.columns and df_r["fact_value"].abs().sum() else np.nan
-                    ws.cell(row=current_row, column=4 + 12 * n_f + fi, value=round(w, 2) if pd.notna(w) else "")
+                        if not slice_m.empty and sp["pred_ops_col"] in slice_m.columns:
+                            w = calc_wmape(slice_m["fact_value"], slice_m[sp["pred_ops_col"]])
+                            ws.cell(row=current_row, column=c1 + 5 + 4 * fi, value=round(w, 2) if pd.notna(w) else "")
+                        else:
+                            ws.cell(row=current_row, column=c1 + 5 + 4 * fi, value="")
 
         wb.save(history_xlsx)
         print("Listy Metriki_svod i resist_* (metriki po operacijam, po vsem prognozam) sozdany:", history_xlsx)
