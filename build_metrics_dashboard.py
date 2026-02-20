@@ -66,9 +66,6 @@ DATA_COLS = [
     "abs_error",
     "accuracy_pct",
     "fact_fts",
-    "predict_fts",
-    "abs_error_fts",
-    "accuracy_pct_fts",
 ]
 
 DATA_HEADERS_RU = {
@@ -83,9 +80,6 @@ DATA_HEADERS_RU = {
     "abs_error": "Ошибка, шт. (abs_error)",
     "accuracy_pct": "Точность прогноза, % (Forecast Accuracy)",
     "fact_fts": "Факт, ПШЕ (fact_fts)",
-    "predict_fts": "Прогноз, ПШЕ (predict_fts)",
-    "abs_error_fts": "Ошибка, ПШЕ (abs_error_fts)",
-    "accuracy_pct_fts": "Точность прогноза ПШЕ, % (Forecast Accuracy FTS)",
 }
 
 # Координаты KPI-ячеек на листе «Оценка прогноза» (row, col).
@@ -129,20 +123,13 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     )
     df["accuracy_pct"] = np.round(acc, 2)
 
-    for col in ("fact_fts", "predict_fts"):
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-        else:
-            df[col] = 0.0
+    col_map = {"Факт, ПШЕ": "fact_fts"}
+    df.rename(columns={k: v for k, v in col_map.items() if k in df.columns}, inplace=True)
 
-    df["abs_error_fts"] = (df["fact_fts"] - df["predict_fts"]).abs()
-
-    acc_fts = np.where(
-        df["fact_fts"] == 0,
-        np.where(df["predict_fts"] == 0, 100.0, 0.0),
-        np.clip(100.0 - df["abs_error_fts"] / df["fact_fts"] * 100.0, 0, 100),
-    )
-    df["accuracy_pct_fts"] = np.round(acc_fts, 2)
+    if "fact_fts" in df.columns:
+        df["fact_fts"] = pd.to_numeric(df["fact_fts"], errors="coerce").fillna(0)
+    else:
+        df["fact_fts"] = 0.0
 
     if "month" not in df.columns and "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -232,8 +219,6 @@ def _build_vba_code(last_data_row: int, col_indices: dict[str, int]) -> str:
     err_col = col_indices["abs_error"]
     acc_col = col_indices["accuracy_pct"]
     fact_fts_col = col_indices.get("fact_fts", 0)
-    err_fts_col = col_indices.get("abs_error_fts", 0)
-    acc_fts_col = col_indices.get("accuracy_pct_fts", 0)
 
     kpi_wa = KPI_CELLS["weighted_accuracy"]
     kpi_st = KPI_CELLS["stability"]
@@ -260,16 +245,12 @@ Public Sub RecalcMetrics()
     Dim errCol As Long:     errCol = {err_col}
     Dim accCol As Long:     accCol = {acc_col}
     Dim factFtsCol As Long: factFtsCol = {fact_fts_col}
-    Dim errFtsCol As Long:  errFtsCol = {err_fts_col}
-    Dim accFtsCol As Long:  accFtsCol = {acc_fts_col}
 
     Dim sumFact As Double:    sumFact = 0
     Dim sumErr As Double:     sumErr = 0
     Dim sumAcc As Double:     sumAcc = 0
     Dim sumAcc2 As Double:    sumAcc2 = 0
     Dim sumFactFts As Double: sumFactFts = 0
-    Dim sumErrFts As Double:  sumErrFts = 0
-    Dim sumAccFts As Double:  sumAccFts = 0
     Dim nVisible As Long:     nVisible = 0
     Dim r As Long
     Dim accVal As Double
@@ -286,12 +267,6 @@ Public Sub RecalcMetrics()
             sumAcc2 = sumAcc2 + accVal * accVal
             If factFtsCol > 0 Then
                 sumFactFts = sumFactFts + CDbl(wsData.Cells(r, factFtsCol).Value)
-            End If
-            If errFtsCol > 0 Then
-                sumErrFts = sumErrFts + CDbl(wsData.Cells(r, errFtsCol).Value)
-            End If
-            If accFtsCol > 0 Then
-                sumAccFts = sumAccFts + CDbl(wsData.Cells(r, accFtsCol).Value)
             End If
         End If
     Next r
@@ -354,10 +329,6 @@ Public Sub RecalcMetrics()
     End If
 
     If factFtsCol > 0 Then wsData.Cells(summaryRow, factFtsCol).Value = sumFactFts
-    If errFtsCol > 0 Then wsData.Cells(summaryRow, errFtsCol).Value = sumErrFts
-    If accFtsCol > 0 And nVisible > 0 Then
-        wsData.Cells(summaryRow, accFtsCol).Value = Round(sumAccFts / nVisible, 2)
-    End If
 
     Dim waRow As Long: waRow = summaryRow + 1
     wsData.Cells(waRow, accCol).Value = Round(wAcc, 2)
@@ -409,18 +380,17 @@ def build_data_sheet(wb: Workbook, df: pd.DataFrame) -> dict:
 
     col_indices = {c: cols_to_write.index(c) + 1 for c in cols_to_write}
 
-    for acc_key in ("accuracy_pct", "accuracy_pct_fts"):
-        idx = col_indices.get(acc_key)
-        if idx:
-            letter = get_column_letter(idx)
-            ws.conditional_formatting.add(
-                f"{letter}2:{letter}{last_row}",
-                ColorScaleRule(
-                    start_type="num", start_value=80, start_color="F8696B",
-                    mid_type="num", mid_value=90, mid_color="FFEB84",
-                    end_type="num", end_value=100, end_color="63BE7B",
-                ),
-            )
+    acc_idx = col_indices.get("accuracy_pct")
+    if acc_idx:
+        letter = get_column_letter(acc_idx)
+        ws.conditional_formatting.add(
+            f"{letter}2:{letter}{last_row}",
+            ColorScaleRule(
+                start_type="num", start_value=80, start_color="F8696B",
+                mid_type="num", mid_value=90, mid_color="FFEB84",
+                end_type="num", end_value=100, end_color="63BE7B",
+            ),
+        )
 
     summary_row = last_row + 2
     ws.cell(row=summary_row, column=1, value="Итого по видимым строкам:")
@@ -443,16 +413,12 @@ def build_data_sheet(wb: Workbook, df: pd.DataFrame) -> dict:
     err_ci = col_indices.get("abs_error")
     acc_ci = col_indices.get("accuracy_pct")
 
-    # Начальные значения — ПШЕ (FTS)
     fact_fts_ci = col_indices.get("fact_fts")
-    err_fts_ci = col_indices.get("abs_error_fts")
-    acc_fts_ci = col_indices.get("accuracy_pct_fts")
 
     for ci, series_name, fmt in [
         (fact_ci, "fact_value", '#,##0'),
         (err_ci, "abs_error", '#,##0'),
         (fact_fts_ci, "fact_fts", '#,##0.00'),
-        (err_fts_ci, "abs_error_fts", '#,##0.00'),
     ]:
         if ci and series_name in df.columns:
             ws.cell(row=summary_row, column=ci, value=float(df[series_name].sum()))
@@ -474,11 +440,6 @@ def build_data_sheet(wb: Workbook, df: pd.DataFrame) -> dict:
         qi = calc_quality_index(w_acc, stab)
         ws.cell(row=qi_row, column=acc_ci, value=qi)
         ws.cell(row=qi_row, column=acc_ci).font = Font(bold=True, color="4472C4", size=14)
-
-    if acc_fts_ci:
-        ws.cell(row=summary_row, column=acc_fts_ci,
-                value=round(df["accuracy_pct_fts"].mean(), 2))
-        ws.cell(row=summary_row, column=acc_fts_ci).font = Font(bold=True)
 
     auto_column_width(ws)
 
@@ -665,25 +626,24 @@ def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     months_present = sorted(df["month"].unique())
     divisions = sorted(df["division_title"].dropna().unique())
 
+    last_month_col = len(months_present) + 1
+
     ws.cell(row=1, column=1,
             value="Тепловая карта: Качество (%) по подразделениям и месяцам")
     ws.cell(row=1, column=1).font = Font(bold=True, size=14)
     ws.merge_cells(start_row=1, start_column=1, end_row=1,
-                   end_column=len(months_present) + 2)
+                   end_column=last_month_col)
 
     ws.cell(row=3, column=1, value="Подразделение")
     for mi, m in enumerate(months_present, 2):
         label = MONTH_NAMES[m - 1] if 1 <= m <= 12 else str(m)
         ws.cell(row=3, column=mi, value=label)
-    avg_col = len(months_present) + 2
-    ws.cell(row=3, column=avg_col, value="Среднее")
-    style_header_row(ws, 3, avg_col)
+    style_header_row(ws, 3, last_month_col)
 
     for di, div in enumerate(divisions, 4):
         ws.cell(row=di, column=1, value=div)
         ws.cell(row=di, column=1).border = THIN_BORDER
 
-        row_values = []
         for mi, m in enumerate(months_present, 2):
             slice_df = df[(df["division_title"] == div) & (df["month"] == m)]
             if slice_df.empty or slice_df["fact_value"].sum() == 0:
@@ -695,18 +655,10 @@ def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
                 qi = calc_quality_index(w_acc, stab)
                 ws.cell(row=di, column=mi, value=qi)
                 ws.cell(row=di, column=mi).number_format = '0.0'
-                row_values.append(qi)
             ws.cell(row=di, column=mi).border = THIN_BORDER
 
-        if row_values:
-            ws.cell(row=di, column=avg_col, value=round(np.mean(row_values), 2))
-        else:
-            ws.cell(row=di, column=avg_col, value="—")
-        ws.cell(row=di, column=avg_col).border = THIN_BORDER
-        ws.cell(row=di, column=avg_col).font = Font(bold=True)
-
     last_data_row = 3 + len(divisions)
-    for mi in range(2, avg_col + 1):
+    for mi in range(2, last_month_col + 1):
         col_letter = get_column_letter(mi)
         rng = f"{col_letter}4:{col_letter}{last_data_row}"
         ws.conditional_formatting.add(
@@ -719,7 +671,7 @@ def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
         )
 
     ws.column_dimensions["A"].width = 35
-    for ci in range(2, avg_col + 1):
+    for ci in range(2, last_month_col + 1):
         ws.column_dimensions[get_column_letter(ci)].width = 10
 
     total_row = last_data_row + 1
@@ -727,7 +679,6 @@ def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     ws.cell(row=total_row, column=1).font = Font(bold=True, size=12)
     ws.cell(row=total_row, column=1).border = THIN_BORDER
 
-    total_values = []
     for mi, m in enumerate(months_present, 2):
         slice_df = df[df["month"] == m]
         if slice_df.empty or slice_df["fact_value"].sum() == 0:
@@ -738,14 +689,8 @@ def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
             qi = calc_quality_index(w_acc, stab)
             ws.cell(row=total_row, column=mi, value=qi)
             ws.cell(row=total_row, column=mi).number_format = '0.0'
-            total_values.append(qi)
         ws.cell(row=total_row, column=mi).border = THIN_BORDER
         ws.cell(row=total_row, column=mi).font = Font(bold=True)
-
-    if total_values:
-        ws.cell(row=total_row, column=avg_col, value=round(np.mean(total_values), 2))
-    ws.cell(row=total_row, column=avg_col).font = Font(bold=True, size=12)
-    ws.cell(row=total_row, column=avg_col).border = THIN_BORDER
 
     legend_row = total_row + 2
     ws.cell(row=legend_row, column=1, value="Легенда:").font = Font(bold=True)
