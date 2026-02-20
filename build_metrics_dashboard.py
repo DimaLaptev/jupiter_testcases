@@ -2,7 +2,7 @@
 Сборка Excel-дашборда (.xlsm) «Оценка качества прогноза» из df_model39.
 
 Все 4 метрики пересчитываются VBA-макросом (macro) при изменении
-автофильтра (AutoFilter) на листе DATA:
+автофильтра (AutoFilter) на листе «Данные»:
   - Точность прогноза (Forecast Accuracy)  — построчная
   - Взвешенная точность (Weighted Accuracy) — по видимым строкам
   - Индекс стабильности (Stability Score)   — по видимым строкам
@@ -65,6 +65,10 @@ DATA_COLS = [
     "fact_predict",
     "abs_error",
     "accuracy_pct",
+    "fact_fts",
+    "predict_fts",
+    "abs_error_fts",
+    "accuracy_pct_fts",
 ]
 
 DATA_HEADERS_RU = {
@@ -78,9 +82,13 @@ DATA_HEADERS_RU = {
     "fact_predict": "Прогноз, шт. (fact_predict)",
     "abs_error": "Ошибка, шт. (abs_error)",
     "accuracy_pct": "Точность прогноза, % (Forecast Accuracy)",
+    "fact_fts": "Факт, ПШЕ (fact_fts)",
+    "predict_fts": "Прогноз, ПШЕ (predict_fts)",
+    "abs_error_fts": "Ошибка, ПШЕ (abs_error_fts)",
+    "accuracy_pct_fts": "Точность прогноза ПШЕ, % (Forecast Accuracy FTS)",
 }
 
-# Координаты KPI-ячеек на листе DASHBOARD (row, col).
+# Координаты KPI-ячеек на листе «Оценка прогноза» (row, col).
 # VBA-макрос будет записывать значения именно сюда.
 KPI_CELLS = {
     "weighted_accuracy": (3, 1),
@@ -120,6 +128,21 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         np.clip(100.0 - df["abs_error"] / df["fact_value"] * 100.0, 0, 100),
     )
     df["accuracy_pct"] = np.round(acc, 2)
+
+    for col in ("fact_fts", "predict_fts"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        else:
+            df[col] = 0.0
+
+    df["abs_error_fts"] = (df["fact_fts"] - df["predict_fts"]).abs()
+
+    acc_fts = np.where(
+        df["fact_fts"] == 0,
+        np.where(df["predict_fts"] == 0, 100.0, 0.0),
+        np.clip(100.0 - df["abs_error_fts"] / df["fact_fts"] * 100.0, 0, 100),
+    )
+    df["accuracy_pct_fts"] = np.round(acc_fts, 2)
 
     if "month" not in df.columns and "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -208,6 +231,9 @@ def _build_vba_code(last_data_row: int, col_indices: dict[str, int]) -> str:
     fact_col = col_indices["fact_value"]
     err_col = col_indices["abs_error"]
     acc_col = col_indices["accuracy_pct"]
+    fact_fts_col = col_indices.get("fact_fts", 0)
+    err_fts_col = col_indices.get("abs_error_fts", 0)
+    acc_fts_col = col_indices.get("accuracy_pct_fts", 0)
 
     kpi_wa = KPI_CELLS["weighted_accuracy"]
     kpi_st = KPI_CELLS["stability"]
@@ -217,29 +243,34 @@ def _build_vba_code(last_data_row: int, col_indices: dict[str, int]) -> str:
     kpi_vr = KPI_CELLS["visible_rows"]
 
     return f'''
-' === RecalcMetrics: пересчёт всех 4 метрик по видимым строкам листа DATA ===
-' Вызывается автоматически при изменении фильтра (AutoFilter).
+' === RecalcMetrics: пересчёт метрик по видимым строкам листа «Данные» ===
 
 Public Sub RecalcMetrics()
     On Error GoTo ErrHandler
 
     Dim wsData As Worksheet
     Dim wsDash As Worksheet
-    Set wsData = ThisWorkbook.Sheets("DATA")
-    Set wsDash = ThisWorkbook.Sheets("DASHBOARD")
+    Set wsData = ThisWorkbook.Sheets("\u0414\u0430\u043d\u043d\u044b\u0435")
+    Set wsDash = ThisWorkbook.Sheets("\u041e\u0446\u0435\u043d\u043a\u0430 \u043f\u0440\u043e\u0433\u043d\u043e\u0437\u0430")
 
     Dim lastRow As Long
     lastRow = {last_data_row}
 
-    Dim factCol As Long: factCol = {fact_col}
-    Dim errCol As Long:  errCol = {err_col}
-    Dim accCol As Long:  accCol = {acc_col}
+    Dim factCol As Long:    factCol = {fact_col}
+    Dim errCol As Long:     errCol = {err_col}
+    Dim accCol As Long:     accCol = {acc_col}
+    Dim factFtsCol As Long: factFtsCol = {fact_fts_col}
+    Dim errFtsCol As Long:  errFtsCol = {err_fts_col}
+    Dim accFtsCol As Long:  accFtsCol = {acc_fts_col}
 
-    Dim sumFact As Double: sumFact = 0
-    Dim sumErr As Double:  sumErr = 0
-    Dim sumAcc As Double:  sumAcc = 0
-    Dim sumAcc2 As Double: sumAcc2 = 0
-    Dim nVisible As Long:  nVisible = 0
+    Dim sumFact As Double:    sumFact = 0
+    Dim sumErr As Double:     sumErr = 0
+    Dim sumAcc As Double:     sumAcc = 0
+    Dim sumAcc2 As Double:    sumAcc2 = 0
+    Dim sumFactFts As Double: sumFactFts = 0
+    Dim sumErrFts As Double:  sumErrFts = 0
+    Dim sumAccFts As Double:  sumAccFts = 0
+    Dim nVisible As Long:     nVisible = 0
     Dim r As Long
     Dim accVal As Double
 
@@ -253,6 +284,15 @@ Public Sub RecalcMetrics()
             accVal = CDbl(wsData.Cells(r, accCol).Value)
             sumAcc = sumAcc + accVal
             sumAcc2 = sumAcc2 + accVal * accVal
+            If factFtsCol > 0 Then
+                sumFactFts = sumFactFts + CDbl(wsData.Cells(r, factFtsCol).Value)
+            End If
+            If errFtsCol > 0 Then
+                sumErrFts = sumErrFts + CDbl(wsData.Cells(r, errFtsCol).Value)
+            End If
+            If accFtsCol > 0 Then
+                sumAccFts = sumAccFts + CDbl(wsData.Cells(r, accFtsCol).Value)
+            End If
         End If
     Next r
 
@@ -301,9 +341,10 @@ Public Sub RecalcMetrics()
     wsDash.Cells({kpi_tp[0]}, {kpi_tp[1]}).Value = Format(CLng(sumFact - sumErr), "#,##0")
     wsDash.Cells({kpi_vr[0]}, {kpi_vr[1]}).Value = nVisible
 
-    ' --- Запись итогов на лист DATA (строка под данными) ---
+    ' --- Запись итогов на лист DATA ---
     Dim summaryRow As Long
     summaryRow = lastRow + 2
+
     wsData.Cells(summaryRow, factCol).Value = sumFact
     wsData.Cells(summaryRow, errCol).Value = sumErr
     If nVisible > 0 Then
@@ -312,16 +353,19 @@ Public Sub RecalcMetrics()
         wsData.Cells(summaryRow, accCol).Value = 0
     End If
 
-    Dim waRow As Long
-    waRow = summaryRow + 1
+    If factFtsCol > 0 Then wsData.Cells(summaryRow, factFtsCol).Value = sumFactFts
+    If errFtsCol > 0 Then wsData.Cells(summaryRow, errFtsCol).Value = sumErrFts
+    If accFtsCol > 0 And nVisible > 0 Then
+        wsData.Cells(summaryRow, accFtsCol).Value = Round(sumAccFts / nVisible, 2)
+    End If
+
+    Dim waRow As Long: waRow = summaryRow + 1
     wsData.Cells(waRow, accCol).Value = Round(wAcc, 2)
 
-    Dim stRow As Long
-    stRow = summaryRow + 2
+    Dim stRow As Long: stRow = summaryRow + 2
     wsData.Cells(stRow, accCol).Value = Round(stab, 2)
 
-    Dim qiRow As Long
-    qiRow = summaryRow + 3
+    Dim qiRow As Long: qiRow = summaryRow + 3
     wsData.Cells(qiRow, accCol).Value = Round(qi, 2)
 
     Application.ScreenUpdating = True
@@ -335,13 +379,13 @@ End Sub
 
 
 # ---------------------------------------------------------------------------
-#  Лист DATA
+#  Лист «Данные»
 # ---------------------------------------------------------------------------
 
 
 def build_data_sheet(wb: Workbook, df: pd.DataFrame) -> dict:
     """Возвращает (returns) dict с метаданными: last_row, col_indices."""
-    ws = wb.create_sheet("DATA")
+    ws = wb.create_sheet("Данные")
 
     cols_to_write = [c for c in DATA_COLS if c in df.columns]
     headers = [DATA_HEADERS_RU.get(c, c) for c in cols_to_write]
@@ -365,19 +409,19 @@ def build_data_sheet(wb: Workbook, df: pd.DataFrame) -> dict:
 
     col_indices = {c: cols_to_write.index(c) + 1 for c in cols_to_write}
 
-    acc_col_idx = col_indices.get("accuracy_pct")
-    if acc_col_idx:
-        acc_letter = get_column_letter(acc_col_idx)
-        ws.conditional_formatting.add(
-            f"{acc_letter}2:{acc_letter}{last_row}",
-            ColorScaleRule(
-                start_type="num", start_value=0, start_color="F8696B",
-                mid_type="num", mid_value=50, mid_color="FFEB84",
-                end_type="num", end_value=100, end_color="63BE7B",
-            ),
-        )
+    for acc_key in ("accuracy_pct", "accuracy_pct_fts"):
+        idx = col_indices.get(acc_key)
+        if idx:
+            letter = get_column_letter(idx)
+            ws.conditional_formatting.add(
+                f"{letter}2:{letter}{last_row}",
+                ColorScaleRule(
+                    start_type="num", start_value=80, start_color="F8696B",
+                    mid_type="num", mid_value=90, mid_color="FFEB84",
+                    end_type="num", end_value=100, end_color="63BE7B",
+                ),
+            )
 
-    # Подписи строк-итогов (значения заполнит VBA при первом запуске)
     summary_row = last_row + 2
     ws.cell(row=summary_row, column=1, value="Итого по видимым строкам:")
     ws.cell(row=summary_row, column=1).font = Font(bold=True)
@@ -387,26 +431,34 @@ def build_data_sheet(wb: Workbook, df: pd.DataFrame) -> dict:
     ws.cell(row=wa_row, column=1).font = Font(bold=True, color="4472C4")
 
     st_row = summary_row + 2
-    ws.cell(row=st_row, column=1, value="Индекс стабильности (Stability Score), %:")
+    ws.cell(row=st_row, column=1, value="Стабильность, %:")
     ws.cell(row=st_row, column=1).font = Font(bold=True, color="4472C4")
 
     qi_row = summary_row + 3
-    ws.cell(row=qi_row, column=1, value="Рейтинг качества (Quality Index), %:")
+    ws.cell(row=qi_row, column=1, value="Качество, %:")
     ws.cell(row=qi_row, column=1).font = Font(bold=True, color="4472C4")
 
-    # Начальные значения (до фильтрации — полный массив)
+    # Начальные значения — шт.
     fact_ci = col_indices.get("fact_value")
     err_ci = col_indices.get("abs_error")
     acc_ci = col_indices.get("accuracy_pct")
 
-    if fact_ci:
-        ws.cell(row=summary_row, column=fact_ci, value=float(df["fact_value"].sum()))
-        ws.cell(row=summary_row, column=fact_ci).font = Font(bold=True)
-        ws.cell(row=summary_row, column=fact_ci).number_format = '#,##0'
-    if err_ci:
-        ws.cell(row=summary_row, column=err_ci, value=float(df["abs_error"].sum()))
-        ws.cell(row=summary_row, column=err_ci).font = Font(bold=True)
-        ws.cell(row=summary_row, column=err_ci).number_format = '#,##0'
+    # Начальные значения — ПШЕ (FTS)
+    fact_fts_ci = col_indices.get("fact_fts")
+    err_fts_ci = col_indices.get("abs_error_fts")
+    acc_fts_ci = col_indices.get("accuracy_pct_fts")
+
+    for ci, series_name, fmt in [
+        (fact_ci, "fact_value", '#,##0'),
+        (err_ci, "abs_error", '#,##0'),
+        (fact_fts_ci, "fact_fts", '#,##0.00'),
+        (err_fts_ci, "abs_error_fts", '#,##0.00'),
+    ]:
+        if ci and series_name in df.columns:
+            ws.cell(row=summary_row, column=ci, value=float(df[series_name].sum()))
+            ws.cell(row=summary_row, column=ci).font = Font(bold=True)
+            ws.cell(row=summary_row, column=ci).number_format = fmt
+
     if acc_ci:
         ws.cell(row=summary_row, column=acc_ci, value=round(df["accuracy_pct"].mean(), 2))
         ws.cell(row=summary_row, column=acc_ci).font = Font(bold=True)
@@ -423,18 +475,23 @@ def build_data_sheet(wb: Workbook, df: pd.DataFrame) -> dict:
         ws.cell(row=qi_row, column=acc_ci, value=qi)
         ws.cell(row=qi_row, column=acc_ci).font = Font(bold=True, color="4472C4", size=14)
 
+    if acc_fts_ci:
+        ws.cell(row=summary_row, column=acc_fts_ci,
+                value=round(df["accuracy_pct_fts"].mean(), 2))
+        ws.cell(row=summary_row, column=acc_fts_ci).font = Font(bold=True)
+
     auto_column_width(ws)
 
     return {"last_row": last_row, "col_indices": col_indices}
 
 
 # ---------------------------------------------------------------------------
-#  Лист DASHBOARD
+#  Лист «Оценка прогноза»
 # ---------------------------------------------------------------------------
 
 
 def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame) -> None:
-    ws = wb.create_sheet("DASHBOARD")
+    ws = wb.create_sheet("Оценка прогноза")
 
     w_acc = calc_weighted_accuracy(df)
     stab = calc_stability(df)
@@ -442,36 +499,36 @@ def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     total_fact = int(df["fact_value"].sum())
 
     ws.merge_cells("A1:L1")
-    ws.cell(row=1, column=1, value="Оценка качества прогноза (Forecast Quality Dashboard)")
+    ws.cell(row=1, column=1, value="Оценка качества прогноза")
     ws.cell(row=1, column=1).font = Font(bold=True, size=16)
     ws.cell(row=1, column=1).alignment = Alignment(horizontal="center")
 
     def _fill_for(val: float) -> PatternFill:
-        if val >= 70:
+        if val >= 90:
             return GOOD_FILL
-        if val >= 40:
+        if val >= 80:
             return NEUTRAL_FILL
         return BAD_FILL
 
     write_kpi_card(ws, *KPI_CELLS["weighted_accuracy"],
-                   "Взвешенная\nточность\n(Weighted Accuracy)", f"{w_acc:.1f}%", _fill_for(w_acc))
+                   "Взвешенная\nточность", f"{w_acc:.1f}%", _fill_for(w_acc))
     write_kpi_card(ws, *KPI_CELLS["stability"],
-                   "Индекс\nстабильности\n(Stability Score)", f"{stab:.1f}%", _fill_for(stab))
+                   "Стабильность", f"{stab:.1f}%", _fill_for(stab))
     write_kpi_card(ws, *KPI_CELLS["quality_index"],
-                   "Рейтинг\nкачества\n(Quality Index)", f"{qi:.1f}%", _fill_for(qi))
+                   "Качество", f"{qi:.1f}%", _fill_for(qi))
     write_kpi_card(ws, *KPI_CELLS["total_fact"],
-                   "Факт всего\n(Total Fact)", f"{total_fact:,}", GOOD_FILL)
+                   "Факт\nвсего", f"{total_fact:,}", GOOD_FILL)
     write_kpi_card(ws, *KPI_CELLS["total_pred"],
-                   "Прогноз всего\n(Total Predict)", f"{int(df['fact_predict'].sum()):,}", GOOD_FILL)
+                   "Прогноз\nвсего", f"{int(df['fact_predict'].sum()):,}", GOOD_FILL)
     write_kpi_card(ws, *KPI_CELLS["visible_rows"],
-                   "Строк\n(Visible Rows)", len(df), GOOD_FILL)
+                   "Кол-во\nстрок", len(df), GOOD_FILL)
 
     ws.row_dimensions[3].height = 50
     ws.row_dimensions[4].height = 55
 
     # Кнопка пересчёта (инструкция для пользователя)
     ws.cell(row=2, column=1, value=(
-        "⟳ Метрики пересчитываются автоматически при фильтрации на листе DATA. "
+        "Метрики пересчитываются автоматически при фильтрации на листе «Данные». "
         "Если нужно пересчитать вручную: Alt+F8 → RecalcMetrics → Выполнить."
     ))
     ws.cell(row=2, column=1).font = Font(italic=True, size=10, color="555555")
@@ -480,13 +537,13 @@ def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     # Пояснение формул
     ws.cell(row=6, column=1, value="Как считаются показатели:").font = Font(bold=True, size=12)
     formulas_text = [
-        ("Точность прогноза (Forecast Accuracy)",
+        ("Точность прогноза",
          "MAX(0; 100% - |Факт - Прогноз| / Факт * 100%). Считается для каждой строки."),
-        ("Взвешенная точность (Weighted Accuracy)",
+        ("Взвешенная точность",
          "(1 - Сумма|Ошибок| / СуммаФакт) * 100%. Крупные операции весят больше."),
-        ("Индекс стабильности (Stability Score)",
+        ("Стабильность",
          "(1 - CV) * 100%, где CV - отношение разброса к среднему. Чем меньше разброс, тем стабильнее."),
-        ("Рейтинг качества (Quality Index)",
+        ("Качество",
          "Гармоническое среднее Точности и Стабильности. Провал любого показателя снижает рейтинг."),
     ]
     for i, (name, desc) in enumerate(formulas_text):
@@ -497,7 +554,7 @@ def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     # Топ-10 худших
     top_section_row = 12
     ws.cell(row=top_section_row, column=1,
-            value="Топ-10 подразделений с ХУДШЕЙ точностью (крупные)")
+            value="Топ-10 подразделений с ХУДШИМ качеством (крупные)")
     ws.cell(row=top_section_row, column=1).font = Font(bold=True, size=12, color="C00000")
     ws.merge_cells(start_row=top_section_row, start_column=1,
                    end_row=top_section_row, end_column=8)
@@ -505,30 +562,30 @@ def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     div_stats = _division_stats(df)
     volume_threshold = df["fact_value"].sum() * 0.001
     significant = div_stats[div_stats["fact_sum"] >= max(volume_threshold, 1)]
-    worst = significant.nsmallest(10, "weighted_accuracy")
+    worst = significant.nsmallest(10, "quality_index")
     _write_div_table(ws, top_section_row + 1, worst, is_worst=True)
 
     # Топ-10 лучших
     best_section_row = top_section_row + len(worst) + 3
     ws.cell(row=best_section_row, column=1,
-            value="Топ-10 подразделений с ЛУЧШЕЙ точностью (крупные)")
+            value="Топ-10 подразделений с ЛУЧШИМ качеством (крупные)")
     ws.cell(row=best_section_row, column=1).font = Font(bold=True, size=12, color="007030")
     ws.merge_cells(start_row=best_section_row, start_column=1,
                    end_row=best_section_row, end_column=8)
-    best = significant.nlargest(10, "weighted_accuracy")
+    best = significant.nlargest(10, "quality_index")
     _write_div_table(ws, best_section_row + 1, best, is_worst=False)
 
     # Scatter-данные
     scatter_row = best_section_row + len(best) + 3
     ws.cell(row=scatter_row, column=1,
-            value="Данные для диаграммы «Точность vs Стабильность» по подразделениям")
+            value="Данные для диаграммы «Точность и Стабильность» по подразделениям")
     ws.cell(row=scatter_row, column=1).font = Font(bold=True, size=12)
     ws.merge_cells(start_row=scatter_row, start_column=1,
                    end_row=scatter_row, end_column=8)
 
     scatter_headers = [
         "Подразделение", "Взвеш. точность, %", "Стабильность, %",
-        "Рейтинг качества, %", "Факт, шт.",
+        "Качество, %", "Факт, шт.",
     ]
     for ci, h in enumerate(scatter_headers, 1):
         ws.cell(row=scatter_row + 1, column=ci, value=h)
@@ -569,7 +626,7 @@ def _division_stats(df: pd.DataFrame) -> pd.DataFrame:
 def _write_div_table(ws, start_row: int, data: pd.DataFrame, is_worst: bool) -> None:
     headers = [
         "Подразделение", "Факт, шт.", "Прогноз, шт.", "Ошибка, шт.",
-        "Взвеш. точность, %", "Стабильность, %", "Рейтинг, %",
+        "Взвеш. точность, %", "Стабильность, %", "Качество, %",
     ]
     for ci, h in enumerate(headers, 1):
         ws.cell(row=start_row, column=ci, value=h)
@@ -593,12 +650,12 @@ def _write_div_table(ws, start_row: int, data: pd.DataFrame, is_worst: bool) -> 
 
 
 # ---------------------------------------------------------------------------
-#  Лист HEATMAP
+#  Лист «Тепловая карта»
 # ---------------------------------------------------------------------------
 
 
 def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
-    ws = wb.create_sheet("HEATMAP")
+    ws = wb.create_sheet("Тепловая карта")
 
     MONTH_NAMES = [
         "Янв", "Фев", "Мар", "Апр", "Май", "Июн",
@@ -609,7 +666,7 @@ def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     divisions = sorted(df["division_title"].dropna().unique())
 
     ws.cell(row=1, column=1,
-            value="Тепловая карта: Взвешенная точность (%) по подразделениям и месяцам")
+            value="Тепловая карта: Качество (%) по подразделениям и месяцам")
     ws.cell(row=1, column=1).font = Font(bold=True, size=14)
     ws.merge_cells(start_row=1, start_column=1, end_row=1,
                    end_column=len(months_present) + 2)
@@ -634,9 +691,11 @@ def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
                 ws.cell(row=di, column=mi).alignment = Alignment(horizontal="center")
             else:
                 w_acc = calc_weighted_accuracy(slice_df)
-                ws.cell(row=di, column=mi, value=w_acc)
+                stab = calc_stability(slice_df)
+                qi = calc_quality_index(w_acc, stab)
+                ws.cell(row=di, column=mi, value=qi)
                 ws.cell(row=di, column=mi).number_format = '0.0'
-                row_values.append(w_acc)
+                row_values.append(qi)
             ws.cell(row=di, column=mi).border = THIN_BORDER
 
         if row_values:
@@ -653,8 +712,8 @@ def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
         ws.conditional_formatting.add(
             rng,
             ColorScaleRule(
-                start_type="num", start_value=0, start_color="F8696B",
-                mid_type="num", mid_value=50, mid_color="FFEB84",
+                start_type="num", start_value=80, start_color="F8696B",
+                mid_type="num", mid_value=90, mid_color="FFEB84",
                 end_type="num", end_value=100, end_color="63BE7B",
             ),
         )
@@ -675,9 +734,11 @@ def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
             ws.cell(row=total_row, column=mi, value="—")
         else:
             w_acc = calc_weighted_accuracy(slice_df)
-            ws.cell(row=total_row, column=mi, value=w_acc)
+            stab = calc_stability(slice_df)
+            qi = calc_quality_index(w_acc, stab)
+            ws.cell(row=total_row, column=mi, value=qi)
             ws.cell(row=total_row, column=mi).number_format = '0.0'
-            total_values.append(w_acc)
+            total_values.append(qi)
         ws.cell(row=total_row, column=mi).border = THIN_BORDER
         ws.cell(row=total_row, column=mi).font = Font(bold=True)
 
@@ -688,11 +749,11 @@ def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
 
     legend_row = total_row + 2
     ws.cell(row=legend_row, column=1, value="Легенда:").font = Font(bold=True)
-    ws.cell(row=legend_row + 1, column=1, value="Красный — точность < 30%")
+    ws.cell(row=legend_row + 1, column=1, value="Красный — качество < 80%")
     ws.cell(row=legend_row + 1, column=1).font = Font(color="C00000")
-    ws.cell(row=legend_row + 2, column=1, value="Жёлтый — точность 30–70%")
+    ws.cell(row=legend_row + 2, column=1, value="Жёлтый — качество 80–90%")
     ws.cell(row=legend_row + 2, column=1).font = Font(color="BF8F00")
-    ws.cell(row=legend_row + 3, column=1, value="Зелёный — точность > 70%")
+    ws.cell(row=legend_row + 3, column=1, value="Зелёный — качество > 90%")
     ws.cell(row=legend_row + 3, column=1).font = Font(color="007030")
 
 
@@ -717,12 +778,12 @@ def _save_vba_instructions(xlsx_path: Path, vba_code: str) -> None:
         "5. Вставьте код из секции «КОД ДЛЯ ЭтаКнига» ниже.\n"
         "6. В меню Insert → Module. Вставьте код из секции «КОД ДЛЯ МОДУЛЯ».\n"
         "7. Закройте редактор VBA (Alt+Q), сохраните файл (Ctrl+S).\n\n"
-        "После этого при каждом изменении фильтра на листе DATA все метрики\n"
-        "на DASHBOARD пересчитаются автоматически.\n"
+        "После этого при каждом изменении фильтра на листе «Данные» все метрики\n"
+        "на листе «Оценка прогноза» пересчитаются автоматически.\n"
         "Ручной запуск: Alt+F8 → RecalcMetrics → Выполнить.\n\n"
         "=== КОД ДЛЯ «ЭтаКнига» (ThisWorkbook) ===\n\n"
         "Private Sub Workbook_SheetCalculate(ByVal Sh As Object)\n"
-        "    If Sh.Name = \"DATA\" Then\n"
+        "    If Sh.Name = \"\u0414\u0430\u043d\u043d\u044b\u0435\" Then\n"
         "        RecalcMetrics\n"
         "    End If\n"
         "End Sub\n\n"
