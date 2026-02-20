@@ -11,10 +11,15 @@
 Фильтрация доступна по всем полям: resist_id, division_title,
 operation_id, date, month, year.
 
+Выходной файл: .xlsx (корректный формат, открывается без ошибок).
+Рядом создаётся .vba.txt с инструкцией и кодом макроса.
+Пользователь при желании: Файл → Сохранить как → .xlsm, затем Alt+F11
+и вставляет макрос из .vba.txt.
+
 Использование:
     python build_metrics_dashboard.py
     python build_metrics_dashboard.py --input path/to/file.xlsx
-    python build_metrics_dashboard.py --input path/to/file.xlsx --output result.xlsm
+    python build_metrics_dashboard.py --input path/to/file.xlsx --output result.xlsx
 """
 
 from __future__ import annotations
@@ -29,7 +34,6 @@ from openpyxl import Workbook
 from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from openpyxl.writer.excel import ExcelWriter
 
 # ---------------------------------------------------------------------------
 #  Константы (Constants)
@@ -477,13 +481,13 @@ def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     ws.cell(row=6, column=1, value="Как считаются показатели:").font = Font(bold=True, size=12)
     formulas_text = [
         ("Точность прогноза (Forecast Accuracy)",
-         "= MAX(0; 100% − |Факт − Прогноз| / Факт × 100%). Считается для каждой строки."),
+         "MAX(0; 100% - |Факт - Прогноз| / Факт * 100%). Считается для каждой строки."),
         ("Взвешенная точность (Weighted Accuracy)",
-         "= (1 − Σ|Ошибок| / ΣФакт) × 100%. Крупные операции весят больше."),
+         "(1 - Сумма|Ошибок| / СуммаФакт) * 100%. Крупные операции весят больше."),
         ("Индекс стабильности (Stability Score)",
-         "= (1 − CV) × 100%, где CV = σ(Точность) / μ(Точность). Чем меньше разброс, тем стабильнее."),
+         "(1 - CV) * 100%, где CV - отношение разброса к среднему. Чем меньше разброс, тем стабильнее."),
         ("Рейтинг качества (Quality Index)",
-         "= Гармоническое среднее Точности и Стабильности. Провал любого → низкий рейтинг."),
+         "Гармоническое среднее Точности и Стабильности. Провал любого показателя снижает рейтинг."),
     ]
     for i, (name, desc) in enumerate(formulas_text):
         ws.cell(row=7 + i, column=1, value=name).font = Font(bold=True, size=10)
@@ -697,35 +701,32 @@ def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _inject_vba(xlsm_path: Path, vba_code: str) -> None:
-    """
-    Создаёт (create) минимальный vbaProject.bin и внедряет (inject) его
-    в .xlsm-файл. Используется библиотека (library) openpyxl + zipfile.
-
-    openpyxl не поддерживает запись VBA напрямую, поэтому используем
-    готовый шаблон vbaProject.bin, сгенерированный заранее.
-    Альтернатива: пользователь вставляет макрос вручную через Alt+F11.
-    """
-    # openpyxl не умеет создавать vbaProject.bin с нуля.
-    # Вместо этого создаём файл-инструкцию рядом с xlsm.
-    vba_file = xlsm_path.with_suffix(".vba.txt")
+def _save_vba_instructions(xlsx_path: Path, vba_code: str) -> None:
+    """Сохраняет (save) VBA-код и инструкцию в текстовый файл рядом с xlsx."""
+    vba_file = xlsx_path.with_suffix(".vba.txt")
     instructions = (
         "=== ИНСТРУКЦИЯ ПО УСТАНОВКЕ МАКРОСА (VBA Macro Setup) ===\n\n"
-        "1. Откройте файл .xlsm в Excel.\n"
-        "2. Нажмите Alt+F11 (откроется редактор VBA).\n"
-        "3. В левой панели найдите «ЭтаКнига» (ThisWorkbook), дважды кликните.\n"
-        "4. Вставьте ВЕСЬ код ниже в окно кода «ЭтаКнига».\n"
-        "5. Закройте редактор VBA (Alt+Q).\n"
-        "6. Сохраните файл (Ctrl+S).\n"
-        "7. Теперь при каждом изменении фильтра на листе DATA метрики\n"
-        "   на DASHBOARD будут пересчитываться автоматически.\n\n"
+        "Файл дашборда сохранён в формате .xlsx и открывается без ошибок.\n"
+        "Чтобы метрики пересчитывались при фильтрации автоматически,\n"
+        "выполните следующие шаги ОДИН РАЗ:\n\n"
+        "1. Откройте .xlsx файл в Excel.\n"
+        "2. Файл → Сохранить как → выберите тип «Книга Excel с поддержкой\n"
+        "   макросов (*.xlsm)». Сохраните.\n"
+        "3. Нажмите Alt+F11 (откроется редактор VBA).\n"
+        "4. В левой панели найдите «ЭтаКнига» (ThisWorkbook), дважды кликните.\n"
+        "5. Вставьте код из секции «КОД ДЛЯ ЭтаКнига» ниже.\n"
+        "6. В меню Insert → Module. Вставьте код из секции «КОД ДЛЯ МОДУЛЯ».\n"
+        "7. Закройте редактор VBA (Alt+Q), сохраните файл (Ctrl+S).\n\n"
+        "После этого при каждом изменении фильтра на листе DATA все метрики\n"
+        "на DASHBOARD пересчитаются автоматически.\n"
+        "Ручной запуск: Alt+F8 → RecalcMetrics → Выполнить.\n\n"
         "=== КОД ДЛЯ «ЭтаКнига» (ThisWorkbook) ===\n\n"
         "Private Sub Workbook_SheetCalculate(ByVal Sh As Object)\n"
         "    If Sh.Name = \"DATA\" Then\n"
         "        RecalcMetrics\n"
         "    End If\n"
         "End Sub\n\n"
-        "=== КОД ДЛЯ НОВОГО МОДУЛЯ (Insert → Module) ===\n\n"
+        "=== КОД ДЛЯ МОДУЛЯ (Insert → Module) ===\n\n"
         f"{vba_code}\n"
     )
     vba_file.write_text(instructions, encoding="utf-8")
@@ -750,23 +751,20 @@ def build_dashboard(input_path: str | Path, output_path: str | Path | None = Non
 
     if output_path is None:
         out_dir = Path(input_path).parent
-        output_path = out_dir / "forecast_dashboard.xlsm"
+        output_path = out_dir / "forecast_dashboard.xlsx"
     else:
         output_path = Path(output_path)
-        if output_path.suffix != ".xlsm":
-            output_path = output_path.with_suffix(".xlsm")
+        if output_path.suffix not in (".xlsx", ".xls"):
+            output_path = output_path.with_suffix(".xlsx")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # openpyxl сохраняет как xlsx; переименуем в xlsm
-    # (Excel откроет и предложит включить макросы)
     wb.save(str(output_path))
 
     vba_code = _build_vba_code(
         last_data_row=data_meta["last_row"],
         col_indices=data_meta["col_indices"],
     )
-    _inject_vba(output_path, vba_code)
+    _save_vba_instructions(output_path, vba_code)
 
     print(f"Дашборд сохранён (dashboard saved): {output_path}")
     return output_path
@@ -784,7 +782,7 @@ def main() -> None:
     parser.add_argument(
         "--output", "-o",
         default=None,
-        help="Путь (path) к выходному xlsm (default: рядом с input, forecast_dashboard.xlsm)",
+        help="Путь (path) к выходному xlsx (default: рядом с input, forecast_dashboard.xlsx)",
     )
     args = parser.parse_args()
 
