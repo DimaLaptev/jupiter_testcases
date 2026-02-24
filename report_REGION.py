@@ -1,4 +1,5 @@
 import os
+import traceback
 
 import xlrd
 import pandas as pd
@@ -28,12 +29,13 @@ def get_report(directoria: str, filename: str):
             if sheet.cell_value(i, 0) == 'Рег.№ поручения:':
                 basis_index = i
         print(f'{str_list=}')
-        return parse_sheet(multi_str, sheet, filename, basis_index)
+        return parse_sheet(str_list, sheet, filename, basis_index)
     except FileNotFoundError:
         print(f"Файл {filepath} не найден.")
         return {}
     except Exception as e:
         print(f"Произошла ошибка: {e}")
+        traceback.print_exc()
         return {}
 
 
