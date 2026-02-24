@@ -65,6 +65,51 @@ def get_entities_with_codificator(depo_type_operation: str):
     return AssignmentType, OperationType, StageName
 
 
+def _find_account_rows(sheet):
+    """
+    Находит (find) строки с 'На счет депо' и 'Со счета депо' по всему листу (sheet).
+    Возвращает dict с ключами 'На счет депо' и 'Со счета депо',
+    значения — номер строки (row index) или None.
+    """
+    result = {'На счет депо': None, 'Со счета депо': None}
+    for i in range(sheet.nrows):
+        cell = sheet.cell_value(i, 0)
+        if not isinstance(cell, str):
+            continue
+        cell_stripped = cell.strip()
+        if 'На счет депо' in cell_stripped and result['На счет депо'] is None:
+            result['На счет депо'] = i
+        elif 'Со счета депо' in cell_stripped and result['Со счета депо'] is None:
+            result['Со счета депо'] = i
+    return result
+
+
+def _extract_accounts(sheet, account_rows: dict):
+    """
+    Извлекает (extract) данные счетов списания/зачисления
+    на основе найденных строк (rows).
+    """
+    DebitAccount = ''
+    DebitAccountSection = ''
+    DepoAccount = ''
+    DepoAccountSection = ''
+
+    co_row = account_rows.get('Со счета депо')
+    na_row = account_rows.get('На счет депо')
+
+    if co_row is not None:
+        DebitAccount = sheet.cell_value(co_row, 2)
+        if co_row + 3 < sheet.nrows:
+            DebitAccountSection = sheet.cell_value(co_row + 3, 2)
+
+    if na_row is not None:
+        DepoAccount = sheet.cell_value(na_row, 2)
+        if na_row + 3 < sheet.nrows:
+            DepoAccountSection = sheet.cell_value(na_row + 3, 2)
+
+    return DebitAccount, DebitAccountSection, DepoAccount, DepoAccountSection
+
+
 def _parse_single_position(sheet, filename, basis_index):
     """Разбор (parse) файла с одной позицией (single position)."""
     report_dict = {}
@@ -76,27 +121,21 @@ def _parse_single_position(sheet, filename, basis_index):
 
     depo_type_operation = sheet.cell_value(9, 2)
     AssignmentType, OperationType, StageName = get_entities_with_codificator(depo_type_operation)
-    NumberKD = sheet.cell_value(23, 4)
-    NGRI = sheet.cell_value(23, 1)
-    AccountDepoSection = sheet.cell_value(16, 2)
-    AccountDepo = sheet.cell_value(13, 2)
 
-    goal_count = sheet.cell_value(13, 0)
-    if 'Со счета депо' in goal_count:
-        DebitAccount = sheet.cell_value(13, 2)
-        DebitAccountSection = sheet.cell_value(16, 2)
-        DepoAccountSection = ''
-        DepoAccount = ''
-    elif 'На счет депо' in goal_count:
-        DebitAccount = ''
-        DebitAccountSection = ''
-        DepoAccountSection = sheet.cell_value(16, 2)
-        DepoAccount = sheet.cell_value(13, 2)
-    else:
-        DebitAccount = ''
-        DebitAccountSection = ''
-        DepoAccountSection = ''
-        DepoAccount = ''
+    account_rows = _find_account_rows(sheet)
+
+    na_row = account_rows.get('На счет депо')
+    co_row = account_rows.get('Со счета депо')
+    ngri_base_row = na_row if na_row is not None else (co_row if co_row is not None else 13)
+
+    NumberKD = ''
+    NGRI = ''
+    if ngri_base_row + 10 < sheet.nrows:
+        NumberKD = sheet.cell_value(ngri_base_row + 10, 4)
+        NGRI = sheet.cell_value(ngri_base_row + 10, 1)
+
+    DebitAccount, DebitAccountSection, DepoAccount, DepoAccountSection = \
+        _extract_accounts(sheet, account_rows)
 
     filename_entities = filename.split('_')
     Account_from_filename = ''
@@ -149,6 +188,20 @@ def parse_sheet(str_list: list, sheet, filename: str, basis_index: int = 27):
         Initiator = 'Акционерное общество "ДОМ.РФ"'
         OperationDate = sheet.cell_value(10, 2)
 
+        account_rows = _find_account_rows(sheet)
+        DebitAccount, DebitAccountSection, DepoAccount, DepoAccountSection = \
+            _extract_accounts(sheet, account_rows)
+
+        na_row = account_rows.get('На счет депо')
+        co_row = account_rows.get('Со счета депо')
+        ngri_base_row = na_row if na_row is not None else (co_row if co_row is not None else 13)
+
+        NumberKD = ''
+        NGRI = ''
+        if ngri_base_row + 10 < sheet.nrows:
+            NumberKD = sheet.cell_value(ngri_base_row + 10, 4)
+            NGRI = sheet.cell_value(ngri_base_row + 10, 1)
+
         filename_entities = filename.split('_')
         Account_from_filename = ''
         for entity in filename_entities:
@@ -157,27 +210,6 @@ def parse_sheet(str_list: list, sheet, filename: str, basis_index: int = 27):
 
         for idx, row_num in enumerate(str_list, start=1):
             report_dict = {}
-            row_idx = row_num - 1
-
-            goal_count = sheet.cell_value(13, 0)
-            if 'Со счета депо' in goal_count:
-                DebitAccount = sheet.cell_value(13, 2)
-                DebitAccountSection = sheet.cell_value(16, 2)
-                DepoAccountSection = ''
-                DepoAccount = ''
-            elif 'На счет депо' in goal_count:
-                DebitAccount = ''
-                DebitAccountSection = ''
-                DepoAccountSection = sheet.cell_value(16, 2)
-                DepoAccount = sheet.cell_value(13, 2)
-            else:
-                DebitAccount = ''
-                DebitAccountSection = ''
-                DepoAccountSection = ''
-                DepoAccount = ''
-
-            NumberKD = sheet.cell_value(23, 4)
-            NGRI = sheet.cell_value(23, 1)
 
             report_dict['Дата операции'] = OperationDate
             report_dict['КодОперации'] = StageName
@@ -209,8 +241,12 @@ def make_excel_report(data, output_file):
     rows = []
 
     for outer_key in data:
-        if data[outer_key]:
-            rows.append(data[outer_key])
+        file_dict = data[outer_key]
+        if file_dict:
+            for position_key in file_dict:
+                record = file_dict[position_key]
+                if record:
+                    rows.append(record)
 
     if rows:
         columns = list(rows[0].keys())
