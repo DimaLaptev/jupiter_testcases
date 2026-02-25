@@ -209,6 +209,7 @@ def write_kpi_card(ws, row: int, col: int, label: str, value, fill: PatternFill)
 def _build_vba_code(last_data_row: int, col_indices: dict[str, int]) -> str:
     acc_col = col_indices["accuracy_pct"]
     fact_col = col_indices["fact_value"]
+    pred_col = col_indices["fact_predict"]
     err_col = col_indices["abs_error"]
     fact_fts_col = col_indices.get("fact_fts", 0)
 
@@ -228,20 +229,22 @@ Public Sub RecalcMetrics()
 
     Dim wsData As Worksheet
     Dim wsDash As Worksheet
-    Set wsData = ThisWorkbook.Sheets("\u0414\u0430\u043d\u043d\u044b\u0435")
-    Set wsDash = ThisWorkbook.Sheets("\u041e\u0446\u0435\u043d\u043a\u0430 \u043f\u0440\u043e\u0433\u043d\u043e\u0437\u0430")
+    Set wsData = ThisWorkbook.Sheets(1)
+    Set wsDash = ThisWorkbook.Sheets(2)
 
     Dim lastRow As Long
     lastRow = {last_data_row}
 
     Dim accCol As Long:     accCol = {acc_col}
     Dim factCol As Long:    factCol = {fact_col}
+    Dim predCol As Long:    predCol = {pred_col}
     Dim errCol As Long:     errCol = {err_col}
     Dim factFtsCol As Long: factFtsCol = {fact_fts_col}
 
     Dim sumAcc As Double:     sumAcc = 0
     Dim sumAcc2 As Double:    sumAcc2 = 0
     Dim sumFact As Double:    sumFact = 0
+    Dim sumPred As Double:    sumPred = 0
     Dim sumErr As Double:     sumErr = 0
     Dim sumFactFts As Double: sumFactFts = 0
     Dim nVisible As Long:     nVisible = 0
@@ -251,15 +254,27 @@ Public Sub RecalcMetrics()
     Application.ScreenUpdating = False
 
     For r = 2 To lastRow
-        If wsData.Rows(r).Hidden = False Then
-            nVisible = nVisible + 1
-            accVal = CDbl(wsData.Cells(r, accCol).Value)
-            sumAcc = sumAcc + accVal
-            sumAcc2 = sumAcc2 + accVal * accVal
-            sumFact = sumFact + CDbl(wsData.Cells(r, factCol).Value)
-            sumErr = sumErr + CDbl(wsData.Cells(r, errCol).Value)
-            If factFtsCol > 0 Then
-                sumFactFts = sumFactFts + CDbl(wsData.Cells(r, factFtsCol).Value)
+        If Not wsData.Rows(r).Hidden Then
+            Dim factVal As Variant, predVal As Variant, errVal As Variant
+            factVal = wsData.Cells(r, factCol).Value
+            predVal = wsData.Cells(r, predCol).Value
+            errVal = wsData.Cells(r, errCol).Value
+            accVal = wsData.Cells(r, accCol).Value
+            
+            If IsNumeric(factVal) And IsNumeric(predVal) And IsNumeric(errVal) And IsNumeric(accVal) Then
+                nVisible = nVisible + 1
+                sumAcc = sumAcc + CDbl(accVal)
+                sumAcc2 = sumAcc2 + CDbl(accVal) * CDbl(accVal)
+                sumFact = sumFact + CDbl(factVal)
+                sumPred = sumPred + CDbl(predVal)
+                sumErr = sumErr + CDbl(errVal)
+                If factFtsCol > 0 Then
+                    Dim ftsVal As Variant
+                    ftsVal = wsData.Cells(r, factFtsCol).Value
+                    If IsNumeric(ftsVal) Then
+                        sumFactFts = sumFactFts + CDbl(ftsVal)
+                    End If
+                End If
             End If
         End If
     Next r
@@ -299,7 +314,7 @@ Public Sub RecalcMetrics()
     wsDash.Cells({kpi_st[0]}, {kpi_st[1]}).Value = Format(Round(stab, 1), "0.0") & "%"
     wsDash.Cells({kpi_qi[0]}, {kpi_qi[1]}).Value = Format(Round(qi, 1), "0.0") & "%"
     wsDash.Cells({kpi_tf[0]}, {kpi_tf[1]}).Value = Format(CLng(sumFact), "#,##0")
-    wsDash.Cells({kpi_tp[0]}, {kpi_tp[1]}).Value = Format(CLng(sumFact - sumErr), "#,##0")
+    wsDash.Cells({kpi_tp[0]}, {kpi_tp[1]}).Value = Format(CLng(sumPred), "#,##0")
     wsDash.Cells({kpi_vr[0]}, {kpi_vr[1]}).Value = nVisible
 
     ' --- Запись итогов на лист «Данные» ---
@@ -699,7 +714,7 @@ def _save_vba_instructions(xlsx_path: Path, vba_code: str) -> None:
         "Ручной запуск: Alt+F8 → RecalcMetrics → Выполнить.\n\n"
         "=== КОД ДЛЯ «ЭтаКнига» (ThisWorkbook) ===\n\n"
         "Private Sub Workbook_SheetCalculate(ByVal Sh As Object)\n"
-        "    If Sh.Name = \"\u0414\u0430\u043d\u043d\u044b\u0435\" Then\n"
+        "    If Sh.Index = 1 Then\n"
         "        RecalcMetrics\n"
         "    End If\n"
         "End Sub\n\n"
