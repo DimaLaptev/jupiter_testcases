@@ -250,37 +250,34 @@ Public Sub RecalcMetrics()
     Dim nVisible As Long:     nVisible = 0
     Dim r As Long
     Dim accVal As Double
+    Dim meanAcc As Double
+    Dim stdAcc As Double
+    Dim cv As Double
+    Dim stab As Double
+    Dim qi As Double
+    Dim summaryRow As Long
+    Dim maRow As Long
+    Dim stRow As Long
+    Dim qiRow As Long
 
     Application.ScreenUpdating = False
 
     For r = 2 To lastRow
-        If Not wsData.Rows(r).Hidden Then
-            Dim factVal As Variant, predVal As Variant, errVal As Variant
-            factVal = wsData.Cells(r, factCol).Value
-            predVal = wsData.Cells(r, predCol).Value
-            errVal = wsData.Cells(r, errCol).Value
-            accVal = wsData.Cells(r, accCol).Value
-            
-            If IsNumeric(factVal) And IsNumeric(predVal) And IsNumeric(errVal) And IsNumeric(accVal) Then
-                nVisible = nVisible + 1
-                sumAcc = sumAcc + CDbl(accVal)
-                sumAcc2 = sumAcc2 + CDbl(accVal) * CDbl(accVal)
-                sumFact = sumFact + CDbl(factVal)
-                sumPred = sumPred + CDbl(predVal)
-                sumErr = sumErr + CDbl(errVal)
-                If factFtsCol > 0 Then
-                    Dim ftsVal As Variant
-                    ftsVal = wsData.Cells(r, factFtsCol).Value
-                    If IsNumeric(ftsVal) Then
-                        sumFactFts = sumFactFts + CDbl(ftsVal)
-                    End If
-                End If
+        If wsData.Rows(r).Hidden = False Then
+            nVisible = nVisible + 1
+            accVal = CDbl(wsData.Cells(r, accCol).Value)
+            sumAcc = sumAcc + accVal
+            sumAcc2 = sumAcc2 + accVal * accVal
+            sumFact = sumFact + CDbl(wsData.Cells(r, factCol).Value)
+            sumPred = sumPred + CDbl(wsData.Cells(r, predCol).Value)
+            sumErr = sumErr + CDbl(wsData.Cells(r, errCol).Value)
+            If factFtsCol > 0 Then
+                sumFactFts = sumFactFts + CDbl(wsData.Cells(r, factFtsCol).Value)
             End If
         End If
     Next r
 
     ' --- Точность (среднее accuracy_pct) ---
-    Dim meanAcc As Double
     If nVisible = 0 Then
         meanAcc = 0
     Else
@@ -288,10 +285,6 @@ Public Sub RecalcMetrics()
     End If
 
     ' --- Стабильность = 1 - CV ---
-    Dim stdAcc As Double
-    Dim cv As Double
-    Dim stab As Double
-
     If nVisible = 0 Or meanAcc = 0 Then
         stab = 0
     Else
@@ -302,7 +295,6 @@ Public Sub RecalcMetrics()
     End If
 
     ' --- Качество = гармоническое среднее ---
-    Dim qi As Double
     If (meanAcc + stab) = 0 Then
         qi = 0
     Else
@@ -318,7 +310,6 @@ Public Sub RecalcMetrics()
     wsDash.Cells({kpi_vr[0]}, {kpi_vr[1]}).Value = nVisible
 
     ' --- Запись итогов на лист «Данные» ---
-    Dim summaryRow As Long
     summaryRow = lastRow + 2
 
     wsData.Cells(summaryRow, factCol).Value = sumFact
@@ -327,13 +318,13 @@ Public Sub RecalcMetrics()
 
     If factFtsCol > 0 Then wsData.Cells(summaryRow, factFtsCol).Value = sumFactFts
 
-    Dim maRow As Long: maRow = summaryRow + 1
+    maRow = summaryRow + 1
     wsData.Cells(maRow, accCol).Value = Round(meanAcc, 2)
 
-    Dim stRow As Long: stRow = summaryRow + 2
+    stRow = summaryRow + 2
     wsData.Cells(stRow, accCol).Value = Round(stab, 2)
 
-    Dim qiRow As Long: qiRow = summaryRow + 3
+    qiRow = summaryRow + 3
     wsData.Cells(qiRow, accCol).Value = Round(qi, 2)
 
     Application.ScreenUpdating = True
