@@ -37,6 +37,9 @@ EXCLUDED_RESIST_IDS = [
 
 PREDICT_COMMENT = "first_predict_value_record"
 
+# Включить вывод в терминал отчёта по дублям (resist_id, operation_id, date).
+REPORT_DUPLICATES = True
+
 OUTPUT_COLS = [
     "resist_id",
     "division_title",
@@ -120,6 +123,29 @@ def clean_and_filter(df: pd.DataFrame) -> pd.DataFrame:
     mask_resist_allowed = ~df["resist_id"].isin(EXCLUDED_RESIST_IDS)
 
     return df[mask_not_cancelled & ~mask_predict_record & mask_resist_allowed].copy()
+
+
+def report_duplicate_operations(df: pd.DataFrame) -> None:
+    """Выводит в терминал количество дублей по (resist_id, operation_id, date)
+    и список (resist_id, date) для удобного поиска в Excel."""
+    if df.empty or "date" not in df.columns:
+        return
+    key_cols = ["resist_id", "operation_id", "date"]
+    if not all(c in df.columns for c in key_cols):
+        return
+    dup_mask = df.duplicated(subset=key_cols, keep=False)
+    n_dup_rows = dup_mask.sum()
+    if n_dup_rows == 0:
+        print("  Дубликатов (resist_id, operation_id, date): 0")
+        return
+    dup_df = df.loc[dup_mask, key_cols].drop_duplicates()
+    n_dup_groups = len(dup_df)
+    print(f"  Дубликатов (resist_id, operation_id, date): {n_dup_rows} строк в {n_dup_groups} комбинациях")
+    # Список (resist_id, date) для поиска в Excel
+    resist_date = dup_df[["resist_id", "date"]].drop_duplicates().sort_values(["resist_id", "date"])
+    print("  Список (resist_id, date) по дублям:")
+    for _, row in resist_date.iterrows():
+        print(f"    resist_id={row['resist_id']}, date={row['date']}")
 
 
 def extract_operations(df_ok: pd.DataFrame) -> pd.DataFrame:
@@ -220,7 +246,7 @@ def filter_leading_zeros(df: pd.DataFrame, filter_year: int) -> pd.DataFrame:
     return df
 
 
-def build_dataframe(filter_year: int) -> pd.DataFrame:
+def build_dataframe(filter_year: int, report_duplicates: bool = REPORT_DUPLICATES) -> pd.DataFrame:
     print("Загрузка CSV...")
     df_raw = load_raw_data()
     print(f"  Загружено строк: {len(df_raw)}")
@@ -234,6 +260,10 @@ def build_dataframe(filter_year: int) -> pd.DataFrame:
     print(f"  Операций извлечено: {len(df_ops)}")
 
     df_ops = add_derived_columns(df_ops)
+
+    if report_duplicates:
+        print("Отчёт по дубликатам (resist_id, operation_id, date)...")
+        report_duplicate_operations(df_ops)
 
     df_ops = df_ops.dropna(subset=["fact_value"])
     print(f"  После удаления строк без fact_value: {len(df_ops)}")
@@ -265,9 +295,25 @@ def main() -> None:
         default=2025,
         help="Год для фильтрации начальных нулевых месяцев (default: 2025)",
     )
+    parser.add_argument(
+        "--report-duplicates",
+        action="store_true",
+        help="Вывести в терминал отчёт по дублям (resist_id, operation_id, date)",
+    )
+    parser.add_argument(
+        "--no-report-duplicates",
+        action="store_true",
+        help="Не выводить отчёт по дублям (переопределяет константу REPORT_DUPLICATES)",
+    )
     args = parser.parse_args()
 
-    df = build_dataframe(args.year)
+    do_report = REPORT_DUPLICATES
+    if args.no_report_duplicates:
+        do_report = False
+    elif args.report_duplicates is not None:
+        do_report = args.report_duplicates
+
+    df = build_dataframe(args.year, report_duplicates=do_report)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
