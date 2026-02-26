@@ -1,8 +1,9 @@
 """
 Сборка датафрейма для дашборда build_metrics_dashboard_simple.py.
 
-Извлекает из CSV (raw) данные по всем resist_id, парсит JSON-поля,
-применяет фильтрацию начальных нулевых месяцев 2025 года
+Извлекает из CSV (raw) данные за 2025 год по всем подразделениям (resist_id —
+идентификатор подразделения, division_title — название подразделения),
+парсит JSON-поля, применяет фильтрацию начальных нулевых месяцев 2025 года
 и сохраняет xlsx с минимальным набором столбцов, необходимых для дашборда.
 
 Использование:
@@ -23,9 +24,6 @@ import pandas as pd
 
 RAW_DIR = Path("data/raw")
 RAW_FILES = [
-    RAW_DIR / "data-2022.csv",
-    RAW_DIR / "data-2023.csv",
-    RAW_DIR / "data-2024.csv",
     RAW_DIR / "data-2025.csv",
 ]
 
@@ -184,34 +182,42 @@ def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def filter_leading_zeros(df: pd.DataFrame, filter_year: int) -> pd.DataFrame:
-    """Для каждой операции: последовательно проверяем месяцы filter_year
-    начиная с января. Пока fact_value=0 и fact_predict=0 — удаляем строку.
-    Как только встретился месяц с fact_value!=0 или fact_predict!=0 —
-    прекращаем проверку, остальные месяцы не трогаем.
-    Данные других лет не затрагиваются."""
+    """Для каждой комбинации (resist_id, division_title, operation_id):
+    последовательно проверяем месяцы filter_year начиная с января.
+    Пока fact_value=0/NaN и fact_predict=0/NaN — помечаем строку к удалению.
+    Как только встретился месяц с ненулевым значением — прекращаем.
+    Реализовано без groupby().apply(), чтобы NaN в ключах не терялись."""
 
-    def _filter_group(group: pd.DataFrame) -> pd.DataFrame:
-        group = group.sort_values(["year", "month"]).reset_index(drop=True)
-        yr_mask = group["year"] == filter_year
-        yr_rows = group.loc[yr_mask].sort_values("month")
-        if yr_rows.empty:
-            return group
-        drop_indices = []
-        for idx in yr_rows.index:
-            r = group.loc[idx]
-            if r["fact_value"] != 0 or r["fact_predict"] != 0:
-                break
-            drop_indices.append(idx)
-        if not drop_indices:
-            return group
-        return group.drop(index=drop_indices).reset_index(drop=True)
+    if df.empty:
+        return df
 
-    return (
-        df
-        .groupby("operation_id", group_keys=False)
-        .apply(_filter_group)
-        .reset_index(drop=True)
+    df = df.copy()
+
+    group_key = ["resist_id", "division_title", "operation_id"]
+    df["_grp"] = (
+        df["resist_id"].astype(str) + "|" +
+        df["division_title"].astype(str) + "|" +
+        df["operation_id"].astype(str)
     )
+
+    yr_mask = df["year"] == filter_year
+    drop_indices: set[int] = set()
+
+    for grp_val in df["_grp"].unique():
+        grp_mask = (df["_grp"] == grp_val) & yr_mask
+        grp_rows = df.loc[grp_mask].sort_values("month")
+        for idx in grp_rows.index:
+            fv = grp_rows.at[idx, "fact_value"]
+            fp = grp_rows.at[idx, "fact_predict"]
+            fv_zero = pd.isna(fv) or float(fv) == 0
+            fp_zero = pd.isna(fp) or float(fp) == 0
+            if not (fv_zero and fp_zero):
+                break
+            drop_indices.add(idx)
+
+    df = df.drop(index=list(drop_indices)).reset_index(drop=True)
+    df = df.drop(columns=["_grp"])
+    return df
 
 
 def build_dataframe(filter_year: int) -> pd.DataFrame:
