@@ -504,8 +504,6 @@ def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     # Пояснение формул
     ws.cell(row=6, column=1, value="Как считаются показатели:").font = Font(bold=True, size=12)
     formulas_text = [
-        ("Точность прогноза",
-         "MAX(0; 100% - |Факт - Прогноз| / Факт * 100%). Считается для каждой строки."),
         ("Взвешенная точность",
          "(1 - Сумма|Ошибок| / СуммаФакт) * 100%. Крупные операции весят больше."),
         ("Стабильность",
@@ -519,7 +517,7 @@ def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame) -> None:
         ws.merge_cells(start_row=7 + i, start_column=3, end_row=7 + i, end_column=12)
 
     # Топ-10 худших
-    top_section_row = 12
+    top_section_row = 11
     ws.cell(row=top_section_row, column=1,
             value="Топ-10 подразделений с ХУДШИМ качеством (крупные)")
     ws.cell(row=top_section_row, column=1).font = Font(bold=True, size=12, color="C00000")
@@ -527,9 +525,7 @@ def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame) -> None:
                    end_row=top_section_row, end_column=8)
 
     div_stats = _division_stats(df)
-    volume_threshold = df["fact_value"].sum() * 0.001
-    significant = div_stats[div_stats["fact_sum"] >= max(volume_threshold, 1)]
-    worst = significant.nsmallest(10, "quality_index")
+    worst = div_stats.nsmallest(10, "quality_index")
     _write_div_table(ws, top_section_row + 1, worst, is_worst=True)
 
     # Топ-10 лучших
@@ -539,13 +535,13 @@ def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     ws.cell(row=best_section_row, column=1).font = Font(bold=True, size=12, color="007030")
     ws.merge_cells(start_row=best_section_row, start_column=1,
                    end_row=best_section_row, end_column=8)
-    best = significant.nlargest(10, "quality_index")
+    best = div_stats.nlargest(10, "quality_index")
     _write_div_table(ws, best_section_row + 1, best, is_worst=False)
 
     # Scatter-данные
     scatter_row = best_section_row + len(best) + 3
     ws.cell(row=scatter_row, column=1,
-            value="Данные для диаграммы «Точность и Стабильность» по подразделениям")
+            value="Точность, стабильность и качество по подразделениям (2025г.)")
     ws.cell(row=scatter_row, column=1).font = Font(bold=True, size=12)
     ws.merge_cells(start_row=scatter_row, start_column=1,
                    end_row=scatter_row, end_column=8)
@@ -558,7 +554,7 @@ def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame) -> None:
         ws.cell(row=scatter_row + 1, column=ci, value=h)
     style_header_row(ws, scatter_row + 1, len(scatter_headers))
 
-    for ri, (_, row) in enumerate(significant.iterrows(), scatter_row + 2):
+    for ri, (_, row) in enumerate(div_stats.iterrows(), scatter_row + 2):
         ws.cell(row=ri, column=1, value=row["division_title"])
         ws.cell(row=ri, column=2, value=row["weighted_accuracy"])
         ws.cell(row=ri, column=3, value=row["stability"])
