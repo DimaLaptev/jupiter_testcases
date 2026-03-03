@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <getTotalDocumentsCount xmlns="https://edo.region.ru/soap/">
+      <login>user_login</login>
+      <password>user_password</password>
+      <folder>InWork</folder>
+      <filtr><![CDATA[<?xml version="1.0" encoding="UTF-8"?>
+<FilterInfo>
+  <Info DocumentTypeId="" ContractorId="46" DocumentNumber=""
+        DocumentDateFrom="2025-02-18" DocumentDateTo="2025-02-18"
+        SortMode="DocumentDate" OrderMode="DESC"/>
+</FilterInfo>]]></filtr>
+    </getTotalDocumentsCount>
+  </soap:Body>
+</soap:Envelope>
