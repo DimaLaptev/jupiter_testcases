@@ -14,13 +14,15 @@ REGION_WSDL_URL = os.getenv(
     'REGION_WSDL_URL',
     'https://edo.region.ru/soap/soapdotnet/soap?wsdl'
 )
+REGION_DEBUG_XML = os.getenv('REGION_DEBUG_XML', '').lower() in ('1', 'true', 'yes')
 
 EDO_FOLDERS = [
-    'На регистрацию',
-    'В работе\\Входящие',
-    'Архив\\Входящие',
+    'ReadyToRegister',
+    'InWork',
+    'Archive',
 ]
 
+# Подразделения-депозитарии (со скрина «Организации»)
 DEPOSITARY_DEPARTMENTS = [
     'ДОМ.РФ',
     'ИЦБ-Райффайзенбанк',
@@ -28,7 +30,7 @@ DEPOSITARY_DEPARTMENTS = [
     'ЗАО "Ипотечный агент ИНТЕХ"',
     'ИЦБ-ВТБ',
     'ИЦБ-ДельтаКредит',
-    'ИЦБ-Металинвестбанк',
+    'ИЦБ-Металлинвестбанк',
     'ИЦБ-НФИ',
     'ИЦБ - Банк ДОМ.РФ',
     'ИЦБ-ГПБ',
@@ -37,4 +39,12 @@ DEPOSITARY_DEPARTMENTS = [
     'ИЦБ Совкомбанк',
     'Фабрика Банк "ДОМ.РФ"',
     'Фабрика ГПБ',
+]
+
+# Организации депозитариев (для сопоставления с DisplayName из getContractors)
+DEPOSITARY_ORGANIZATIONS = [
+    'АО "ДОМ.РФ"',
+    'ООО "ДОМ.РФ Ипотечный агент"',
+    'Ипотечный агент ТФБ1, ЗАО',
+    'ЗАО "Ипотечный агент ИНТЕХ"',
 ]

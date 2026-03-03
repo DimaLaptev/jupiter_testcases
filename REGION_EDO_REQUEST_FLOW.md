@@ -34,6 +34,28 @@ main()
 
 **Ответ:** идентификатор пользователя (integer) или 0.
 
+**Пример запроса (тело SOAP):**
+```xml
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <authentification xmlns="...">
+      <login>user_login</login>
+      <password>user_password</password>
+    </authentification>
+  </soap:Body>
+</soap:Envelope>
+```
+
+**Пример ответа:**
+```xml
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <authentificationResponse>12345</authentificationResponse>
+  </soap:Body>
+</soap:Envelope>
+```
+*(значение — integer, id пользователя или 0 при ошибке)*
+
 ---
 
 ### Шаг 2. Получение контрагентов (депозитариев)
@@ -44,6 +66,28 @@ main()
 
 **Ответ:** XML со списком контрагентов (`ContractorsList` → элементы `Contractors` с атрибутами `ContractorId`, `DisplayName`).  
 Дальше в коде по этому списку отбираются депозитарии (сопоставление по подразделению/организации), формируется словарь `{ DisplayName: ContractorId }`. Дополнительных запросов к API на этом шаге нет.
+
+**Пример запроса (тело SOAP):**
+```xml
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <getContractors xmlns="...">
+      <login>user_login</login>
+      <password>user_password</password>
+    </getContractors>
+  </soap:Body>
+</soap:Envelope>
+```
+
+**Пример ответа (фрагмент XML, возвращаемый методом):**
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<ContractorsList>
+  <Contractors ContractorId="1" DisplayName="АО &quot;ДОМ.РФ&quot;"/>
+  <Contractors ContractorId="46" DisplayName="ООО &quot;ДОМ.РФ Ипотечный агент&quot;"/>
+  <Contractors ContractorId="48" DisplayName="ЗАО Полет"/>
+</ContractorsList>
+```
 
 ---
 
@@ -64,6 +108,16 @@ main()
 
 Формируется XML-строка фильтра (`FilterInfo` / `Info`): контрагент, период (предыдущий день по МСК). В API не отправляется, используется в следующих вызовах.
 
+**Пример сформированного фильтра (XML):**
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<FilterInfo>
+  <Info DocumentTypeId="" ContractorId="46" DocumentNumber=""
+        DocumentDateFrom="2025-02-18" DocumentDateTo="2025-02-18"
+        SortMode="DocumentDate" OrderMode="DESC"/>
+</FilterInfo>
+```
+
 ---
 
 ### Шаг 5. Получение количества документов в папке
@@ -74,6 +128,34 @@ main()
 
 **Ответ:** целое число — сколько документов в данной папке попадают под фильтр.  
 Если 0, папка для этого контрагента пропускается (дальнейших запросов по ней нет).
+
+**Пример запроса (тело SOAP):**
+```xml
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <getTotalDocumentsCount xmlns="...">
+      <login>user_login</login>
+      <password>user_password</password>
+      <folder>InWork</folder>
+      <filtr><![CDATA[<?xml version="1.0" encoding="UTF-8"?>
+<FilterInfo>
+  <Info DocumentTypeId="" ContractorId="46" DocumentNumber=""
+        DocumentDateFrom="2025-02-18" DocumentDateTo="2025-02-18"
+        SortMode="DocumentDate" OrderMode="DESC"/>
+</FilterInfo>]]></filtr>
+    </getTotalDocumentsCount>
+  </soap:Body>
+</soap:Envelope>
+```
+
+**Пример ответа:**
+```xml
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <getTotalDocumentsCountResponse>42</getTotalDocumentsCountResponse>
+  </soap:Body>
+</soap:Envelope>
+```
 
 ---
 
@@ -87,6 +169,39 @@ main()
 
 **Ответ:** XML со списком документов (`DocumentInfoList` → элементы `DocumentInfo` с атрибутами в т.ч. `DocumentId`, `DocumentFileName`, `DocumentDisplayName`, `DocumentDate` и др.).  
 Для каждого элемента этого списка далее запрашивается полный документ и выгружаются тело и вложения.
+
+**Пример запроса (тело SOAP):**
+```xml
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <getDocumentInfoFromFolderByParams xmlns="...">
+      <login>user_login</login>
+      <password>user_password</password>
+      <folder>InWork</folder>
+      <filtr><![CDATA[<?xml version="1.0" encoding="UTF-8"?>
+<FilterInfo><Info DocumentTypeId="" ContractorId="46" DocumentNumber=""
+  DocumentDateFrom="2025-02-18" DocumentDateTo="2025-02-18"
+  SortMode="DocumentDate" OrderMode="DESC"/></FilterInfo>]]></filtr>
+      <limit>100</limit>
+      <offset>0</offset>
+    </getDocumentInfoFromFolderByParams>
+  </soap:Body>
+</soap:Envelope>
+```
+
+**Пример ответа (фрагмент XML, возвращаемый методом):**
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<DocumentInfoList>
+  <DocumentInfo DocumentId="41" DocumentTypeId="8" DocumentFileName="Реализация №1.htm"
+                DocumentDisplayName="ТОРГ12 № КФП00000001 от 2011-09-13"
+                DocumentDate="2011-09-13" ContractorId="48" AuthorId="100"
+                DocumentNumber="КФП00000001" IncomDateTicks="2011-09-20 18:08:33">
+    <Signers SignersId="100" ShouldSign="1" Responsable="1"/>
+  </DocumentInfo>
+  <DocumentInfo DocumentId="18" DocumentTypeId="21" DocumentFileName="report.pdf" .../>
+</DocumentInfoList>
+```
 
 ---
 
@@ -103,6 +218,42 @@ main()
 
 Это **единственный запрос, из которого берутся вложения** в текущей реализации.
 
+**Пример запроса (тело SOAP):**
+```xml
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <getDocumentById xmlns="...">
+      <login>user_login</login>
+      <password>user_password</password>
+      <documentid>41</documentid>
+    </getDocumentById>
+  </soap:Body>
+</soap:Envelope>
+```
+
+**Пример ответа (фрагмент XML, возвращаемый методом):**
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<DocumentInfo>
+  <Document DocumentId="41">
+    JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PAovVHlwZSAvQ2F0YWxvZwovUGFnZXMgMiAwIFIKPj4KZW5kb2Jq...
+  </Document>
+  <Signers SignersId="100" ShouldSign="1" Responsable="1" Signed="1" Declined="0" ReasonText="">
+    MIIGkgYJKoZIhvcNAQcCoIIGgzCCBn8CAQExCzAJBgUrDgMCGgUAMIIB...
+  </Signers>
+  <Signers SignersId="95" ShouldSign="1" Responsable="0" Signed="1" Declined="0" ReasonText="">
+    MIIGkzCCBHugAwIBAgIQDdG...
+  </Signers>
+  <!-- Вложения (если API их возвращает): -->
+  <Attachments>
+    <Attachment Id="101" FileName="дополнение.xlsx">
+      UEsDBBQABgAIAAAAIQBi7p1oXgEAAJAEAAATAAgAcHJpbnRlcnMv...
+    </Attachment>
+  </Attachments>
+</DocumentInfo>
+```
+*(содержимое Document и Attachment — base64; в документации API явно описан только Document и Signers)*
+
 ---
 
 ### Шаг 8. Резервное получение тела документа (если в getDocumentById тела не было)
@@ -114,6 +265,31 @@ main()
 Вызывается только если после `get_document_by_id` у документа нет `body_base64`.  
 **Ответ:** строка base64 с телом документа или null.  
 Вложений этот метод не возвращает.
+
+**Пример запроса (тело SOAP):**
+```xml
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <getDocumentBody xmlns="...">
+      <login>user_login</login>
+      <password>user_password</password>
+      <documentid>41</documentid>
+    </getDocumentBody>
+  </soap:Body>
+</soap:Envelope>
+```
+
+**Пример ответа:**
+```xml
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <getDocumentBodyResponse>
+      JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PAovVHlwZSAvQ2F0YWxvZwovUGFnZXMgMiAwIFIKPj4KZW5kb2Jq...
+    </getDocumentBodyResponse>
+  </soap:Body>
+</soap:Envelope>
+```
+*(значение — одна строка base64 с телом документа в бинарном виде)*
 
 ---
 
@@ -144,6 +320,8 @@ main()
 ---
 
 ## 4. Итоговая таблица SOAP-операций
+
+*Примеры XML запросов и ответов по каждой операции — в разделе 2 (пошаговый путь).*
 
 | № | SOAP-операция | Когда вызывается | Что даёт для вложений |
 |---|----------------|------------------|------------------------|

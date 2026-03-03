@@ -31,6 +31,7 @@ from config_region import (
     REGION_WSDL_URL,
     EDO_FOLDERS,
     DEPOSITARY_DEPARTMENTS,
+    DEPOSITARY_ORGANIZATIONS,
 )
 from region_api import RegionApiClient
 
@@ -71,14 +72,22 @@ def _safe_filename(name: str, document_id: str) -> str:
     return name
 
 
+def _normalize_name(s: str) -> str:
+    """Нормализация для сравнения: нижний регистр, без лишних пробелов и кавычек."""
+    if not s:
+        return ""
+    return " ".join(s.lower().replace('"', " ").replace("'", " ").split())
+
+
 def _resolve_contractor_ids(
     api: RegionApiClient,
     department_names: list[str],
+    organization_names: list[str] | None = None,
 ) -> dict[str, str]:
     """
-    Получает список контрагентов (contractors) через API и находит
-    ContractorId для каждого названия депозитария (depositary).
-    Возвращает {DisplayName: ContractorId}.
+    Получает список контрагентов через API и находит ContractorId для каждого
+    депозитария по подразделению или организации. Возвращает {DisplayName: ContractorId},
+    без дубликатов по ContractorId.
     """
     contractors = api.get_contractors()
     if not contractors:
@@ -86,30 +95,39 @@ def _resolve_contractor_ids(
         return {}
 
     logger.info("Всего контрагентов в системе: %d", len(contractors))
+    all_display_names = [c.get("DisplayName") or "" for c in contractors]
+    logger.info("DisplayName от getContractors (для сверки со списком депозитариев): %s", all_display_names)
+
+    search_names = set()
+    for name in department_names:
+        if name:
+            search_names.add(_normalize_name(name))
+    for name in (organization_names or []):
+        if name:
+            search_names.add(_normalize_name(name))
 
     name_to_id: dict[str, str] = {}
-    lower_lookup = {c['DisplayName'].lower(): c for c in contractors}
+    seen_ids: set[str] = set()
 
-    for dept in department_names:
-        dept_lower = dept.lower()
-        matched = lower_lookup.get(dept_lower)
-        if matched:
-            name_to_id[matched['DisplayName']] = matched['ContractorId']
-            logger.info(
-                "  Депозитарий '%s' → ContractorId=%s",
-                matched['DisplayName'], matched['ContractorId'],
-            )
-        else:
-            for c in contractors:
-                if dept_lower in c['DisplayName'].lower():
-                    name_to_id[c['DisplayName']] = c['ContractorId']
+    for c in contractors:
+        contractor_id = c.get("ContractorId") or ""
+        display_name = (c.get("DisplayName") or "").strip()
+        display_norm = _normalize_name(display_name)
+
+        for needle in search_names:
+            if needle in display_norm or display_norm in needle:
+                if contractor_id not in seen_ids:
+                    seen_ids.add(contractor_id)
+                    name_to_id[display_name] = contractor_id
                     logger.info(
-                        "  Депозитарий '%s' (частичное совпадение) → '%s' ContractorId=%s",
-                        dept, c['DisplayName'], c['ContractorId'],
+                        "  Депозитарий (совпадение '%s') → '%s' ContractorId=%s",
+                        needle[:40], display_name, contractor_id,
                     )
-                    break
-            else:
-                logger.warning("  Депозитарий '%s' — не найден среди контрагентов", dept)
+                break
+
+    for needle in search_names:
+        if not any(needle in _normalize_name(c.get("DisplayName") or "") for c in contractors):
+            logger.warning("  Ни один контрагент не совпал с: '%s'", needle[:60])
 
     return name_to_id
 
@@ -168,43 +186,72 @@ def _download_documents_from_folder(
                 "    Скачивание: id=%s  '%s'", doc_id, display_name,
             )
 
-            body_b64 = api.get_document_body(doc_id)
+            doc_full = api.get_document_by_id(doc_id)
+            body_b64 = None
+            if doc_full:
+                body_b64 = doc_full.get('body_base64')
             if not body_b64:
-                doc_full = api.get_document_by_id(doc_id)
-                if doc_full:
-                    body_b64 = doc_full.get('body_base64')
+                body_b64 = api.get_document_body(doc_id)
 
-            if not body_b64:
-                logger.warning(
-                    "    Тело документа (body) id=%s пустое — пропуск", doc_id,
-                )
-                continue
-
-            safe_name = _safe_filename(file_name, doc_id)
-            filepath = os.path.join(output_dir, safe_name)
-
-            if os.path.exists(filepath):
-                name_part, ext = os.path.splitext(safe_name)
-                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                safe_name = f"{name_part}_{ts}{ext}"
+            saved_count = 0
+            if body_b64:
+                safe_name = _safe_filename(file_name, doc_id)
                 filepath = os.path.join(output_dir, safe_name)
+                if os.path.exists(filepath):
+                    name_part, ext = os.path.splitext(safe_name)
+                    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    safe_name = f"{name_part}_{ts}{ext}"
+                    filepath = os.path.join(output_dir, safe_name)
+                with open(filepath, 'wb') as f:
+                    f.write(base64.b64decode(body_b64))
+                size = os.path.getsize(filepath)
+                logger.info("    Сохранён: %s (%d байт)", filepath, size)
+                downloaded.append({
+                    'document_id': doc_id,
+                    'filename': safe_name,
+                    'filepath': filepath,
+                    'size': size,
+                    'contractor': contractor_name,
+                    'folder': folder,
+                    'display_name': display_name,
+                    'document_date': doc_meta.get('DocumentDate', ''),
+                })
+                saved_count += 1
 
-            with open(filepath, 'wb') as f:
-                f.write(base64.b64decode(body_b64))
+            for idx, att in enumerate(doc_full.get('attachments', []) if doc_full else []):
+                att_b64 = att.get('body_base64')
+                if not att_b64:
+                    continue
+                att_name = att.get('file_name') or f"attachment_{idx}"
+                base_safe = _safe_filename(file_name, doc_id)
+                name_part, _ = os.path.splitext(base_safe)
+                att_safe = _safe_filename(att_name, att.get('id', str(idx)))
+                safe_att_name = f"{name_part}_attachment_{idx}_{att_safe}"
+                att_path = os.path.join(output_dir, safe_att_name)
+                if os.path.exists(att_path):
+                    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    safe_att_name = f"{name_part}_attachment_{idx}_{ts}_{att_safe}"
+                    att_path = os.path.join(output_dir, safe_att_name)
+                with open(att_path, 'wb') as f:
+                    f.write(base64.b64decode(att_b64))
+                att_size = os.path.getsize(att_path)
+                logger.info("    Сохранено вложение: %s (%d байт)", att_path, att_size)
+                downloaded.append({
+                    'document_id': doc_id,
+                    'filename': safe_att_name,
+                    'filepath': att_path,
+                    'size': att_size,
+                    'contractor': contractor_name,
+                    'folder': folder,
+                    'display_name': display_name,
+                    'document_date': doc_meta.get('DocumentDate', ''),
+                })
+                saved_count += 1
 
-            size = os.path.getsize(filepath)
-            logger.info("    Сохранён: %s (%d байт)", filepath, size)
-
-            downloaded.append({
-                'document_id': doc_id,
-                'filename': safe_name,
-                'filepath': filepath,
-                'size': size,
-                'contractor': contractor_name,
-                'folder': folder,
-                'display_name': display_name,
-                'document_date': doc_meta.get('DocumentDate', ''),
-            })
+            if saved_count == 0:
+                logger.warning(
+                    "    Тело документа (body) id=%s пустое и вложений не найдено — пропуск", doc_id,
+                )
 
         offset += PAGE_SIZE
 
@@ -240,7 +287,9 @@ def main():
         logger.error("Аутентификация (authentication) не пройдена — выход.")
         sys.exit(1)
 
-    contractor_map = _resolve_contractor_ids(api, DEPOSITARY_DEPARTMENTS)
+    contractor_map = _resolve_contractor_ids(
+        api, DEPOSITARY_DEPARTMENTS, DEPOSITARY_ORGANIZATIONS
+    )
     if not contractor_map:
         logger.error("Ни один депозитарий (depositary) не найден — выход.")
         sys.exit(1)

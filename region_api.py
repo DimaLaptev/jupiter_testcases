@@ -10,6 +10,7 @@ SOAP-клиент (client) для web-службы интеграции СЭД �
 """
 
 import logging
+import os
 from xml.etree import ElementTree as ET
 
 from zeep import Client
@@ -34,6 +35,36 @@ class RegionApiClient:
         logger.info("Подключение к WSDL: %s", wsdl_url)
         self.client = Client(wsdl=wsdl_url, transport=transport)
         self.service = self.client.service
+
+    # ------------------------------------------------------------------
+    # Отладка: список операций WSDL (debug: list WSDL operations)
+    # ------------------------------------------------------------------
+    def list_wsdl_operations(self, keywords: list[str] | None = None) -> list[str]:
+        """
+        Возвращает список имён операций SOAP из WSDL. Если заданы keywords
+        (например, ['attachment', 'document', 'body']), логируются только
+        операции, в имени которых встречается хотя бы одно ключевое слово.
+        """
+        operations = []
+        try:
+            for service in self.client.wsdl.services.values():
+                for port in service.ports.values():
+                    for op in getattr(port.binding, "_operations", {}).values():
+                        name = getattr(op, "name", None)
+                        if name and name not in operations:
+                            operations.append(name)
+        except Exception as e:
+            logger.warning("Не удалось получить операции WSDL: %s", e)
+            return []
+        operations = sorted(operations)
+        logger.info("Всего операций в WSDL: %d", len(operations))
+        if keywords:
+            kw_lower = [k.lower() for k in keywords]
+            filtered = [op for op in operations if any(k in op.lower() for k in kw_lower)]
+            logger.info("Операции по ключевым словам %s: %s", keywords, filtered)
+            return filtered
+        logger.info("Операции: %s", operations)
+        return operations
 
     # ------------------------------------------------------------------
     # 1. Аутентификация (authentication)
@@ -81,6 +112,7 @@ class RegionApiClient:
     def get_total_documents_count(self, folder: str, filtr_xml: str) -> int:
         """
         Вызывает getTotalDocumentsCount(login, password, folder, filtr).
+        Соответствует разделу 5.2 документации (папки «На подпись», «На регистрацию», «В работе», «Архив»).
         Возвращает целое число (integer) — количество документов.
         """
         result = self.service.getTotalDocumentsCount(
@@ -112,6 +144,11 @@ class RegionApiClient:
         documents = []
         for doc in root.findall('.//DocumentInfo'):
             documents.append(dict(doc.attrib))
+        if documents and os.getenv("REGION_DEBUG_XML", "").lower() in ("1", "true", "yes"):
+            logger.info(
+                "[REGION_DEBUG_XML] getDocumentInfoFromFolderByParams first DocumentInfo attrib: %s",
+                documents[0],
+            )
         return documents
 
     # ------------------------------------------------------------------
@@ -133,6 +170,13 @@ class RegionApiClient:
             logger.warning("getDocumentById(%s) вернул null", document_id)
             return None
 
+        if os.getenv("REGION_DEBUG_XML", "").lower() in ("1", "true", "yes"):
+            preview = xml_str[:4000] + ("..." if len(xml_str) > 4000 else "")
+            logger.info(
+                "[REGION_DEBUG_XML] getDocumentById(%s) raw XML (first 4000 chars): %s",
+                document_id, preview,
+            )
+
         root = ET.fromstring(xml_str)
         doc_elem = root.find('.//Document')
         if doc_elem is None:
@@ -145,6 +189,23 @@ class RegionApiClient:
         for s in root.findall('.//Signers'):
             signers.append(dict(s.attrib))
         result['signers'] = signers
+
+        attachments = []
+        for xpath in ('.//Attachments/*', './/Attachment', './/DocumentAttachment'):
+            for att in root.findall(xpath):
+                att_dict = dict(att.attrib)
+                body = (att.text or '').strip()
+                file_name = att_dict.get('FileName') or att_dict.get('Name') or att_dict.get('DocumentFileName') or ''
+                att_id = att_dict.get('Id') or att_dict.get('AttachmentId') or att_dict.get('DocumentId') or ''
+                if body or file_name or att_id:
+                    attachments.append({
+                        'id': att_id,
+                        'file_name': file_name,
+                        'body_base64': body,
+                    })
+        if attachments:
+            result['attachments'] = attachments
+            logger.debug("getDocumentById(%s): найдено вложений (attachments): %d", document_id, len(attachments))
 
         return result
 
@@ -217,3 +278,16 @@ class RegionApiClient:
             '/>'
             '</FilterInfo>'
         )
+
+
+if __name__ == "__main__":
+    """Вывод списка операций WSDL (для проверки методов вложений и документов)."""
+    from dotenv import load_dotenv
+    load_dotenv()
+    url = os.getenv("REGION_WSDL_URL", "https://edo.region.ru/soap/soapdotnet/soap?wsdl")
+    client = RegionApiClient(
+        wsdl_url=url,
+        login=os.getenv("REGION_LOGIN", ""),
+        password=os.getenv("REGION_PASSWORD", ""),
+    )
+    client.list_wsdl_operations(keywords=["attachment", "document", "body"])
