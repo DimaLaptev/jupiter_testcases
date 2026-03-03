@@ -6,11 +6,10 @@
   1. Аутентификация (authentication) через SOAP API.
   2. Получение списка контрагентов (contractors) — определение ContractorId
      для каждого депозитария (depositary).
-  3. Для каждого контрагента и каждой папки (folder) ЭДО:
-     - формирование XML-фильтра (filter) по дате предыдущего дня;
-     - получение количества (count) документов;
-     - постраничная (paginated) выгрузка списка документов;
-     - скачивание тела (body) каждого документа (base64 → файл).
+  3. Для каждого контрагента:
+     - папки ЭДО (ReadyToRegister, InWork, Archive): getDocumentInfoFromFolderByParams;
+     - архив: getDocumentInfoByParams.
+     Для каждого документа — скачивание тела и вложений (base64 → файл).
   4. Сохранение файлов в папку <YYYY_MM>/REGION/EDO/.
 
 Запуск (run):
@@ -258,6 +257,114 @@ def _download_documents_from_folder(
     return downloaded
 
 
+def _download_documents_from_archive(
+    api: RegionApiClient,
+    contractor_id: str,
+    contractor_name: str,
+    date_from: str,
+    date_to: str,
+    output_dir: str,
+) -> list[dict]:
+    """
+    Скачивает документы из архива "СЭД Регион" (getDocumentInfoByParams)
+    для данного контрагента за указанный период.
+    """
+    filtr = RegionApiClient.build_filter_xml(
+        contractor_id=contractor_id,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+    docs = api.get_document_info_by_params(filtr_xml=filtr, limit=str(PAGE_SIZE))
+    if not docs:
+        logger.debug("  [%s] архив — документов нет", contractor_name)
+        return []
+
+    logger.info(
+        "  [%s] архив (getDocumentInfoByParams) — найдено документов: %d",
+        contractor_name, len(docs),
+    )
+
+    downloaded: list[dict] = []
+    archive_label = "Archive"
+
+    for doc_meta in docs:
+        doc_id = doc_meta.get('DocumentId', '')
+        file_name = doc_meta.get('DocumentFileName', '')
+        display_name = doc_meta.get('DocumentDisplayName', file_name)
+
+        logger.info("    Скачивание: id=%s  '%s'", doc_id, display_name)
+
+        doc_full = api.get_document_by_id(doc_id)
+        body_b64 = None
+        if doc_full:
+            body_b64 = doc_full.get('body_base64')
+        if not body_b64:
+            body_b64 = api.get_document_body(doc_id)
+
+        saved_count = 0
+        if body_b64:
+            safe_name = _safe_filename(file_name, doc_id)
+            filepath = os.path.join(output_dir, safe_name)
+            if os.path.exists(filepath):
+                name_part, ext = os.path.splitext(safe_name)
+                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                safe_name = f"{name_part}_{ts}{ext}"
+                filepath = os.path.join(output_dir, safe_name)
+            with open(filepath, 'wb') as f:
+                f.write(base64.b64decode(body_b64))
+            size = os.path.getsize(filepath)
+            logger.info("    Сохранён: %s (%d байт)", filepath, size)
+            downloaded.append({
+                'document_id': doc_id,
+                'filename': safe_name,
+                'filepath': filepath,
+                'size': size,
+                'contractor': contractor_name,
+                'folder': archive_label,
+                'display_name': display_name,
+                'document_date': doc_meta.get('DocumentDate', ''),
+            })
+            saved_count += 1
+
+        for idx, att in enumerate(doc_full.get('attachments', []) if doc_full else []):
+            att_b64 = att.get('body_base64')
+            if not att_b64:
+                continue
+            att_name = att.get('file_name') or f"attachment_{idx}"
+            base_safe = _safe_filename(file_name, doc_id)
+            name_part, _ = os.path.splitext(base_safe)
+            att_safe = _safe_filename(att_name, att.get('id', str(idx)))
+            safe_att_name = f"{name_part}_attachment_{idx}_{att_safe}"
+            att_path = os.path.join(output_dir, safe_att_name)
+            if os.path.exists(att_path):
+                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                safe_att_name = f"{name_part}_attachment_{idx}_{ts}_{att_safe}"
+                att_path = os.path.join(output_dir, safe_att_name)
+            with open(att_path, 'wb') as f:
+                f.write(base64.b64decode(att_b64))
+            att_size = os.path.getsize(att_path)
+            logger.info("    Сохранено вложение: %s (%d байт)", att_path, att_size)
+            downloaded.append({
+                'document_id': doc_id,
+                'filename': safe_att_name,
+                'filepath': att_path,
+                'size': att_size,
+                'contractor': contractor_name,
+                'folder': archive_label,
+                'display_name': display_name,
+                'document_date': doc_meta.get('DocumentDate', ''),
+            })
+            saved_count += 1
+
+        if saved_count == 0:
+            logger.warning(
+                "    Тело документа (body) id=%s пустое и вложений не найдено — пропуск", doc_id,
+            )
+
+    return downloaded
+
+
 def main():
     logger.info("=" * 70)
     logger.info("Выгрузка вложений ЭДО Регион за предыдущий день")
@@ -316,6 +423,16 @@ def main():
                 output_dir=output_dir,
             )
             all_downloaded.extend(downloaded)
+
+        downloaded = _download_documents_from_archive(
+            api=api,
+            contractor_id=contractor_id,
+            contractor_name=contractor_name,
+            date_from=date_from,
+            date_to=date_to,
+            output_dir=output_dir,
+        )
+        all_downloaded.extend(downloaded)
 
     logger.info("=" * 70)
     logger.info("ИТОГО (total):")
