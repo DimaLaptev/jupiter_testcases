@@ -151,22 +151,10 @@ def _download_documents_from_folder(
         date_to=date_to,
     )
 
-    total = api.get_total_documents_count(folder, filtr)
-    if total == 0:
-        logger.debug(
-            "  [%s] папка '%s' — документов нет", contractor_name, folder,
-        )
-        return []
-
-    logger.info(
-        "  [%s] папка '%s' — найдено документов: %d",
-        contractor_name, folder, total,
-    )
-
     downloaded: list[dict] = []
     offset = 0
 
-    while offset < total:
+    while True:
         docs = api.get_document_info_from_folder(
             folder=folder,
             filtr_xml=filtr,
@@ -174,7 +162,14 @@ def _download_documents_from_folder(
             offset=str(offset),
         )
         if not docs:
+            if offset == 0:
+                logger.debug(
+                    "  [%s] папка '%s' — документов нет", contractor_name, folder,
+                )
             break
+
+        if offset == 0:
+            logger.info("  [%s] папка '%s' — загрузка документов...", contractor_name, folder)
 
         for doc_meta in docs:
             doc_id = doc_meta.get('DocumentId', '')
