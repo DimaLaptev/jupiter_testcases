@@ -3,8 +3,8 @@ from openpyxl import Workbook
 
 def create_file_handler_config_xlsx(filename: str = "file_handler_config.xlsx") -> None:
     """
-    Создаёт excel-файл (Excel) с настройками, эквивалентными
-    текущим хардкодам в file_handler.py.
+    Создаёт excel-файл с настройками по Таблице №1 и №2 (tz/Sprav_p_1_3).
+    Коды хранятся как текст (формат @), чтобы сохранить ведущие нули.
     """
 
     wb = Workbook()
@@ -19,12 +19,16 @@ def create_file_handler_config_xlsx(filename: str = "file_handler_config.xlsx") 
     ws.append(["base", "DIR_DOMRF", "DOMRF"])
     ws.append(["base", "DIR_DOMRFIA", "DOMRFIA"])
 
-    # Паттерны и коды — каждая запись отдельной строкой
-    def add_list(section: str, key: str, values):
+    def add_list(section: str, key: str, values: list, as_text: bool = False) -> None:
+        """Добавляет строки. as_text=True — значение в формате текст (для кодов с ведущими нулями)."""
+        start_row = ws.max_row + 1
         for v in values:
-            ws.append([section, key, v])
+            ws.append([section, key, str(v)])
+        if as_text:
+            for r in range(start_row, ws.max_row + 1):
+                ws.cell(row=r, column=3).number_format = "@"
 
-    # DOMRF
+    # Таблица №1 — DOMRF
     add_list("patterns", "pattern_DOMRF_MSG", [".MSG"])
     add_list(
         "patterns",
@@ -38,17 +42,18 @@ def create_file_handler_config_xlsx(filename: str = "file_handler_config.xlsx") 
             "00124",
             "00133",
             "00135",
-            "00161",
-            "00176",
-            "00182",
-            "00209",
-            "00228",
-            "00249",
+            "00166",
+            "00167",
+            "00170",
+            "00221",
+            "00222",
+            "00248",
             "00252",
-            "00300",
-            "00306",
-            "00383",
+            "00004",
+            "00036",
+            "00083",
         ],
+        as_text=True,
     )
 
     add_list("patterns", "pattern_DOMRF_any", [".xls", ".pdf", ".zip"])
@@ -67,12 +72,13 @@ def create_file_handler_config_xlsx(filename: str = "file_handler_config.xlsx") 
             "30510",
             "30502",
         ],
+        as_text=True,
     )
 
     add_list("patterns", "pattern_DOMRF_TXT", [".txt"])
-    add_list("patterns", "pattern_DOMRF_TXT_code", ["778", "3194"])
+    add_list("patterns", "pattern_DOMRF_TXT_code", ["778", "3194"], as_text=True)
 
-    # DOMRFIA
+    # Таблица №2 — DOMRFIA
     add_list("patterns", "pattern_DOMRFIA_MSG", [".MSG"])
     add_list(
         "patterns",
@@ -83,12 +89,15 @@ def create_file_handler_config_xlsx(filename: str = "file_handler_config.xlsx") 
             "00234",
             "00235",
             "00239",
-            "00250",
+            "00240",
+            "00253",
             "00254",
             "00255",
             "00256",
+            "00263",
             "00264",
         ],
+        as_text=True,
     )
 
     add_list("patterns", "pattern_DOMRFIA_any", [".xls", ".pdf", ".zip"])
@@ -97,16 +106,17 @@ def create_file_handler_config_xlsx(filename: str = "file_handler_config.xlsx") 
         "pattern_DOMRFIA_any_code",
         [
             "33514",
-            "33566",
-            "33569",
+            "33506",
             "33639",
-            "33670",
+            "33613",
+            "33647",
             "33621",
-            "33576",
-            "33579",
+            "33753",
+            "33761",
             "33472",
             "33480",
         ],
+        as_text=True,
     )
 
     wb.save(filename)
