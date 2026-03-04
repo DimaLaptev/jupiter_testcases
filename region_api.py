@@ -11,9 +11,13 @@ SOAP-клиент (client) для web-службы интеграции СЭД �
 
 import logging
 import os
+from typing import List, Optional
+
 from xml.etree import ElementTree as ET
 
+from lxml import etree as lxml_etree
 from zeep import Client
+from zeep.plugins import HistoryPlugin
 from zeep.transports import Transport
 from requests import Session
 
@@ -32,14 +36,17 @@ class RegionApiClient:
         session.verify = verify_ssl
         transport = Transport(session=session, timeout=timeout)
 
+        self._history = HistoryPlugin()
         logger.info("Подключение к WSDL: %s", wsdl_url)
-        self.client = Client(wsdl=wsdl_url, transport=transport)
+        self.client = Client(
+            wsdl=wsdl_url, transport=transport, plugins=[self._history]
+        )
         self.service = self.client.service
 
     # ------------------------------------------------------------------
     # Отладка: список операций WSDL (debug: list WSDL operations)
     # ------------------------------------------------------------------
-    def list_wsdl_operations(self, keywords: list[str] | None = None) -> list[str]:
+    def list_wsdl_operations(self, keywords: Optional[List[str]] = None) -> List[str]:
         """
         Возвращает список имён операций SOAP из WSDL. Если заданы keywords
         (например, ['attachment', 'document', 'body']), логируются только
@@ -137,6 +144,23 @@ class RegionApiClient:
         xml_str = self.service.getDocumentInfoFromFolderByParams(
             self.login, self.password, folder, filtr_xml, limit, offset
         )
+
+        if os.getenv("REGION_DEBUG_XML", "").lower() in ("1", "true", "yes"):
+            if self._history.last_sent and "envelope" in self._history.last_sent:
+                req_xml = lxml_etree.tostring(
+                    self._history.last_sent["envelope"],
+                    encoding="unicode",
+                    pretty_print=True,
+                )
+                print("\n=== getDocumentInfoFromFolderByParams ЗАПРОС ===\n" + req_xml)
+            if self._history.last_received and "envelope" in self._history.last_received:
+                resp_xml = lxml_etree.tostring(
+                    self._history.last_received["envelope"],
+                    encoding="unicode",
+                    pretty_print=True,
+                )
+                print("\n=== getDocumentInfoFromFolderByParams ОТВЕТ ===\n" + resp_xml)
+
         if not xml_str:
             return []
 
@@ -154,7 +178,7 @@ class RegionApiClient:
     # ------------------------------------------------------------------
     # 5.3  Получение документа с подписями (document with signatures)
     # ------------------------------------------------------------------
-    def get_document_by_id(self, document_id: str) -> dict | None:
+    def get_document_by_id(self, document_id: str) -> Optional[dict]:
         """
         Вызывает getDocumentById(login, password, documentid).
         Возвращает словарь (dict) с ключами:
@@ -212,7 +236,7 @@ class RegionApiClient:
     # ------------------------------------------------------------------
     # 4.2  Тело документа (document body) — base64
     # ------------------------------------------------------------------
-    def get_document_body(self, document_id: str) -> str | None:
+    def get_document_body(self, document_id: str) -> Optional[str]:
         """
         Вызывает getDocumentBody(login, password, documentid).
         Возвращает строку base64 с телом документа или None.

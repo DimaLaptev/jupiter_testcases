@@ -21,6 +21,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta
+from typing import List, Optional, Tuple
 
 import pytz
 
@@ -44,7 +45,7 @@ logger = logging.getLogger(__name__)
 PAGE_SIZE = 100
 
 
-def _yesterday_range() -> tuple[str, str]:
+def _yesterday_range() -> Tuple[str, str]:
     """Возвращает (date_from, date_to) для предыдущего дня по МСК (UTC+3)."""
     moscow = pytz.timezone('Europe/Moscow')
     today = datetime.now(moscow).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -80,9 +81,9 @@ def _normalize_name(s: str) -> str:
 
 def _resolve_contractor_ids(
     api: RegionApiClient,
-    department_names: list[str],
-    organization_names: list[str] | None = None,
-) -> dict[str, str]:
+    department_names: List[str],
+    organization_names: Optional[List[str]] = None,
+) -> dict:
     """
     Получает список контрагентов через API и находит ContractorId для каждого
     депозитария по подразделению или организации. Возвращает {DisplayName: ContractorId},
