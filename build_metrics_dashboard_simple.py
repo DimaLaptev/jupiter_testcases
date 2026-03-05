@@ -102,20 +102,26 @@ def load_dataframe(path: str | Path) -> pd.DataFrame:
     raise ValueError(f"Неподдерживаемый формат: {p.suffix}")
 
 
-def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def prepare_dataframe(df: pd.DataFrame, forecast_col: str = "fact_predict") -> pd.DataFrame:
     df = df.copy()
 
-    for col in ("fact_value", "fact_predict"):
+    if forecast_col not in df.columns:
+        raise ValueError(f"Колонка прогноза не найдена: {forecast_col}")
+
+    for col in ("fact_value", forecast_col):
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    df["abs_error"] = (df["fact_value"] - df["fact_predict"]).abs()
+    df["abs_error"] = (df["fact_value"] - df[forecast_col]).abs()
 
     acc = np.where(
         df["fact_value"] == 0,
-        np.where(df["fact_predict"] == 0, 100.0, 0.0),
+        np.where(df[forecast_col] == 0, 100.0, 0.0),
         np.clip(100.0 - df["abs_error"] / df["fact_value"] * 100.0, 0, 100),
     )
     df["accuracy_pct"] = np.round(acc, 2)
+
+    if forecast_col != "fact_predict":
+        df["fact_predict"] = df[forecast_col].copy()
 
     col_map = {"Факт, ПШЕ": "fact_fts"}
     df.rename(columns={k: v for k, v in col_map.items() if k in df.columns}, inplace=True)
@@ -495,10 +501,10 @@ def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame) -> None:
 
     top_section_row = 11
     ws.cell(row=top_section_row, column=1,
-            value="Топ-10 подразделений с ХУДШИМ качеством (крупные)")
+            value="Топ-10 моделей (resist_id) с ХУДШИМ качеством (крупные)")
     ws.cell(row=top_section_row, column=1).font = Font(bold=True, size=12, color="C00000")
     ws.merge_cells(start_row=top_section_row, start_column=1,
-                   end_row=top_section_row, end_column=8)
+                   end_row=top_section_row, end_column=9)
 
     div_stats = _division_stats(df)
     worst = div_stats.nsmallest(10, "quality_index")
@@ -506,22 +512,22 @@ def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame) -> None:
 
     best_section_row = top_section_row + len(worst) + 3
     ws.cell(row=best_section_row, column=1,
-            value="Топ-10 подразделений с ЛУЧШИМ качеством (крупные)")
+            value="Топ-10 моделей (resist_id) с ЛУЧШИМ качеством (крупные)")
     ws.cell(row=best_section_row, column=1).font = Font(bold=True, size=12, color="007030")
     ws.merge_cells(start_row=best_section_row, start_column=1,
-                   end_row=best_section_row, end_column=8)
+                   end_row=best_section_row, end_column=9)
     best = div_stats.nlargest(10, "quality_index")
     _write_div_table(ws, best_section_row + 1, best, is_worst=False)
 
     scatter_row = best_section_row + len(best) + 3
     ws.cell(row=scatter_row, column=1,
-            value="Точность, стабильность и качество по подразделениям (2025г.)")
+            value="Точность, стабильность и качество по моделям (resist_id)")
     ws.cell(row=scatter_row, column=1).font = Font(bold=True, size=12)
     ws.merge_cells(start_row=scatter_row, start_column=1,
-                   end_row=scatter_row, end_column=8)
+                   end_row=scatter_row, end_column=9)
 
     scatter_headers = [
-        "Подразделение", "Точность, %", "Стабильность, %",
+        "resist_id", "Подразделение", "Точность, %", "Стабильность, %",
         "Качество, %", "Факт, шт.",
     ]
     for ci, h in enumerate(scatter_headers, 1):
@@ -529,25 +535,31 @@ def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     style_header_row(ws, scatter_row + 1, len(scatter_headers))
 
     for ri, (_, row) in enumerate(div_stats.iterrows(), scatter_row + 2):
-        ws.cell(row=ri, column=1, value=row["division_title"])
-        ws.cell(row=ri, column=2, value=row["mean_accuracy"])
-        ws.cell(row=ri, column=3, value=row["stability"])
-        ws.cell(row=ri, column=4, value=row["quality_index"])
-        ws.cell(row=ri, column=5, value=int(row["fact_sum"]))
+        ws.cell(row=ri, column=1, value=row["resist_id"])
+        ws.cell(row=ri, column=2, value=row["division_title"])
+        ws.cell(row=ri, column=3, value=row["mean_accuracy"])
+        ws.cell(row=ri, column=4, value=row["stability"])
+        ws.cell(row=ri, column=5, value=row["quality_index"])
+        ws.cell(row=ri, column=6, value=int(row["fact_sum"]))
 
     for col in range(1, 13):
         ws.column_dimensions[get_column_letter(col)].width = 18
 
 
 def _division_stats(df: pd.DataFrame) -> pd.DataFrame:
-    groups = df.groupby("division_title", dropna=False)
+    """Агрегация метрик по resist_id (названия подразделений менялись со временем)."""
+    groups = df.groupby("resist_id", dropna=True)
     rows = []
-    for name, grp in groups:
+    for rid, grp in groups:
         m_acc = calc_mean_accuracy(grp)
         stab = calc_stability(grp)
         qi = calc_quality_index(m_acc, stab)
+        div_titles = grp["division_title"].dropna() if "division_title" in grp.columns else pd.Series(dtype=object)
+        div_title = div_titles.iloc[0] if len(div_titles) > 0 else ""
+        div_title = div_title if pd.notna(div_title) and str(div_title).strip() else "(не указано)"
         rows.append({
-            "division_title": name if pd.notna(name) else "(не указано)",
+            "resist_id": rid,
+            "division_title": div_title,
             "fact_sum": grp["fact_value"].sum(),
             "pred_sum": grp["fact_predict"].sum(),
             "error_sum": grp["abs_error"].sum(),
@@ -560,7 +572,7 @@ def _division_stats(df: pd.DataFrame) -> pd.DataFrame:
 
 def _write_div_table(ws, start_row: int, data: pd.DataFrame, is_worst: bool) -> None:
     headers = [
-        "Подразделение", "Факт, шт.", "Прогноз, шт.", "Ошибка, шт.",
+        "resist_id", "Подразделение", "Факт, шт.", "Прогноз, шт.", "Ошибка, шт.",
         "Точность, %", "Стабильность, %", "Качество, %",
     ]
     for ci, h in enumerate(headers, 1):
@@ -569,19 +581,20 @@ def _write_div_table(ws, start_row: int, data: pd.DataFrame, is_worst: bool) -> 
 
     fill = BAD_FILL if is_worst else GOOD_FILL
     for ri, (_, row) in enumerate(data.iterrows(), start_row + 1):
-        ws.cell(row=ri, column=1, value=row["division_title"])
-        ws.cell(row=ri, column=2, value=int(row["fact_sum"]))
-        ws.cell(row=ri, column=3, value=int(row["pred_sum"]))
-        ws.cell(row=ri, column=4, value=int(row["error_sum"]))
-        ws.cell(row=ri, column=5, value=row["mean_accuracy"])
-        ws.cell(row=ri, column=6, value=row["stability"])
-        ws.cell(row=ri, column=7, value=row["quality_index"])
-        for ci in range(1, 8):
+        ws.cell(row=ri, column=1, value=row["resist_id"])
+        ws.cell(row=ri, column=2, value=row["division_title"])
+        ws.cell(row=ri, column=3, value=int(row["fact_sum"]))
+        ws.cell(row=ri, column=4, value=int(row["pred_sum"]))
+        ws.cell(row=ri, column=5, value=int(row["error_sum"]))
+        ws.cell(row=ri, column=6, value=row["mean_accuracy"])
+        ws.cell(row=ri, column=7, value=row["stability"])
+        ws.cell(row=ri, column=8, value=row["quality_index"])
+        for ci in range(1, 9):
             ws.cell(row=ri, column=ci).border = THIN_BORDER
-        ws.cell(row=ri, column=5).fill = fill
-        ws.cell(row=ri, column=5).number_format = '0.00'
+        ws.cell(row=ri, column=6).fill = fill
         ws.cell(row=ri, column=6).number_format = '0.00'
         ws.cell(row=ri, column=7).number_format = '0.00'
+        ws.cell(row=ri, column=8).number_format = '0.00'
 
 
 # ---------------------------------------------------------------------------
@@ -598,28 +611,40 @@ def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     ]
 
     months_present = sorted(df["month"].unique())
-    divisions = sorted(df["division_title"].dropna().unique())
+    resist_ids = sorted(
+        [x for x in df["resist_id"].unique() if pd.notna(x)],
+        key=lambda x: (0, x) if isinstance(x, (int, float)) else (1, str(x)),
+    )
 
-    last_month_col = len(months_present) + 1
+    # resist_id | division_title | months
+    last_month_col = len(months_present) + 2
 
     ws.cell(row=1, column=1,
-            value="Тепловая карта: Качество (%) по подразделениям и месяцам")
+            value="Тепловая карта: Качество (%) по моделям (resist_id) и месяцам")
     ws.cell(row=1, column=1).font = Font(bold=True, size=14)
     ws.merge_cells(start_row=1, start_column=1, end_row=1,
                    end_column=last_month_col)
 
-    ws.cell(row=3, column=1, value="Подразделение")
-    for mi, m in enumerate(months_present, 2):
+    ws.cell(row=3, column=1, value="resist_id")
+    ws.cell(row=3, column=2, value="Подразделение")
+    for mi, m in enumerate(months_present, 3):
         label = MONTH_NAMES[m - 1] if 1 <= m <= 12 else str(m)
         ws.cell(row=3, column=mi, value=label)
     style_header_row(ws, 3, last_month_col)
 
-    for di, div in enumerate(divisions, 4):
-        ws.cell(row=di, column=1, value=div)
-        ws.cell(row=di, column=1).border = THIN_BORDER
+    for di, rid in enumerate(resist_ids, 4):
+        slice_any = df[df["resist_id"] == rid]
+        div_titles = slice_any["division_title"].dropna()
+        div_title = div_titles.iloc[0] if len(div_titles) > 0 else "(не указано)"
+        div_title = div_title if pd.notna(div_title) and str(div_title).strip() else "(не указано)"
 
-        for mi, m in enumerate(months_present, 2):
-            slice_df = df[(df["division_title"] == div) & (df["month"] == m)]
+        ws.cell(row=di, column=1, value=rid)
+        ws.cell(row=di, column=1).border = THIN_BORDER
+        ws.cell(row=di, column=2, value=div_title)
+        ws.cell(row=di, column=2).border = THIN_BORDER
+
+        for mi, m in enumerate(months_present, 3):
+            slice_df = df[(df["resist_id"] == rid) & (df["month"] == m)]
             if slice_df.empty or slice_df["fact_value"].sum() == 0:
                 ws.cell(row=di, column=mi, value="—")
                 ws.cell(row=di, column=mi).alignment = Alignment(horizontal="center")
@@ -631,8 +656,8 @@ def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
                 ws.cell(row=di, column=mi).number_format = '0.0'
             ws.cell(row=di, column=mi).border = THIN_BORDER
 
-    last_data_row = 3 + len(divisions)
-    for mi in range(2, last_month_col + 1):
+    last_data_row = 3 + len(resist_ids)
+    for mi in range(3, last_month_col + 1):
         col_letter = get_column_letter(mi)
         rng = f"{col_letter}4:{col_letter}{last_data_row}"
         ws.conditional_formatting.add(
@@ -644,16 +669,18 @@ def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
             ),
         )
 
-    ws.column_dimensions["A"].width = 35
-    for ci in range(2, last_month_col + 1):
+    ws.column_dimensions["A"].width = 12
+    ws.column_dimensions["B"].width = 35
+    for ci in range(3, last_month_col + 1):
         ws.column_dimensions[get_column_letter(ci)].width = 10
 
     total_row = last_data_row + 1
     ws.cell(row=total_row, column=1, value="ИТОГО")
     ws.cell(row=total_row, column=1).font = Font(bold=True, size=12)
     ws.cell(row=total_row, column=1).border = THIN_BORDER
+    ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=2)
 
-    for mi, m in enumerate(months_present, 2):
+    for mi, m in enumerate(months_present, 3):
         slice_df = df[df["month"] == m]
         if slice_df.empty or slice_df["fact_value"].sum() == 0:
             ws.cell(row=total_row, column=mi, value="—")
@@ -717,9 +744,13 @@ def _save_vba_instructions(xlsx_path: Path, vba_code: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_dashboard(input_path: str | Path, output_path: str | Path | None = None) -> Path:
+def build_dashboard(
+    input_path: str | Path,
+    output_path: str | Path | None = None,
+    forecast_col: str = "fact_predict",
+) -> Path:
     df_raw = load_dataframe(input_path)
-    df = prepare_dataframe(df_raw)
+    df = prepare_dataframe(df_raw, forecast_col=forecast_col)
 
     wb = Workbook()
     wb.remove(wb.active)
@@ -763,6 +794,11 @@ def main() -> None:
         default=None,
         help="Путь к выходному xlsx (default: forecast_dashboard_simple.xlsx)",
     )
+    parser.add_argument(
+        "--forecast-col", "-f",
+        default="fact_predict",
+        help="Колонка с прогнозом для оценки (default: fact_predict)",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -770,7 +806,7 @@ def main() -> None:
         print(f"Файл не найден: {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    build_dashboard(input_path, args.output)
+    build_dashboard(input_path, args.output, forecast_col=args.forecast_col)
 
 
 if __name__ == "__main__":
