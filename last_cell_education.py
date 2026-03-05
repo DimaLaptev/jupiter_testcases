@@ -567,3 +567,31 @@ else:
 
         wb.save(history_xlsx)
         print("Listy Metriki_svod i resist_* (metriki po operacijam, po vsem prognozam) sozdany:", history_xlsx)
+
+
+    if name == "lightgbm":
+        import lightgbm as lgb
+        return lgb.LGBMRegressor(
+            n_estimators=2000,
+            max_depth=8,
+            learning_rate=0.05,
+            min_child_samples=20,
+            num_leaves=64,
+            reg_alpha=0.1,
+            reg_lambda=0.1,
+            objective="regression_l1",  # MAE — устойчивее к выбросам при разных масштабах
+            random_state=42,
+            verbose=100,
+            early_stopping_rounds=100,
+            force_col_wise=True,
+        )
+
+
+cat_idx = [FEATURE_COLS.index(c) for c in CAT_COLS]
+    train_weight = train_df["calculate_minute"].fillna(train_df["calculate_minute"].mean())
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_test, y_test)],
+        sample_weight=train_weight,
+        categorical_feature=[FEATURE_COLS[i] for i in cat_idx],
+    )
