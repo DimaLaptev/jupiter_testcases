@@ -486,20 +486,26 @@ def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     ws.merge_cells("A2:L2")
 
     ws.cell(row=6, column=1, value="Как считаются показатели:").font = Font(bold=True, size=12)
+    ws.cell(row=6, column=9, value="Формулы excel")
     formulas_text = [
         ("Точность",
-         "Среднее арифметическое «Точности прогноза» по всем видимым строкам. Все строки равны."),
+         "Среднее арифметическое «Точности прогноза» по всем видимым строкам. Все строки равны.",
+         "Формула 1"),
         ("Стабильность",
-         "(1 - CV) * 100%, где CV - отношение разброса к среднему. Чем меньше разброс, тем стабильнее."),
+         "(1 - CV) * 100%, где CV - отношение разброса к среднему. Чем меньше разброс, тем стабильнее.",
+         "Формула 2"),
         ("Качество",
-         "Гармоническое среднее Точности и Стабильности. Провал любого показателя снижает рейтинг."),
+         "Гармоническое среднее Точности и Стабильности. Провал любого показателя снижает рейтинг.",
+         "Формула 3"),
     ]
-    for i, (name, desc) in enumerate(formulas_text):
-        ws.cell(row=7 + i, column=1, value=name).font = Font(bold=True, size=10)
-        ws.cell(row=7 + i, column=3, value=desc).font = Font(size=10, color="555555")
-        ws.merge_cells(start_row=7 + i, start_column=3, end_row=7 + i, end_column=12)
+    for i, (name, desc, formula_label) in enumerate(formulas_text):
+        row = 7 + i * 2  # 7, 9, 11 — с пустой строкой между блоками
+        ws.cell(row=row, column=1, value=name).font = Font(bold=True, size=10)
+        ws.cell(row=row, column=3, value=desc).font = Font(size=10, color="555555")
+        ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=8)
+        ws.cell(row=row, column=9, value=formula_label)
 
-    top_section_row = 11
+    top_section_row = 14
     ws.cell(row=top_section_row, column=1,
             value="Топ-10 моделей (resist_id) с ХУДШИМ качеством (крупные)")
     ws.cell(row=top_section_row, column=1).font = Font(bold=True, size=12, color="C00000")
