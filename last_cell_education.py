@@ -595,3 +595,24 @@ cat_idx = [FEATURE_COLS.index(c) for c in CAT_COLS]
         sample_weight=train_weight,
         categorical_feature=[FEATURE_COLS[i] for i in cat_idx],
     )
+
+
+def calc_mape(y_true, y_pred):
+    y_true, y_pred = np.array(y_true, dtype=float), np.array(y_pred, dtype=float)
+    err = np.empty_like(y_true)
+    mask_zero = y_true == 0
+    err[mask_zero] = np.where(y_pred[mask_zero] == 0, 0.0, 100.0)
+    mask_ok = ~mask_zero
+    if np.any(mask_ok):
+        err[mask_ok] = np.abs(y_true[mask_ok] - y_pred[mask_ok]) / np.abs(y_true[mask_ok]) * 100
+    return float(np.mean(err))
+
+def calc_accuracy_pct(y_true, y_pred):
+    y_true, y_pred = np.array(y_true, dtype=float), np.array(y_pred, dtype=float)
+    acc = np.empty_like(y_true)
+    mask_zero = y_true == 0
+    acc[mask_zero] = np.where(y_pred[mask_zero] == 0, 100.0, 0.0)
+    mask_ok = ~mask_zero
+    if np.any(mask_ok):
+        acc[mask_ok] = np.clip(100.0 - np.abs(y_true[mask_ok] - y_pred[mask_ok]) / np.abs(y_true[mask_ok]) * 100.0, 0, 100)
+    return acc
