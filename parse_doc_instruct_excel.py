@@ -37,9 +37,9 @@ def _parse_header_value(text: str) -> Optional[tuple[str, str]]:
     return (key, value) if key else None
 
 
-def _is_data_row(text: str) -> bool:
-    """Строка с данными содержит хотя бы одну точку с запятой."""
-    return bool(text and ";" in text)
+def _is_data_row(text: str, delimiter: str = ";") -> bool:
+    """Строка с данными содержит разделитель (; или ,)."""
+    return bool(text and delimiter in text)
 
 
 def parse_doc_instruct_excel(file_path: Union[str, Path]) -> dict:
@@ -102,9 +102,26 @@ def parse_doc_instruct_excel(file_path: Union[str, Path]) -> dict:
     return result
 
 
-def _parse_doc_instruct_text(lines: list[str]) -> dict:
+def _is_header_row_for_delim(text: str, delim: str) -> bool:
+    """Header = key:value; для delim=',' ключ (до ':') не содержит разделитель."""
+    if not text or ":" not in text:
+        return False
+    idx = text.index(":")
+    key_part = text[:idx].strip()
+    if delim in key_part:
+        return False
+    return True
+
+
+def _is_data_row_for_delim(text: str, delim: str) -> bool:
+    """Строка с данными содержит разделитель."""
+    return bool(text and delim in text)
+
+
+def _parse_doc_instruct_text(lines: list[str], delimiter: str = ";") -> dict:
     """
     Парсит текст (список строк) формата DOC_INSTRUCT.
+    delimiter — разделитель в data-строках (';' или ',').
     Возвращает тот же формат, что и parse_doc_instruct_excel.
     """
     result = {}
@@ -113,7 +130,7 @@ def _parse_doc_instruct_text(lines: list[str]) -> dict:
     for line in lines:
         text = line.strip() if line else ""
         if in_header:
-            if _is_header_row(text):
+            if _is_header_row_for_delim(text, delimiter):
                 parsed = _parse_header_value(text)
                 if parsed:
                     key, value = parsed
@@ -127,8 +144,8 @@ def _parse_doc_instruct_text(lines: list[str]) -> dict:
         if not text:
             row_num += 1
             continue
-        if _is_data_row(text):
-            values = [v.strip() for v in text.split(";")]
+        if _is_data_row_for_delim(text, delimiter):
+            values = [v.strip() for v in text.split(delimiter)]
             result[row_num] = values
         row_num += 1
     return result
@@ -167,6 +184,44 @@ def parse_doc_instruct_msg(file_path: Union[str, Path]) -> dict:
 
     lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     result = _parse_doc_instruct_text(lines)
+    if not result.get("ReportName") and path.name:
+        result["ReportName"] = path.name
+    return result
+
+
+def parse_msg_tz_i(file_path: Union[str, Path]) -> dict:
+    """
+    Парсит .MSG файл формата tz/I (разделитель в data-строках — запятая).
+    Структура: key:value в заголовке, данные — через запятую.
+    """
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Файл не найден: {path}")
+
+    content = None
+    try:
+        from extract_msg import Message
+        msg = Message(path)
+        content = msg.body or ""
+        msg.close()
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    if content is None or not content.strip():
+        for enc in ("cp1251", "utf-8", "latin-1"):
+            try:
+                with open(path, "r", encoding=enc) as f:
+                    content = f.read()
+                break
+            except (UnicodeDecodeError, OSError):
+                content = None
+        if not content or not content.strip():
+            return {}
+
+    lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    result = _parse_doc_instruct_text(lines, delimiter=",")
     if not result.get("ReportName") and path.name:
         result["ReportName"] = path.name
     return result
