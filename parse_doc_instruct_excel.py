@@ -151,6 +151,54 @@ def _parse_doc_instruct_text(lines: list[str], delimiter: str = ";") -> dict:
     return result
 
 
+def _fix_msg_encoding(content: str) -> str:
+    """
+    Исправляет mojibake. Пробует: cp1251-as-latin1, utf8-as-latin1.
+    Применяется только при признаках порчи (нет кириллицы, есть типичный mojibake).
+    """
+    if not content:
+        return content
+    has_cyrillic = any("\u0400" <= c <= "\u04FF" for c in content)
+    mojibake_chars = "\u00c2\u00c3\u00d0\u00d1\u00d2\u00d3"  # ÂÃÐÑÒÓ в mojibake
+    if has_cyrillic or not any(c in content for c in mojibake_chars):
+        return content
+    for enc_out in ("cp1251", "utf-8"):
+        try:
+            fixed = content.encode("latin-1", errors="strict").decode(enc_out)
+            if any("\u0400" <= c <= "\u04FF" for c in fixed):
+                return fixed
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            continue
+    return content
+
+
+def _read_msg_content(path: Path) -> str:
+    """Читает тело .MSG с учётом кодировок cp1251/utf-8."""
+    content = None
+    try:
+        from extract_msg import Message
+        msg = Message(path)
+        content = msg.body or ""
+        msg.close()
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    if content is None or not content.strip():
+        for enc in ("cp1251", "utf-8", "latin-1"):
+            try:
+                with open(path, "r", encoding=enc) as f:
+                    content = f.read()
+                break
+            except (UnicodeDecodeError, OSError):
+                content = None
+        if not content or not content.strip():
+            return ""
+    # Исправление кодировки при ошибочном декодировании
+    content = _fix_msg_encoding(content)
+    return content
+
+
 def parse_doc_instruct_msg(file_path: Union[str, Path]) -> dict:
     """
     Парсит .MSG файл формата DOC_INSTRUCT.
@@ -198,27 +246,9 @@ def parse_msg_tz_i(file_path: Union[str, Path]) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"Файл не найден: {path}")
 
-    content = None
-    try:
-        from extract_msg import Message
-        msg = Message(path)
-        content = msg.body or ""
-        msg.close()
-    except ImportError:
-        pass
-    except Exception:
-        pass
-
-    if content is None or not content.strip():
-        for enc in ("cp1251", "utf-8", "latin-1"):
-            try:
-                with open(path, "r", encoding=enc) as f:
-                    content = f.read()
-                break
-            except (UnicodeDecodeError, OSError):
-                content = None
-        if not content or not content.strip():
-            return {}
+    content = _read_msg_content(path)
+    if not content or not content.strip():
+        return {}
 
     lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     result = _parse_doc_instruct_text(lines, delimiter=",")

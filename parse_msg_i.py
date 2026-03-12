@@ -7,6 +7,13 @@
 import sys
 from pathlib import Path
 
+# UTF-8 для консоли Windows (исключает искажение кириллицы)
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 from parse_doc_instruct_excel import parse_msg_tz_i, print_parsed_result
 
 DEFAULT_SOURCE_DIR = Path(__file__).parent / "tz" / "I"
