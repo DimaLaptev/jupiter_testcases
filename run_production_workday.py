@@ -197,7 +197,7 @@ def calc_mape(y_true, y_pred):
 
 
 def calc_accuracy_pct(y_true, y_pred):
-    """Точность по каждому наблюдению (0–100)."""
+    """Точность по каждому наблюдению (0–100). Эталон: build_metrics_dashboard_simple.prepare_dataframe."""
     y_true, y_pred = np.array(y_true, dtype=float), np.array(y_pred, dtype=float)
     acc = np.empty_like(y_true)
     mask_zero = y_true == 0
@@ -205,23 +205,28 @@ def calc_accuracy_pct(y_true, y_pred):
     mask_ok = ~mask_zero
     if np.any(mask_ok):
         acc[mask_ok] = np.clip(100.0 - np.abs(y_true[mask_ok] - y_pred[mask_ok]) / np.abs(y_true[mask_ok]) * 100.0, 0, 100)
-    return acc
+    return np.round(acc, 2)
 
 
 def calc_mean_accuracy(y_true, y_pred):
-    return float(np.mean(calc_accuracy_pct(y_true, y_pred)))
+    """Эталон: build_metrics_dashboard_simple.calc_mean_accuracy."""
+    if len(y_true) == 0 or len(y_pred) == 0:
+        return 0.0
+    return round(float(np.mean(calc_accuracy_pct(y_true, y_pred))), 2)
 
 
 def calc_stability(y_true, y_pred):
+    """Эталон: build_metrics_dashboard_simple.calc_stability."""
     acc = calc_accuracy_pct(y_true, y_pred)
     mean_acc = float(np.mean(acc))
-    if mean_acc == 0:
+    if mean_acc == 0 or pd.isna(mean_acc):
         return 0.0
     cv = np.std(acc, ddof=0) / mean_acc
-    return max(0.0, (1 - cv)) * 100
+    return round(max(0.0, (1 - cv)) * 100, 2)
 
 
 def calc_quality(y_true, y_pred):
+    """Эталон: build_metrics_dashboard_simple.calc_quality_index."""
     y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
     if len(y_true) == 0 or len(y_pred) == 0:
         return 0.0
@@ -229,7 +234,9 @@ def calc_quality(y_true, y_pred):
     if mean_acc == 0 or np.isnan(mean_acc):
         return 0.0
     stab = calc_stability(y_true, y_pred)
-    return 2 * mean_acc * stab / (mean_acc + stab)
+    if mean_acc + stab == 0:
+        return 0.0
+    return round(2 * mean_acc * stab / (mean_acc + stab), 2)
 
 
 def main():
