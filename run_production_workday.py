@@ -26,10 +26,10 @@ RAW_FILES = [
 FILTER_YEAR = 2025
 
 # Месяцы для теста: None = все 12, иначе [1, 2, 3] и т.д.
-TEST_MONTHS = None  # пример: [1, 2, 3] для января–марта
+TEST_MONTHS = [2,6,9,12] #None  # пример: [1, 2, 3] для января–марта
 
 # resist_id для теста: None = все, иначе [31, 47, 49] и т.д.
-TEST_RESIST_IDS = None  # пример: [31, 47, 49]
+TEST_RESIST_IDS = [48,145,160,16,36,51,184] #None  # пример: [31, 47, 49]
 
 # Флаги экспериментов (план workday_regressor_experiments)
 EXPERIMENT_YEARLY_SEASONALITY_OFF = False  # Теория 1: yearly_seasonality=False при workday
@@ -220,8 +220,11 @@ def calc_stability(y_true, y_pred):
 
 
 def calc_quality(y_true, y_pred):
+    y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
+    if len(y_true) == 0 or len(y_pred) == 0:
+        return 0.0
     mean_acc = calc_mean_accuracy(y_true, y_pred)
-    if mean_acc == 0:
+    if mean_acc == 0 or np.isnan(mean_acc):
         return 0.0
     stab = calc_stability(y_true, y_pred)
     return 2 * mean_acc * stab / (mean_acc + stab)
@@ -273,7 +276,9 @@ def main():
 
     comp = test_df.copy()
     comp["pred_new"] = pred
-    comp["fact_predict"] = comp["fact_predict"].fillna(0)
+    # Как в build_metrics_dashboard_simple.py (эталон): fillna(0) для согласованного расчёта
+    comp["fact_value"] = pd.to_numeric(comp["fact_value"], errors="coerce").fillna(0)
+    comp["fact_predict"] = pd.to_numeric(comp["fact_predict"], errors="coerce").fillna(0)
 
     def _acc(g, col):
         return calc_mean_accuracy(g["fact_value"].values, g[col].values)

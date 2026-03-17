@@ -355,16 +355,26 @@ def run_production_workday_experiment(
     if collect_coeff_stats and coeff_records and coeff_output_path:
         coeff_output_path = Path(coeff_output_path)
         coeff_output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(coeff_output_path.with_suffix(".json"), "w", encoding="utf-8") as f:
-            contribs = [r["workday_contrib"] for r in coeff_records]
-            summary = {
-                "n_total": len(coeff_records),
-                "n_negative": sum(1 for c in contribs if c < 1.0),
-                "pct_negative": 100.0 * sum(1 for c in contribs if c < 1.0) / len(contribs) if contribs else 0,
-                "mean_contrib": float(np.mean(contribs)) if contribs else None,
-                "std_contrib": float(np.std(contribs)) if len(contribs) > 1 else None,
-                "records": coeff_records[:500],
+        contribs = [r["workday_contrib"] for r in coeff_records]
+        records_json = [
+            {
+                "resist_id": int(r["resist_id"]),
+                "operation_id": str(r["operation_id"]) if not isinstance(r["operation_id"], str) else r["operation_id"],
+                "month": int(r["month"]),
+                "workday_contrib": float(r["workday_contrib"]),
+                "n_history": int(r["n_history"]),
             }
+            for r in coeff_records[:500]
+        ]
+        summary = {
+            "n_total": len(coeff_records),
+            "n_negative": int(sum(1 for c in contribs if c < 1.0)),
+            "pct_negative": float(100.0 * sum(1 for c in contribs if c < 1.0) / len(contribs)) if contribs else 0,
+            "mean_contrib": float(np.mean(contribs)) if contribs else None,
+            "std_contrib": float(np.std(contribs)) if len(contribs) > 1 else None,
+            "records": records_json,
+        }
+        with open(coeff_output_path.with_suffix(".json"), "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
         pd.DataFrame(coeff_records).to_csv(coeff_output_path.with_suffix(".csv"), index=False, encoding="utf-8-sig")
 
