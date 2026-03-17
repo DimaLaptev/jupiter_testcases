@@ -21,6 +21,7 @@ from production_forecast import (
     _forecast_average,
     _forecast_prophet,
 )
+from tournament_selector import select_tournament_winner_by_wmae
 
 if HAS_PROPHET:
     from prophet import Prophet
@@ -111,13 +112,17 @@ def forecast_production_one_series_workday(
     yearly_seasonality: bool = True,
     workday_only_if_n30: bool = False,
     tournament_by_quality: bool = False,
+    tournament_by_weighted_mae: bool = False,
+    operation_weight_minutes: Optional[float] = None,
     return_workday_contrib: bool = False,
 ):
     """
     Прогноз с workDayMonth_2. Параметры экспериментов:
-    - yearly_seasonality: False = отключить сезонность при workday (Теория 1)
+    - yearly_seasonality: False = отключить сезонность при workday
     - workday_only_if_n30: True = регрессор только при n>=30 (Теория 2)
     - tournament_by_quality: True = турнир Prophet vs ETS по Quality вместо MAPE (Теория 4)
+    - tournament_by_weighted_mae: True = турнир по WMAE (вес = calculate_minute) — Теория 1
+    - operation_weight_minutes: норматив времени операции (для WMAE)
     - return_workday_contrib: возвращать (pred, contrib) для сбора статистики коэффициентов
     """
     series = drop_leading_zeros(series)
@@ -212,7 +217,11 @@ def forecast_production_one_series_workday(
             pred_p = _prophet_call(hist, hist_wd, fw, last_n, False)
             pred_p = pred_p[0] if isinstance(pred_p, tuple) else pred_p
             pred_e = _forecast_ets(hist, steps=last_n)
-            if tournament_by_quality:
+            if tournament_by_weighted_mae:
+                use_prophet = select_tournament_winner_by_wmae(
+                    actual_last, pred_p[:last_n], pred_e[:last_n], operation_weight_minutes
+                )
+            elif tournament_by_quality:
                 qual_p = _calc_quality_production(actual_last, pred_p[:last_n])
                 qual_e = _calc_quality_production(actual_last, pred_e[:last_n])
                 use_prophet = qual_p >= qual_e
@@ -250,6 +259,7 @@ def run_production_workday_experiment(
     yearly_seasonality: bool = True,
     workday_only_if_n30: bool = False,
     tournament_by_quality: bool = False,
+    tournament_by_weighted_mae: bool = False,
     collect_coeff_stats: bool = False,
     coeff_output_path: Optional[Path] = None,
 ) -> tuple[pd.DataFrame, np.ndarray]:
@@ -260,6 +270,7 @@ def run_production_workday_experiment(
     - yearly_seasonality: False = отключить сезонность при workday (эксп. Теория 1)
     - workday_only_if_n30: True = регрессор только при n>=30 (эксп. Теория 2)
     - tournament_by_quality: True = турнир по Quality вместо MAPE (эксп. Теория 4)
+    - tournament_by_weighted_mae: True = турнир по WMAE (вес = calculate_minute, эксп. Теория 1)
     - collect_coeff_stats: собирать вклад workday для анализа коэффициентов
     - coeff_output_path: путь для сохранения JSON/CSV статистики (если collect_coeff_stats)
     Возвращает (test_df_filtered, predictions).
@@ -324,6 +335,13 @@ def run_production_workday_experiment(
                 hist_wd = hist_wd.reindex(hist_series.index).ffill().bfill().fillna(default_wd)
 
                 future_wd = workday_lookup.get((rid, last_year, month_val), default_wd)
+                op_weight = None
+                if tournament_by_weighted_mae and "calculate_minute" in grp.columns:
+                    cm = grp["calculate_minute"].dropna()
+                    if len(cm) > 0:
+                        op_weight = float(cm.iloc[0])
+                        if op_weight <= 0 or not np.isfinite(op_weight):
+                            op_weight = None
 
                 result = forecast_production_one_series_workday(
                     hist_series,
@@ -334,6 +352,8 @@ def run_production_workday_experiment(
                     yearly_seasonality=yearly_seasonality,
                     workday_only_if_n30=workday_only_if_n30,
                     tournament_by_quality=tournament_by_quality,
+                    tournament_by_weighted_mae=tournament_by_weighted_mae,
+                    operation_weight_minutes=op_weight,
                     return_workday_contrib=collect_coeff_stats,
                 )
                 if collect_coeff_stats and isinstance(result, tuple):

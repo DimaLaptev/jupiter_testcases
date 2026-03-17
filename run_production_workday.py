@@ -32,8 +32,9 @@ TEST_MONTHS = [2,6,9,12] #None  # пример: [1, 2, 3] для января–
 TEST_RESIST_IDS = [48,145,160,16,36,51,184] #None  # пример: [31, 47, 49]
 
 # Флаги экспериментов (план workday_regressor_experiments)
-EXPERIMENT_YEARLY_SEASONALITY_OFF = False  # Теория 1: yearly_seasonality=False при workday
+EXPERIMENT_YEARLY_SEASONALITY_OFF = False  # yearly_seasonality=False при workday
 EXPERIMENT_WORKDAY_ONLY_N30 = False  # Теория 2: регрессор только при n>=30
+EXPERIMENT_TOURNAMENT_BY_WEIGHTED_MAE = False  # Теория 1: турнир по WMAE (вес = calculate_minute)
 EXPERIMENT_TOURNAMENT_BY_QUALITY = False  # Теория 4: турнир Prophet vs ETS по Quality
 EXPERIMENT_COLLECT_COEFF_STATS = False  # Анализ коэффициентов: сохранить в data/processed/
 COEFF_OUTPUT_PATH = ROOT / "data" / "processed" / "workday_coeff_stats"
@@ -163,9 +164,10 @@ def load_and_prepare_data():
             else:
                 break
     df = df.drop(index=list(drop_idx)).drop(columns=["_grp"]).reset_index(drop=True)
-    df = df.sort_values(["operation_id", "year", "month"]).reset_index(drop=True)
+    df = df.sort_values(["resist_id", "operation_id", "year", "month"]).reset_index(drop=True)
 
-    group = df.groupby("operation_id")
+    # Важно: группировка по (resist_id, operation_id), т.к. operation_id может повторяться в разных подразделениях
+    group = df.groupby(["resist_id", "operation_id"])
     df["lag_1"] = group["fact_value"].shift(1)
     df["lag_12"] = group["fact_value"].shift(12)
     df["roll_mean_3"] = group["fact_value"].transform(lambda s: s.shift(1).rolling(3, min_periods=3).mean())
@@ -250,6 +252,7 @@ def main():
         variant="vanilla",
         yearly_seasonality=not EXPERIMENT_YEARLY_SEASONALITY_OFF,
         workday_only_if_n30=EXPERIMENT_WORKDAY_ONLY_N30,
+        tournament_by_weighted_mae=EXPERIMENT_TOURNAMENT_BY_WEIGHTED_MAE,
         tournament_by_quality=EXPERIMENT_TOURNAMENT_BY_QUALITY,
         collect_coeff_stats=EXPERIMENT_COLLECT_COEFF_STATS,
         coeff_output_path=coeff_path,
