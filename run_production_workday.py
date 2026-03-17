@@ -31,13 +31,20 @@ TEST_MONTHS = None  # пример: [1, 2, 3] для января–марта
 # resist_id для теста: None = все, иначе [31, 47, 49] и т.д.
 TEST_RESIST_IDS = None  # пример: [31, 47, 49]
 
+# Флаги экспериментов (план workday_regressor_experiments)
+EXPERIMENT_YEARLY_SEASONALITY_OFF = False  # Теория 1: yearly_seasonality=False при workday
+EXPERIMENT_WORKDAY_ONLY_N30 = False  # Теория 2: регрессор только при n>=30
+EXPERIMENT_TOURNAMENT_BY_QUALITY = False  # Теория 4: турнир Prophet vs ETS по Quality
+EXPERIMENT_COLLECT_COEFF_STATS = False  # Анализ коэффициентов: сохранить в data/processed/
+COEFF_OUTPUT_PATH = ROOT / "data" / "processed" / "workday_coeff_stats"
+
 PREDICT_COMMENT = "first_predict_value_record"
 EXCLUDED_RESIST_IDS = [
     25, 26, 27, 29, 54, 57, 61, 63, 66, 68, 80, 81, 82, 83, 100, 101, 102, 103,
     104, 105, 106, 109, 112, 113, 115, 116, 119, 120, 121, 122, 123, 125, 126,
     129, 131, 132, 134, 135, 136, 137, 138, 140, 141, 143, 144, 146, 147, 148,
     149, 150, 151, 152, 153, 154, 156, 157, 158, 162, 165, 169, 170, 171, 172,
-    173, 174, 175, 176, 177, 178, 179, 181, 196, 51, 65, 139,
+    173, 174, 175, 176, 177, 178, 179, 181, 196, 139,
 ]
 
 
@@ -187,7 +194,8 @@ def calc_mape(y_true, y_pred):
     return float(np.mean(err))
 
 
-def calc_quality(y_true, y_pred):
+def calc_accuracy_pct(y_true, y_pred):
+    """Точность по каждому наблюдению (0–100)."""
     y_true, y_pred = np.array(y_true, dtype=float), np.array(y_pred, dtype=float)
     acc = np.empty_like(y_true)
     mask_zero = y_true == 0
@@ -195,11 +203,27 @@ def calc_quality(y_true, y_pred):
     mask_ok = ~mask_zero
     if np.any(mask_ok):
         acc[mask_ok] = np.clip(100.0 - np.abs(y_true[mask_ok] - y_pred[mask_ok]) / np.abs(y_true[mask_ok]) * 100.0, 0, 100)
+    return acc
+
+
+def calc_mean_accuracy(y_true, y_pred):
+    return float(np.mean(calc_accuracy_pct(y_true, y_pred)))
+
+
+def calc_stability(y_true, y_pred):
+    acc = calc_accuracy_pct(y_true, y_pred)
     mean_acc = float(np.mean(acc))
     if mean_acc == 0:
         return 0.0
     cv = np.std(acc, ddof=0) / mean_acc
-    stab = max(0.0, (1 - cv)) * 100
+    return max(0.0, (1 - cv)) * 100
+
+
+def calc_quality(y_true, y_pred):
+    mean_acc = calc_mean_accuracy(y_true, y_pred)
+    if mean_acc == 0:
+        return 0.0
+    stab = calc_stability(y_true, y_pred)
     return 2 * mean_acc * stab / (mean_acc + stab)
 
 
@@ -214,12 +238,18 @@ def main():
 
     from production_forecast_workday import run_production_workday_experiment
 
+    coeff_path = COEFF_OUTPUT_PATH if EXPERIMENT_COLLECT_COEFF_STATS else None
     test_df, pred = run_production_workday_experiment(
         df,
         last_year,
         test_months=TEST_MONTHS,
         test_resist_ids=TEST_RESIST_IDS,
         variant="vanilla",
+        yearly_seasonality=not EXPERIMENT_YEARLY_SEASONALITY_OFF,
+        workday_only_if_n30=EXPERIMENT_WORKDAY_ONLY_N30,
+        tournament_by_quality=EXPERIMENT_TOURNAMENT_BY_QUALITY,
+        collect_coeff_stats=EXPERIMENT_COLLECT_COEFF_STATS,
+        coeff_output_path=coeff_path,
     )
 
     if test_df.empty or len(pred) == 0:
@@ -230,35 +260,53 @@ def main():
 
     mae = calc_mae(y_true, pred)
     mape = calc_mape(y_true, pred)
+    acc = calc_mean_accuracy(y_true, pred)
+    stab = calc_stability(y_true, pred)
     qi = calc_quality(y_true, pred)
 
     print(f"\nМетрики (workDayMonth_2 regressor, n={len(pred)}):")
-    print(f"  MAE:     {mae:.2f}")
-    print(f"  MAPE:    {mape:.2f}%")
-    print(f"  Качество: {qi:.2f}")
+    print(f"  MAE:        {mae:.2f}")
+    print(f"  MAPE:      {mape:.2f}%")
+    print(f"  Точность:  {acc:.2f}%")
+    print(f"  Стабильность: {stab:.2f}%")
+    print(f"  Качество:  {qi:.2f}")
 
     comp = test_df.copy()
     comp["pred_new"] = pred
     comp["fact_predict"] = comp["fact_predict"].fillna(0)
 
-    def quality_by_resist(g):
-        return calc_quality(g["fact_value"].values, g["pred_new"].values)
+    def _acc(g, col):
+        return calc_mean_accuracy(g["fact_value"].values, g[col].values)
 
-    def quality_fp_by_resist(g):
-        return calc_quality(g["fact_value"].values, g["fact_predict"].values)
+    def _stab(g, col):
+        return calc_stability(g["fact_value"].values, g[col].values)
 
-    q_new = comp.groupby("resist_id").apply(quality_by_resist)
-    q_fp = comp.groupby("resist_id").apply(quality_fp_by_resist)
+    def _qi(g, col):
+        return calc_quality(g["fact_value"].values, g[col].values)
+
+    q_new = comp.groupby("resist_id").apply(lambda g: _qi(g, "pred_new"))
+    q_fp = comp.groupby("resist_id").apply(lambda g: _qi(g, "fact_predict"))
+    acc_new = comp.groupby("resist_id").apply(lambda g: _acc(g, "pred_new"))
+    acc_fp = comp.groupby("resist_id").apply(lambda g: _acc(g, "fact_predict"))
+    stab_new = comp.groupby("resist_id").apply(lambda g: _stab(g, "pred_new"))
+    stab_fp = comp.groupby("resist_id").apply(lambda g: _stab(g, "fact_predict"))
 
     diff = pd.DataFrame({
         "resist_id": q_fp.index,
+        "Точность FP": acc_fp.values,
+        "Точность новый": acc_new.values,
+        "Стабильность FP": stab_fp.values,
+        "Стабильность новый": stab_new.values,
         "Качество fact_predict": q_fp.values,
         "Качество новый прогноз": q_new.values,
     })
     diff["Δ Качество"] = diff["Качество новый прогноз"] - diff["Качество fact_predict"]
     diff = diff.sort_values("resist_id").reset_index(drop=True)
-    print("\nСравнение по resist_id:")
+    print("\nСравнение по resist_id (Точность, Стабильность, Качество):")
     print(diff.to_string(index=False))
+
+    if EXPERIMENT_COLLECT_COEFF_STATS:
+        print(f"\nСтатистика коэффициентов workday сохранена в {COEFF_OUTPUT_PATH}.json / .csv")
 
 
 if __name__ == "__main__":
