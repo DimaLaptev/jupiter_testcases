@@ -1,10 +1,13 @@
 """
 Обёртка для hierarchical_forecast: загрузка данных из CSV (как build_dataframe_for_dashboard),
-подготовка в формате hierarchical_forecast и запуск иерархического прогноза.
+итеративный прогноз на 2025 год по месяцам (backtest) и сравнение с fact_predict.
+
+Прогноз на каждый месяц 2025 делается с данными до конца предыдущего месяца.
+В итоговый Excel добавляются fact_predict и метрики (Точность, Стабильность, Качество).
 
 Использование:
     python run_hierarchical_forecast.py
-    python run_hierarchical_forecast.py --output data/processed/hierarchical_forecast.xlsx
+    python run_hierarchical_forecast.py --output data/processed/hierarchical_forecast_2025.xlsx
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from build_dataframe_for_dashboard import (
@@ -21,15 +25,17 @@ from build_dataframe_for_dashboard import (
     get_calc_value,
     load_raw_data,
     parse_calculate_param,
+    parse_division_title,
     to_bool_value,
 )
 from hierarchical_forecast import _work_hours_for_month, generate_hierarchical_forecast
 
+TARGET_YEAR = 2025
+
 
 def extract_operations_for_hierarchical(df_ok: pd.DataFrame) -> pd.DataFrame:
     """
-    Извлекает операции с полями, необходимыми для hierarchical_forecast:
-    period, resist_id, operation_name, fact_value, norm_value, staff_count, work_hours_in_month.
+    Извлекает операции с полями для hierarchical_forecast и fact_predict (для сравнения).
     """
     records: list[dict] = []
     for _, row in df_ok.iterrows():
@@ -48,6 +54,7 @@ def extract_operations_for_hierarchical(df_ok: pd.DataFrame) -> pd.DataFrame:
 
         work_days = get_calc_value(calc_obj, "workDayMonth_2")
         staff_raw = get_calc_value(calc_obj, "employFact_7")
+        div_title = parse_division_title(row.get("division_name"))
 
         for op_id, payload in op_data.items():
             if not isinstance(payload, dict):
@@ -60,11 +67,12 @@ def extract_operations_for_hierarchical(df_ok: pd.DataFrame) -> pd.DataFrame:
 
             calculate_minute = payload.get("calculate_minute")
             fact_val = payload.get("fact_value")
+            fact_predict_val = payload.get("fact_predict")
 
             if pd.isna(calculate_minute) or float(calculate_minute or 0) <= 0:
                 continue
 
-            norm_val = float(calculate_minute) / 60.0  # минуты → часы
+            norm_val = float(calculate_minute) / 60.0
 
             if work_days is not None and pd.notna(work_days):
                 try:
@@ -87,8 +95,10 @@ def extract_operations_for_hierarchical(df_ok: pd.DataFrame) -> pd.DataFrame:
             records.append({
                 "period": period,
                 "resist_id": row.get("resist_id"),
+                "division_title": div_title or "",
                 "operation_name": str(op_id),
                 "fact_value": fact_val,
+                "fact_predict": fact_predict_val,
                 "norm_value": norm_val,
                 "staff_count": staff,
                 "work_hours_in_month": work_hours,
@@ -96,15 +106,13 @@ def extract_operations_for_hierarchical(df_ok: pd.DataFrame) -> pd.DataFrame:
 
     df = pd.DataFrame(records)
     df["fact_value"] = pd.to_numeric(df["fact_value"], errors="coerce")
+    df["fact_predict"] = pd.to_numeric(df["fact_predict"], errors="coerce").fillna(0)
     df["resist_id"] = df["resist_id"].astype("Int64")
     return df
 
 
-def load_and_prepare_for_hierarchical() -> pd.DataFrame:
-    """
-    Загрузка и подготовка данных для hierarchical_forecast.
-    Логика как в build_dataframe_for_dashboard: raw CSV → clean_and_filter → extract.
-    """
+def load_and_prepare_full() -> pd.DataFrame:
+    """Загрузка и подготовка всех данных (включая 2025)."""
     print("Загрузка CSV...")
     df_raw = load_raw_data()
     print(f"  Загружено строк: {len(df_raw)}")
@@ -113,59 +121,219 @@ def load_and_prepare_for_hierarchical() -> pd.DataFrame:
     df_ok = clean_and_filter(df_raw)
     print(f"  После фильтрации: {len(df_ok)}")
 
-    print("Извлечение операций для hierarchical_forecast...")
+    print("Извлечение операций...")
     df = extract_operations_for_hierarchical(df_ok)
     print(f"  Извлечено записей: {len(df)}")
 
     df = df.dropna(subset=["fact_value", "resist_id"])
     df = df[df["fact_value"] >= 0]
-    print(f"  После удаления NaN/отрицательных fact_value: {len(df)}")
-
     df = df.sort_values(["resist_id", "operation_name", "period"]).reset_index(drop=True)
     return df
 
 
+def run_backtest_2025(full_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Итеративный прогноз на 2025: для каждого месяца m используется история до конца (m-1).
+    Возвращает DataFrame с прогнозом на каждый месяц 2025.
+    """
+    hierarchical_cols = [
+        "period", "resist_id", "operation_name", "fact_value", "norm_value",
+        "staff_count", "work_hours_in_month",
+    ]
+    forecast_chunks: list[pd.DataFrame] = []
+
+    for month in range(1, 13):
+        cutoff = pd.Timestamp(year=TARGET_YEAR, month=month, day=1)
+        historical = full_df[full_df["period"] < cutoff][hierarchical_cols].copy()
+
+        if historical.empty:
+            print(f"  Месяц {month}: нет истории до {cutoff.strftime('%Y-%m')}, пропуск")
+            continue
+
+        forecast = generate_hierarchical_forecast(historical)
+        # Берём только первый месяц из прогноза (он и есть наш целевой месяц)
+        forecast_first = forecast[forecast["period"] == cutoff].copy()
+        if not forecast_first.empty:
+            forecast_first["month"] = month
+            forecast_first["year"] = TARGET_YEAR
+            forecast_chunks.append(forecast_first)
+
+        print(f"  Месяц {month}/12: история до {cutoff.strftime('%Y-%m')}, прогноз: {len(forecast_first)} строк")
+
+    if not forecast_chunks:
+        return pd.DataFrame()
+    return pd.concat(forecast_chunks, ignore_index=True)
+
+
+def calc_accuracy_pct(fact: np.ndarray, pred: np.ndarray) -> np.ndarray:
+    """Точность прогноза по строкам (как в build_metrics_dashboard_simple)."""
+    fact = np.asarray(fact, dtype=float)
+    pred = np.asarray(pred, dtype=float)
+    acc = np.empty_like(fact)
+    mask_zero = fact == 0
+    acc[mask_zero] = np.where(pred[mask_zero] == 0, 100.0, 0.0)
+    mask_ok = ~mask_zero
+    if np.any(mask_ok):
+        acc[mask_ok] = np.clip(
+            100.0 - np.abs(fact[mask_ok] - pred[mask_ok]) / np.abs(fact[mask_ok]) * 100.0,
+            0, 100,
+        )
+    return np.round(acc, 2)
+
+
+def calc_mean_accuracy(acc: np.ndarray) -> float:
+    return round(float(np.mean(acc)), 2)
+
+
+def calc_stability(acc: np.ndarray) -> float:
+    mean_acc = np.mean(acc)
+    if mean_acc == 0 or not np.isfinite(mean_acc):
+        return 0.0
+    cv = np.std(acc, ddof=0) / mean_acc
+    return round(max(0.0, (1 - cv)) * 100, 2)
+
+
+def calc_quality(accuracy: float, stability: float) -> float:
+    if accuracy + stability == 0:
+        return 0.0
+    return round(2 * accuracy * stability / (accuracy + stability), 2)
+
+
+def build_output_with_metrics(
+    forecast_hier: pd.DataFrame,
+    actuals_2025: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Объединяет прогноз hierarchical с фактическими данными 2025,
+    добавляет fact_predict и метрики.
+    """
+    forecast_hier = forecast_hier.copy()
+    forecast_hier["period_dt"] = pd.to_datetime(forecast_hier["period"])
+    forecast_hier["month"] = forecast_hier["period_dt"].dt.month
+    forecast_hier["year"] = forecast_hier["period_dt"].dt.year
+
+    actuals = actuals_2025[["resist_id", "operation_name", "period", "fact_value", "fact_predict", "division_title"]].copy()
+    actuals["period_dt"] = pd.to_datetime(actuals["period"])
+    actuals["month"] = actuals["period_dt"].dt.month
+    actuals["year"] = actuals["period_dt"].dt.year
+
+    merged = forecast_hier.merge(
+        actuals,
+        on=["resist_id", "operation_name", "month", "year"],
+        how="inner",
+        suffixes=("", "_act"),
+    )
+
+    if merged.empty:
+        return merged
+
+    merged["fact_value"] = merged["fact_value_act"] if "fact_value_act" in merged.columns else merged["fact_value"]
+    merged["fact_predict"] = merged["fact_predict"].fillna(0)
+    merged["fact_predict_hierarchical"] = merged["fact_predict_hierarchical"].clip(lower=0)
+
+    merged["abs_error_hierarchical"] = (merged["fact_value"] - merged["fact_predict_hierarchical"]).abs()
+    merged["abs_error_fact_predict"] = (merged["fact_value"] - merged["fact_predict"]).abs()
+
+    acc_hier = calc_accuracy_pct(merged["fact_value"].values, merged["fact_predict_hierarchical"].values)
+    acc_fp = calc_accuracy_pct(merged["fact_value"].values, merged["fact_predict"].values)
+    merged["accuracy_pct_hierarchical"] = acc_hier
+    merged["accuracy_pct_fact_predict"] = acc_fp
+
+    merged["date"] = merged["period_dt"].dt.date
+
+    return merged
+
+
+def write_excel_with_metrics(
+    df: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    """Записывает Excel с данными и листом метрик."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cols_data = [
+        "resist_id", "division_title", "operation_id", "date", "month", "year",
+        "fact_value", "fact_predict_hierarchical", "fact_predict",
+        "abs_error_hierarchical", "accuracy_pct_hierarchical",
+        "abs_error_fact_predict", "accuracy_pct_fact_predict",
+    ]
+    df_out = df.copy()
+    df_out["operation_id"] = df_out["operation_name"]
+    cols_to_write = [c for c in cols_data if c in df_out.columns]
+
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        df_out[cols_to_write].to_excel(writer, sheet_name="Данные", index=False)
+
+        acc_hier = calc_mean_accuracy(df["accuracy_pct_hierarchical"].values)
+        stab_hier = calc_stability(df["accuracy_pct_hierarchical"].values)
+        qual_hier = calc_quality(acc_hier, stab_hier)
+
+        acc_fp = calc_mean_accuracy(df["accuracy_pct_fact_predict"].values)
+        stab_fp = calc_stability(df["accuracy_pct_fact_predict"].values)
+        qual_fp = calc_quality(acc_fp, stab_fp)
+
+        metrics = pd.DataFrame([
+            {"Прогноз": "Hierarchical", "Точность, %": acc_hier, "Стабильность, %": stab_hier, "Качество, %": qual_hier},
+            {"Прогноз": "fact_predict", "Точность, %": acc_fp, "Стабильность, %": stab_fp, "Качество, %": qual_fp},
+        ])
+        metrics.to_excel(writer, sheet_name="Метрики", index=False)
+
+    print(f"\nМетрики:")
+    print(f"  Hierarchical:  Точность={acc_hier}%, Стабильность={stab_hier}%, Качество={qual_hier}%")
+    print(f"  fact_predict:  Точность={acc_fp}%, Стабильность={stab_fp}%, Качество={qual_fp}%")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Иерархический прогноз: загрузка данных и вызов generate_hierarchical_forecast"
+        description="Иерархический прогноз на 2025 (backtest по месяцам) с сравнением fact_predict"
     )
     parser.add_argument(
         "--output", "-o",
-        default="data/processed/hierarchical_forecast.xlsx",
-        help="Путь к выходному файлу (xlsx или csv)",
-    )
-    parser.add_argument(
-        "--format", "-f",
-        choices=["xlsx", "csv"],
-        default="xlsx",
-        help="Формат вывода: xlsx или csv",
+        default="data/processed/hierarchical_forecast_2025.xlsx",
+        help="Путь к выходному xlsx",
     )
     args = parser.parse_args()
 
-    historical_df = load_and_prepare_for_hierarchical()
-
-    if historical_df.empty:
-        print("Нет данных для прогноза. Проверьте CSV и фильтрацию.", file=sys.stderr)
+    full_df = load_and_prepare_full()
+    if full_df.empty:
+        print("Нет данных. Проверьте CSV и фильтрацию.", file=sys.stderr)
         sys.exit(1)
 
-    print("\nЗапуск иерархического прогноза...")
-    forecast_df = generate_hierarchical_forecast(historical_df)
-    print(f"  Прогноз: {len(forecast_df)} строк")
+    print(f"\nИтеративный прогноз на {TARGET_YEAR} (12 месяцев)...")
+    forecast_2025 = run_backtest_2025(full_df)
+    if forecast_2025.empty:
+        print("Не получен прогноз.", file=sys.stderr)
+        sys.exit(1)
 
-    output_path = Path(args.output)
-    if args.format == "csv" or str(output_path).lower().endswith(".csv"):
-        output_path = output_path.with_suffix(".csv")
-        forecast_df.to_csv(output_path, index=False, encoding="utf-8-sig")
-    else:
-        output_path = output_path.with_suffix(".xlsx")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        forecast_df.to_excel(output_path, index=False)
+    full_2025 = full_df[pd.to_datetime(full_df["period"]).dt.year == TARGET_YEAR]
+    if full_2025.empty:
+        print("Нет фактических данных за 2025 для сравнения.", file=sys.stderr)
+        sys.exit(1)
+
+    # Агрегация по (resist_id, operation_name, month, year): fact_value — сумма, fact_predict — последнее
+    full_2025["month"] = pd.to_datetime(full_2025["period"]).dt.month
+    full_2025["year"] = pd.to_datetime(full_2025["period"]).dt.year
+    actuals_2025 = (
+        full_2025.sort_values("period")
+        .groupby(["resist_id", "operation_name", "month", "year"], as_index=False)
+        .agg(
+            fact_value=("fact_value", "sum"),
+            fact_predict=("fact_predict", "last"),
+            division_title=("division_title", "first"),
+            period=("period", "first"),
+        )
+    )
+
+    result = build_output_with_metrics(forecast_2025, actuals_2025)
+    if result.empty:
+        print("Нет пересечения прогноза и факта (проверьте resist_id/operation_name).", file=sys.stderr)
+        sys.exit(1)
+
+    output_path = Path(args.output).with_suffix(".xlsx")
+    write_excel_with_metrics(result, output_path)
 
     print(f"\nРезультат сохранён: {output_path}")
-    print(f"\nКолонки: {list(forecast_df.columns)}")
-    if len(forecast_df) > 0:
-        print(f"\nПервые строки:")
-        print(forecast_df.head(10).to_string())
+    print(f"Строк: {len(result)}")
 
 
 if __name__ == "__main__":
