@@ -739,9 +739,19 @@ for rid, grp in df_test.groupby("resist_id"):
 df_metrics_op = pd.DataFrame(rows_op)
 df_metrics_rid = pd.DataFrame(rows_rid)
 
+# Детали тестовой выборки: даты и значения
+df_detail = df_test[["resist_id", "operation_id", "division_title", "year", "month", "fact_value", "fact_predict", "predict_linear"]].copy()
+df_detail = df_detail.sort_values(["resist_id", "operation_id", "year", "month"]).reset_index(drop=True)
+df_detail = df_detail.rename(columns={
+    "fact_value": "fact_value (факт)",
+    "fact_predict": "fact_predict (кол-во)",
+    "predict_linear": "прогноз (кол-во)",
+})
+
 out_path = Path("../data/processed/regression_forecast_metrics.xlsx")
 out_path.parent.mkdir(parents=True, exist_ok=True)
 with pd.ExcelWriter(out_path, engine="openpyxl") as w:
+    df_detail.to_excel(w, sheet_name="Данные теста", index=False)
     df_metrics_op.to_excel(w, sheet_name="По операциям", index=False)
     df_metrics_rid.to_excel(w, sheet_name="По resist_id", index=False)
 
