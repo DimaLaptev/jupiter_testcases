@@ -278,6 +278,33 @@ def write_excel_with_metrics(
         ])
         metrics.to_excel(writer, sheet_name="Метрики", index=False)
 
+        # Метрики по resist_id — под основной таблицей
+        rows_by_rid = []
+        for rid, grp in df.groupby("resist_id", sort=True):
+            div_title = grp["division_title"].iloc[0] if "division_title" in grp.columns else ""
+            acc_h = calc_mean_accuracy(grp["accuracy_pct_hierarchical"].values)
+            stab_h = calc_stability(grp["accuracy_pct_hierarchical"].values)
+            qual_h = calc_quality(acc_h, stab_h)
+            acc_f = calc_mean_accuracy(grp["accuracy_pct_fact_predict"].values)
+            stab_f = calc_stability(grp["accuracy_pct_fact_predict"].values)
+            qual_f = calc_quality(acc_f, stab_f)
+            rows_by_rid.append({
+                "resist_id": rid,
+                "division_title": div_title,
+                "Точность (Hierarchical), %": acc_h,
+                "Стабильность (Hierarchical), %": stab_h,
+                "Качество (Hierarchical), %": qual_h,
+                "Точность (fact_predict), %": acc_f,
+                "Стабильность (fact_predict), %": stab_f,
+                "Качество (fact_predict), %": qual_f,
+            })
+        metrics_by_rid = pd.DataFrame(rows_by_rid)
+        startrow = len(metrics) + 3  # отступ после основной таблицы
+        metrics_by_rid.to_excel(
+            writer, sheet_name="Метрики", index=False,
+            startrow=startrow,
+        )
+
     print(f"\nМетрики:")
     print(f"  Hierarchical:  Точность={acc_hier}%, Стабильность={stab_hier}%, Качество={qual_hier}%")
     print(f"  fact_predict:  Точность={acc_fp}%, Стабильность={stab_fp}%, Качество={qual_fp}%")
