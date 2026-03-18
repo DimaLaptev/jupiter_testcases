@@ -142,7 +142,11 @@ def _work_hours_for_month(period: pd.Timestamp, hours_per_day: float = 8.0) -> f
     return float(n_days) * hours_per_day
 
 
-def generate_hierarchical_forecast(historical_df: pd.DataFrame) -> pd.DataFrame:
+def generate_hierarchical_forecast(
+    historical_df: pd.DataFrame,
+    *,
+    diagnose_outliers: bool = False,
+) -> pd.DataFrame:
     """
     Генерирует прогноз количества операций с использованием иерархического подхода.
 
@@ -196,6 +200,15 @@ def generate_hierarchical_forecast(historical_df: pd.DataFrame) -> pd.DataFrame:
         np.nan,
     )
     load_df = load_df[["resist_id", "period", "load_percent"]].dropna(subset=["load_percent"])
+
+    # Диагностика выбросов (staff_count=1 искажает load_percent)
+    if diagnose_outliers and not load_df.empty:
+        print("\n--- Анализ выбросов в исторической нагрузке (load_percent) ---")
+        print(load_df["load_percent"].describe(percentiles=[0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]))
+        problem = load_df[load_df["load_percent"] > 200]
+        if not problem.empty:
+            problem_resists = problem["resist_id"].unique()
+            print(f"Подразделения с нагрузкой > 200%: {len(problem_resists)} шт. — {problem_resists[:10].tolist()}{'...' if len(problem_resists) > 10 else ''}")
 
     # Прогноз нагрузки на 4 месяца для каждого resist_id
     load_forecasts: dict[tuple, np.ndarray] = {}

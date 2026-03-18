@@ -38,6 +38,8 @@ def extract_operations_for_hierarchical(df_ok: pd.DataFrame) -> pd.DataFrame:
     Извлекает операции с полями для hierarchical_forecast и fact_predict (для сравнения).
     """
     records: list[dict] = []
+    staff_fallback_count = 0
+    staff_ok_count = 0
     for _, row in df_ok.iterrows():
         calc_obj = parse_calculate_param(row.get("calculate_parameter"))
         op_raw = row.get("operation_parameter")
@@ -87,10 +89,13 @@ def extract_operations_for_hierarchical(df_ok: pd.DataFrame) -> pd.DataFrame:
                 try:
                     staff = float(staff_raw)
                     staff = max(0.01, staff)
+                    staff_ok_count += 1
                 except (TypeError, ValueError):
                     staff = 1.0
+                    staff_fallback_count += 1
             else:
                 staff = 1.0
+                staff_fallback_count += 1
 
             records.append({
                 "period": period,
@@ -108,6 +113,12 @@ def extract_operations_for_hierarchical(df_ok: pd.DataFrame) -> pd.DataFrame:
     df["fact_value"] = pd.to_numeric(df["fact_value"], errors="coerce")
     df["fact_predict"] = pd.to_numeric(df["fact_predict"], errors="coerce").fillna(0)
     df["resist_id"] = df["resist_id"].astype("Int64")
+
+    total_staff = staff_ok_count + staff_fallback_count
+    if total_staff > 0:
+        pct_fallback = round(100 * staff_fallback_count / total_staff, 2)
+        print(f"  staff_count: employFact_7={staff_ok_count}, fallback=1.0 — {staff_fallback_count} ({pct_fallback}%)")
+
     return df
 
 
@@ -150,7 +161,8 @@ def run_backtest_2025(full_df: pd.DataFrame) -> pd.DataFrame:
             print(f"  Месяц {month}: нет истории до {cutoff.strftime('%Y-%m')}, пропуск")
             continue
 
-        forecast = generate_hierarchical_forecast(historical)
+        diagnose = month == 1  # диагностика выбросов только для первого месяца
+        forecast = generate_hierarchical_forecast(historical, diagnose_outliers=diagnose)
         # Берём только первый месяц из прогноза (он и есть наш целевой месяц)
         forecast_first = forecast[forecast["period"] == cutoff].copy()
         if not forecast_first.empty:
