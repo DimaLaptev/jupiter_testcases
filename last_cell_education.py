@@ -667,3 +667,82 @@ plt.title("Факт vs предсказание LinearRegression")
 plt.legend()
 plt.tight_layout()
 plt.show()
+
+
+
+
+
+
+
+def calc_metrics_for_forecast(df_sub: pd.DataFrame, forecast_col: str) -> tuple[float, float, float]:
+    """Точность, Стабильность, Качество по df с fact_value и forecast_col."""
+    if df_sub.empty:
+        return 0.0, 0.0, 0.0
+    y_true = df_sub["fact_value"].astype(float).values
+    y_pred = df_sub[forecast_col].astype(float).fillna(0).values
+    y_pred = np.maximum(y_pred, 0)
+    acc = np.empty_like(y_true, dtype=float)
+    mask_zero = y_true == 0
+    acc[mask_zero] = np.where(y_pred[mask_zero] == 0, 100.0, 0.0)
+    mask_ok = ~mask_zero
+    if np.any(mask_ok):
+        acc[mask_ok] = np.clip(
+            100.0 - np.abs(y_true[mask_ok] - y_pred[mask_ok]) / np.abs(y_true[mask_ok]) * 100.0,
+            0, 100,
+        )
+    tochnost = float(np.mean(acc))
+    stab = 0.0
+    if tochnost > 0:
+        cv = np.std(acc, ddof=0) / tochnost
+        stab = max(0.0, (1 - cv)) * 100
+    kachestvo = 0.0
+    if tochnost + stab > 0:
+        kachestvo = 2 * tochnost * stab / (tochnost + stab)
+    return round(tochnost, 2), round(stab, 2), round(kachestvo, 2)
+
+
+# Таблица по операциям
+rows_op = []
+for (rid, op_id), grp in df_test.groupby(["resist_id", "operation_id"]):
+    t1, s1, q1 = calc_metrics_for_forecast(grp, "fact_predict")
+    t2, s2, q2 = calc_metrics_for_forecast(grp, "predict_linear")
+    div = grp["division_title"].iloc[0] if "division_title" in grp.columns else ""
+    rows_op.append({
+        "resist_id": rid,
+        "operation_id": op_id,
+        "division_title": div,
+        "Точность (fact_predict)": t1,
+        "Стабильность (fact_predict)": s1,
+        "Качество (fact_predict)": q1,
+        "Точность (прогноз)": t2,
+        "Стабильность (прогноз)": s2,
+        "Качество (прогноз)": q2,
+    })
+
+# Таблица по resist_id в целом
+rows_rid = []
+for rid, grp in df_test.groupby("resist_id"):
+    t1, s1, q1 = calc_metrics_for_forecast(grp, "fact_predict")
+    t2, s2, q2 = calc_metrics_for_forecast(grp, "predict_linear")
+    div = grp["division_title"].iloc[0] if "division_title" in grp.columns else ""
+    rows_rid.append({
+        "resist_id": rid,
+        "division_title": div,
+        "Точность (fact_predict)": t1,
+        "Стабильность (fact_predict)": s1,
+        "Качество (fact_predict)": q1,
+        "Точность (прогноз)": t2,
+        "Стабильность (прогноз)": s2,
+        "Качество (прогноз)": q2,
+    })
+
+df_metrics_op = pd.DataFrame(rows_op)
+df_metrics_rid = pd.DataFrame(rows_rid)
+
+out_path = Path("../data/processed/regression_forecast_metrics.xlsx")
+out_path.parent.mkdir(parents=True, exist_ok=True)
+with pd.ExcelWriter(out_path, engine="openpyxl") as w:
+    df_metrics_op.to_excel(w, sheet_name="По операциям", index=False)
+    df_metrics_rid.to_excel(w, sheet_name="По resist_id", index=False)
+
+print(f"Excel сохранён: {out_path.resolve()}")
