@@ -40,6 +40,7 @@ _DEFAULT_RAW_FILES = [
 
 SHEET_SUFFIX = " Итог"
 QUALITY_COL = "Качество, %"
+FP_QUALITY_COL = "Кач. fact_predict, %"
 QUALITY_THRESHOLD = 80.0
 
 TEST_YEAR = 2025
@@ -204,12 +205,39 @@ def parse_weak_resist_ids_from_excel(
         df[QUALITY_COL] = pd.to_numeric(df[QUALITY_COL], errors="coerce")
         df = df.sort_values(QUALITY_COL, ascending=False, na_position="last")
         if df.empty:
-            rows.append({"resist_id": rid, "sheet": name, QUALITY_COL: np.nan, "weak": False})
+            rows.append({
+                "resist_id": rid, "sheet": name,
+                QUALITY_COL: np.nan, FP_QUALITY_COL: np.nan,
+                "Лучшее качество итого, %": np.nan, "Источник лучшего": np.nan,
+                "weak": False,
+            })
             continue
 
-        best_q = float(df.iloc[0][QUALITY_COL])
-        is_weak = not np.isnan(best_q) and best_q < quality_threshold
-        rows.append({"resist_id": rid, "sheet": name, QUALITY_COL: best_q, "weak": is_weak})
+        best_q_new = float(df.iloc[0][QUALITY_COL])
+
+        # fact_predict одинаков для всех строк листа
+        fp_col_series = pd.to_numeric(
+            df[FP_QUALITY_COL] if FP_QUALITY_COL in df.columns else pd.Series(dtype=float),
+            errors="coerce",
+        )
+        fp_valid = fp_col_series.dropna()
+        q_fp = float(fp_valid.iloc[0]) if not fp_valid.empty else np.nan
+
+        candidates = [x for x in [best_q_new, q_fp] if not np.isnan(x)]
+        effective_best = max(candidates) if candidates else np.nan
+
+        winner = "fact_predict" if (not np.isnan(q_fp) and q_fp > best_q_new) else "новый"
+        is_weak = not np.isnan(effective_best) and effective_best < quality_threshold
+
+        rows.append({
+            "resist_id": rid,
+            "sheet": name,
+            QUALITY_COL: best_q_new,
+            FP_QUALITY_COL: q_fp,
+            "Лучшее качество итого, %": effective_best,
+            "Источник лучшего": winner,
+            "weak": is_weak,
+        })
         if is_weak:
             weak.append(rid)
 
