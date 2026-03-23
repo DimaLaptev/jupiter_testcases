@@ -3,9 +3,11 @@
 
 Читает листы «{rid} Итог» и «{rid} Данные теста», собирает объединённый
 DataFrame и генерирует Excel-дашборд с тремя листами:
-  1. Данные          — помесячные строки с fact_predict и лучшим новым прогнозом
-  2. Оценка прогноза — KPI, топ-10 лучших/худших, полная таблица по resist_id
-  3. Тепловая карта  — качество (fact_predict) и качество (лучшая модель) по месяцам
+  1. Данные — помесячные строки; «выбранный лучший» прогноз — новая модель,
+     либо текущий (fact_predict), если на листе Итог «Кач. fact_predict, %»
+     выше, чем «Качество, %» у лучшей строки.
+  2. Оценка прогноза — два ряда KPI (Текущий и Новый), топ-10, таблица по resist_id
+  3. Тепловая карта — качество по fact_predict и по выбранному лучшему прогнозу
 
 Использование:
     python scripts/build_model_comparison_dashboard.py
@@ -79,11 +81,36 @@ def _find_new_col(columns: list[str]) -> str | None:
     return None
 
 
+def _pick_best_from_itog(df_it: pd.DataFrame) -> tuple[str, bool]:
+    """
+    Сравнивает «Качество, %» лучшей строки (после сортировки) с «Кач. fact_predict, %».
+    Если у fact_predict (baseline) качество выше — выбираем текущий прогноз.
+
+    Возвращает (название для колонки «Название модели прогноза», use_fact_predict).
+    """
+    if df_it.empty or "Комбинация" not in df_it.columns:
+        return "", False
+
+    d = df_it.copy()
+    if "Качество, %" in d.columns:
+        d["Качество, %"] = pd.to_numeric(d["Качество, %"], errors="coerce")
+        d = d.sort_values("Качество, %", ascending=False, na_position="last").reset_index(drop=True)
+
+    row0 = d.iloc[0]
+    q_new = pd.to_numeric(row0.get("Качество, %"), errors="coerce")
+    q_fp = pd.to_numeric(row0.get("Кач. fact_predict, %"), errors="coerce")
+
+    if pd.notna(q_fp) and pd.notna(q_new) and float(q_fp) > float(q_new):
+        return "Текущий", True
+    return str(row0["Комбинация"]), False
+
+
 def load_source(xlsx_path: Path) -> tuple[pd.DataFrame, dict[int | str, str]]:
     """
     Возвращает:
-      df        — объединённый DataFrame (fact_value, fact_predict, predict_new, …)
-      best_map  — {resist_id: название лучшей модели (Комбинация)}
+      df        — объединённый DataFrame (fact_value, fact_predict, predict_new,
+                  predict_chosen, accuracy_pct_chosen, …)
+      best_map  — {resist_id: название выбранного прогноза («Текущий» или Комбинация)}
     """
     xl = pd.ExcelFile(xlsx_path, engine="openpyxl")
     itog_sheets = sorted(n for n in xl.sheet_names if n.endswith(ITOG_SUFFIX))
@@ -97,15 +124,18 @@ def load_source(xlsx_path: Path) -> tuple[pd.DataFrame, dict[int | str, str]]:
         )
 
     best_map: dict[int | str, str] = {}
+    use_fp_map: dict[int | str, bool] = {}
     for name in itog_sheets:
         df_it = pd.read_excel(xlsx_path, sheet_name=name, engine="openpyxl")
-        if "Комбинация" in df_it.columns and len(df_it) > 0:
-            rid_raw = name.removesuffix(ITOG_SUFFIX).strip()
-            try:
-                rid = int(rid_raw)
-            except ValueError:
-                rid = rid_raw
-            best_map[rid] = str(df_it.iloc[0]["Комбинация"])
+        rid_raw = name.removesuffix(ITOG_SUFFIX).strip()
+        try:
+            rid = int(rid_raw)
+        except ValueError:
+            rid = rid_raw
+        name_best, use_fp = _pick_best_from_itog(df_it)
+        if name_best:
+            best_map[rid] = name_best
+        use_fp_map[rid] = use_fp
 
     frames: list[pd.DataFrame] = []
     for name in data_sheets:
@@ -140,6 +170,15 @@ def load_source(xlsx_path: Path) -> tuple[pd.DataFrame, dict[int | str, str]]:
 
     df["abs_error_new"] = (df["fact_value"] - df["predict_new"]).abs()
     df["accuracy_pct_new"] = _accuracy_col(df["fact_value"], df["predict_new"])
+
+    # Выбранный «лучший» прогноз: новая модель или текущий, если по Итогу baseline лучше
+    df["predict_chosen"] = np.where(
+        df["resist_id"].map(use_fp_map).fillna(False),
+        df["fact_predict"],
+        df["predict_new"],
+    )
+    df["abs_error_chosen"] = (df["fact_value"] - df["predict_chosen"]).abs()
+    df["accuracy_pct_chosen"] = _accuracy_col(df["fact_value"], df["predict_chosen"])
 
     if "resist_id" in df.columns:
         df["resist_id"] = pd.to_numeric(df["resist_id"], errors="coerce")
@@ -180,8 +219,9 @@ def _division_stats_dual(df: pd.DataFrame) -> pd.DataFrame:
         stab = calc_stability(grp)
         qi = calc_quality_index(m_acc, stab)
 
+        # «Новый» блок — метрики по выбранному прогнозу (модель или Текущий по сравнению на Итог)
         grp_new = grp.copy()
-        grp_new["accuracy_pct"] = grp_new["accuracy_pct_new"]
+        grp_new["accuracy_pct"] = grp_new["accuracy_pct_chosen"]
         m_acc_new = calc_mean_accuracy(grp_new)
         stab_new = calc_stability(grp_new)
         qi_new = calc_quality_index(m_acc_new, stab_new)
@@ -226,6 +266,9 @@ DATA_COLS = [
     "predict_new",
     "abs_error_new",
     "accuracy_pct_new",
+    "predict_chosen",
+    "abs_error_chosen",
+    "accuracy_pct_chosen",
     "best_model_name",
 ]
 
@@ -241,6 +284,9 @@ DATA_HEADERS_RU = {
     "predict_new": "Прогноз (новый), шт.",
     "abs_error_new": "Ошибка (новый)",
     "accuracy_pct_new": "Точность прогноза, % (новый)",
+    "predict_chosen": "Прогноз (выбранный лучший), шт.",
+    "abs_error_chosen": "Ошибка (выбранный)",
+    "accuracy_pct_chosen": "Точность прогноза, % (выбранный лучший)",
     "best_model_name": "Название модели прогноза",
 }
 
@@ -268,7 +314,7 @@ def build_data_sheet(wb: Workbook, df: pd.DataFrame) -> dict:
 
     col_idx = {c: cols.index(c) + 1 for c in cols}
 
-    for key in ("accuracy_pct", "accuracy_pct_new"):
+    for key in ("accuracy_pct", "accuracy_pct_new", "accuracy_pct_chosen"):
         idx = col_idx.get(key)
         if idx:
             letter = get_column_letter(idx)
@@ -312,6 +358,16 @@ def _fill_for(val: float) -> PatternFill:
     if val >= 80:
         return NEUTRAL_FILL
     return BAD_FILL
+
+
+def _global_metrics_from_acc(df: pd.DataFrame, acc_col: str) -> tuple[float, float, float]:
+    """Точность / стабильность / качество по всему массиву, колонка построчной точности — acc_col."""
+    t = df.copy()
+    t["accuracy_pct"] = pd.to_numeric(t[acc_col], errors="coerce").fillna(0)
+    ma = calc_mean_accuracy(t)
+    st = calc_stability(t)
+    qi = calc_quality_index(ma, st)
+    return ma, st, qi
 
 
 def _write_div_table_ext(
@@ -358,9 +414,9 @@ def _write_div_table_ext(
 def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame, div_stats: pd.DataFrame) -> None:
     ws = wb.create_sheet("Оценка прогноза")
 
-    m_acc = calc_mean_accuracy(df)
-    stab = calc_stability(df)
-    qi = calc_quality_index(m_acc, stab)
+    m_acc, stab, qi = _global_metrics_from_acc(df, "accuracy_pct")
+    m_acc_n, stab_n, qi_n = _global_metrics_from_acc(df, "accuracy_pct_chosen")
+    sum_pred_chosen = int(pd.to_numeric(df["predict_chosen"], errors="coerce").fillna(0).sum())
 
     ws.merge_cells("A1:L1")
     ws.cell(row=1, column=1, value="Оценка качества прогноза (сравнение моделей)")
@@ -368,18 +424,29 @@ def build_dashboard_sheet(wb: Workbook, df: pd.DataFrame, div_stats: pd.DataFram
     ws.cell(row=1, column=1).alignment = Alignment(horizontal="center")
 
     kpi_row = 3
-    write_kpi_card(ws, kpi_row, 1, "Точность\n(fact_predict)", f"{m_acc:.1f}%", _fill_for(m_acc))
-    write_kpi_card(ws, kpi_row, 3, "Стабильность\n(fact_predict)", f"{stab:.1f}%", _fill_for(stab))
-    write_kpi_card(ws, kpi_row, 5, "Качество\n(fact_predict)", f"{qi:.1f}%", _fill_for(qi))
+    write_kpi_card(ws, kpi_row, 1, "Точность\n(Текущий)", f"{m_acc:.1f}%", _fill_for(m_acc))
+    write_kpi_card(ws, kpi_row, 3, "Стабильность\n(Текущий)", f"{stab:.1f}%", _fill_for(stab))
+    write_kpi_card(ws, kpi_row, 5, "Качество\n(Текущий)", f"{qi:.1f}%", _fill_for(qi))
     write_kpi_card(ws, kpi_row, 7, "Факт\nвсего", f"{int(df['fact_value'].sum()):,}", GOOD_FILL)
-    write_kpi_card(ws, kpi_row, 9, "Прогноз (fp)\nвсего", f"{int(df['fact_predict'].sum()):,}", GOOD_FILL)
+    write_kpi_card(ws, kpi_row, 9, "Прогноз\n(Текущий) всего", f"{int(df['fact_predict'].sum()):,}", GOOD_FILL)
     write_kpi_card(ws, kpi_row, 11, "Кол-во\nстрок", len(df), GOOD_FILL)
 
     ws.row_dimensions[kpi_row].height = 50
     ws.row_dimensions[kpi_row + 1].height = 55
 
+    kpi_row2 = 5
+    write_kpi_card(ws, kpi_row2, 1, "Точность\n(Новый)", f"{m_acc_n:.1f}%", _fill_for(m_acc_n))
+    write_kpi_card(ws, kpi_row2, 3, "Стабильность\n(Новый)", f"{stab_n:.1f}%", _fill_for(stab_n))
+    write_kpi_card(ws, kpi_row2, 5, "Качество\n(Новый)", f"{qi_n:.1f}%", _fill_for(qi_n))
+    write_kpi_card(ws, kpi_row2, 7, "Факт\nвсего", f"{int(df['fact_value'].sum()):,}", GOOD_FILL)
+    write_kpi_card(ws, kpi_row2, 9, "Прогноз\n(Новый) всего", f"{sum_pred_chosen:,}", GOOD_FILL)
+    write_kpi_card(ws, kpi_row2, 11, "Кол-во\nстрок", len(df), GOOD_FILL)
+
+    ws.row_dimensions[kpi_row2].height = 50
+    ws.row_dimensions[kpi_row2 + 1].height = 55
+
     # ---- Топ-10 ХУДШИХ по fact_predict ----
-    sec = 7
+    sec = 8
     ws.cell(row=sec, column=1,
             value="Топ-10 моделей (resist_id) с ХУДШИМ качеством (fact_predict)")
     ws.cell(row=sec, column=1).font = Font(bold=True, size=12, color="C00000")
@@ -535,8 +602,8 @@ def build_heatmap_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     )
     _write_heatmap_block(
         ws, next_row + 1,
-        "Тепловая карта: Качество (%) по лучшей модели",
-        df, "accuracy_pct_new", months_present, resist_ids,
+        "Тепловая карта: Качество (%) по выбранному лучшему прогнозу",
+        df, "accuracy_pct_chosen", months_present, resist_ids,
     )
 
     ws.column_dimensions["A"].width = 12
