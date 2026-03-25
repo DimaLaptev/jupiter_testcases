@@ -1,9 +1,11 @@
 """
 Признаки calc_* через сдвиги по времени: *_lagN для N из DEFAULT_CALC_SHIFTS
-(по умолчанию 1–6 и 12 месяцев, groupby operation_id).
+(по умолчанию 1–6 и 12 месяцев, groupby по group_cols, по умолчанию только operation_id).
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 import pandas as pd
 
@@ -52,24 +54,31 @@ def add_calc_shift_lags(
     calc_keys: list[str] | None = None,
     drop_scalar_calc: bool = True,
     shifts: tuple[int, ...] | None = None,
+    group_cols: Sequence[str] = ("operation_id",),
 ) -> tuple[pd.DataFrame, list[str], list[str]]:
     """
-    Для каждого скалярного calc_k добавляет колонки k_lagN (groupby operation_id, shift).
+    Для каждого скалярного calc_k добавляет колонки k_lagN (groupby по group_cols, shift).
+
+    По умолчанию group_cols=("operation_id",) — поведение как раньше.
+    Для нескольких рядов в одном датафрейме, например: ("resist_id", "operation_id").
 
     Возвращает (df, имена_новых_колонок, использованные_calc_keys).
     """
     if shifts is None:
         shifts = DEFAULT_CALC_SHIFTS
 
-    need = {"operation_id", "year", "month"}
+    gc = tuple(group_cols)
+    if not gc:
+        raise ValueError("group_cols не может быть пустым")
+
+    need = set(gc) | {"year", "month"}
     missing = need - set(df.columns)
     if missing:
         raise ValueError(f"df: не хватает колонок {missing}")
 
+    sort_keys = list(gc) + ["year", "month"]
     out = df.copy()
-    out = out.sort_values(["operation_id", "year", "month"], kind="mergesort").reset_index(
-        drop=True
-    )
+    out = out.sort_values(sort_keys, kind="mergesort").reset_index(drop=True)
 
     if calc_keys is None:
         calc_keys = scalar_calc_columns(out)
@@ -79,7 +88,7 @@ def add_calc_shift_lags(
     if not calc_keys:
         return out, [], []
 
-    g = out.groupby("operation_id", sort=False)
+    g = out.groupby(list(gc), sort=False)
     new_names: list[str] = []
     for k in calc_keys:
         for n in shifts:
@@ -102,6 +111,7 @@ def add_calc_shift_lag1_lag12(
     *,
     calc_keys: list[str] | None = None,
     drop_scalar_calc: bool = True,
+    group_cols: Sequence[str] = ("operation_id",),
 ) -> tuple[pd.DataFrame, list[str], list[str]]:
     """
     Обратная совместимость: то же, что add_calc_shift_lags с shifts=DEFAULT_CALC_SHIFTS
@@ -112,4 +122,5 @@ def add_calc_shift_lag1_lag12(
         calc_keys=calc_keys,
         drop_scalar_calc=drop_scalar_calc,
         shifts=DEFAULT_CALC_SHIFTS,
+        group_cols=group_cols,
     )
