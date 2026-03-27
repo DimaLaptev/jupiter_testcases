@@ -16,13 +16,15 @@ class DMsgHeader:
 
 @dataclass
 class DMsgDataRow:
+    """Поля строки данных после split(';') — см. memory/Dks_sheet_spec.md."""
+
     depo_col: str
+    internal_id: str
     ngri: str
-    ref_contract: str
     doc_type: str
     doc_num: str
     doc_date: str
-    extra: str
+    comment: str
 
 
 @dataclass
@@ -65,12 +67,12 @@ def _normalize_data_row(parts: list[str]) -> DMsgDataRow:
     padded: list[str] = (parts + [""] * 7)[:7]
     return DMsgDataRow(
         depo_col=padded[0].strip(),
-        ngri=padded[1].strip(),
-        ref_contract=padded[2].strip(),
+        internal_id=padded[1].strip(),
+        ngri=padded[2].strip(),
         doc_type=padded[3].strip(),
         doc_num=padded[4].strip(),
         doc_date=padded[5].strip(),
-        extra=padded[6].strip(),
+        comment=padded[6].strip(),
     )
 
 
@@ -101,8 +103,17 @@ def display_doc_date(raw: str) -> str:
     return raw.strip()
 
 
-def depo_num_for_lookup(header: DMsgHeader, row: DMsgDataRow) -> str:
-    h = header.get("DepoNum").strip()
-    if h:
-        return h
-    return row.depo_col.strip()
+def instruction_type_df_dp(depo_account: str) -> str:
+    """DF для счёта 10934, иначе DP (кодификатор документов зачисление/списание)."""
+    acc = depo_account.strip()
+    if not acc:
+        return "DP"
+    try:
+        n = int(float(acc))
+        if n == 10934:
+            return "DF"
+    except (ValueError, TypeError):
+        pass
+    if acc == "10934":
+        return "DF"
+    return "DP"

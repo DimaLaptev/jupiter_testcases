@@ -1,37 +1,26 @@
-"""Создание книги и запись листа Dks."""
+"""Создание книги и запись листа Dks (10 колонок — как эталон Ord_Quantity)."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
-from depo_directory import DepoDirectoryRow
-from gpb_d_msg import DMsgDataRow, DMsgFile, display_doc_date
+
+from gpb_d_msg import DMsgDataRow, DMsgFile, display_doc_date, instruction_type_df_dp
 
 
+# Лист Dks: см. memory/Dks_sheet_spec.md
 DKS_HEADERS = [
-    "Файл_отчета",
-    "Дата_отчета",
-    "ClientID",
-    "DepoNum",
-    "InstrNum",
-    "ClientName",
-    "NGRI",
-    "Референс_договора",
-    "Тип_документа",
-    "Номер_документа",
-    "Дата_документа",
-    "Доп_описание",
-    "Раздел_консолидированного_портфеля",
-    "Депозитарий_справочник",
-    "Оригинатор",
-    "Агент_по_сопровождению",
-    "Сделка_ДОМ_РФ_ИА",
-    "Комментарий_счета",
-    "Код_выписки_ГПБ_ДОМ",
-    "Код_выписки_ГПБ_БАНК",
-    "Владелец_счета_депо",
-    "Справочник_сопоставлен",
+    "Дата операции",
+    "Счет депо",
+    "НГРИ",
+    "Наименование документа",
+    "Номер документа",
+    "Дата документа",
+    "Комментарий",
+    "Для удаления дубликатов",
+    "Тип поручения",
+    "Источник",
 ]
 
 SCHEETA_DEPO_HEADERS = [
@@ -46,6 +35,46 @@ SCHEETA_DEPO_HEADERS = [
     "Код выписки ГПБ (БАНК)",
     "Владелец счета депо",
 ]
+
+
+def duplicate_key(depo_account: str, ngri: str, operation_date: str) -> str:
+    """Ключ для колонки H: счёт_НГРИ_дата (подчёркивания как на эталонном скрине)."""
+    return f"{depo_account.strip()}_{ngri.strip()}_{operation_date.strip()}"
+
+
+def row_values(
+    parsed: DMsgFile,
+    data: DMsgDataRow,
+    depo_account: str | None,
+) -> list:
+    """
+    Одна строка листа Dks.
+    depo_account — «Номер счета депо» из справочника по ClientID, иначе пусто.
+    """
+    h = parsed.header
+    op_date = (h.get("ReportDate") or "").strip()
+    acc = (depo_account or "").strip()
+    ngri = data.ngri.strip()
+    doc_name = data.doc_type.strip()
+    doc_num = data.doc_num.strip()
+    doc_date = display_doc_date(data.doc_date)
+    comment = data.comment.strip()
+
+    dup = duplicate_key(acc, ngri, op_date)
+    inst = instruction_type_df_dp(acc)
+
+    return [
+        op_date,
+        acc,
+        ngri,
+        doc_name,
+        doc_num,
+        doc_date,
+        comment,
+        dup,
+        inst,
+        parsed.path.name,
+    ]
 
 
 def create_workbook_template(path: Path) -> None:
@@ -74,51 +103,10 @@ def clear_dks_data(ws) -> None:
 
 def ensure_dks_sheet(wb) -> None:
     if "Dks" not in wb.sheetnames:
-        ws = wb.create_sheet("Dks")
-    else:
-        ws = wb["Dks"]
+        wb.create_sheet("Dks")
+    ws = wb["Dks"]
     for col, title in enumerate(DKS_HEADERS, start=1):
         ws.cell(row=1, column=col, value=title)
-
-
-def row_values(
-    parsed: DMsgFile,
-    data: DMsgDataRow,
-    ref: DepoDirectoryRow | None,
-) -> list:
-    h = parsed.header
-    matched = "Да" if ref else "Нет"
-    ref_vals = (
-        [
-            ref.portfolio_section,
-            ref.depository,
-            ref.originator,
-            ref.servicing_agent,
-            ref.deal_dom_rf_ia,
-            ref.comment,
-            ref.gpb_code_dom,
-            ref.gpb_code_bank,
-            ref.owner,
-        ]
-        if ref
-        else ["", "", "", "", "", "", "", "", ""]
-    )
-    return [
-        parsed.path.name,
-        h.get("ReportDate"),
-        h.get("ClientID"),
-        h.get("DepoNum"),
-        h.get("InstrNum"),
-        h.get("ClientName"),
-        data.ngri,
-        data.ref_contract,
-        data.doc_type,
-        data.doc_num,
-        display_doc_date(data.doc_date),
-        data.extra,
-        *ref_vals,
-        matched,
-    ]
 
 
 def write_dks_rows(path: Path, rows_out: list[list]) -> None:

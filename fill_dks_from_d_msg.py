@@ -12,9 +12,9 @@ _SRC = _ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from depo_directory import load_depo_index, lookup_depo
+from depo_directory import lookup_account_by_client_id, read_depo_directory_rows
 from dks_excel import create_workbook_template, row_values, write_dks_rows
-from gpb_d_msg import parse_d_msg_file, depo_num_for_lookup
+from gpb_d_msg import parse_d_msg_file
 
 
 def main() -> int:
@@ -37,6 +37,11 @@ def main() -> int:
         "--create-workbook",
         action="store_true",
         help="Создать книгу с листами Dks и «Счета депо», если файла нет",
+    )
+    parser.add_argument(
+        "--include-empty-doc-name",
+        action="store_true",
+        help="Не отфильтровывать строки с пустым «Наименование документа» (по умолчанию такие строки пропускаются)",
     )
     args = parser.parse_args()
 
@@ -68,10 +73,10 @@ def main() -> int:
         print(f"Нет файлов D*.MSG в {input_dir}")
         return 0
 
-    index = load_depo_index(str(wb_path))
-    if not index:
+    depo_rows = read_depo_directory_rows(str(wb_path))
+    if not depo_rows:
         print(
-            "Предупреждение: справочник «Счета депо» пуст или лист отсутствует — колонки справочника будут пустыми.",
+            "Предупреждение: справочник «Счета депо» пуст или лист отсутствует — колонка «Счет депо» будет пустой.",
             file=sys.stderr,
         )
 
@@ -86,10 +91,14 @@ def main() -> int:
         if rt and rt != "DOC_INSTRUCT":
             print(f"Пропуск (не DOC_INSTRUCT): {fp.name}", file=sys.stderr)
             continue
+
+        client_id = (parsed.header.get("ClientID") or "").strip()
+        depo_account = lookup_account_by_client_id(depo_rows, client_id)
+
         for data in parsed.rows:
-            depo_num = depo_num_for_lookup(parsed.header, data)
-            ref = lookup_depo(index, depo_num)
-            rows_out.append(row_values(parsed, data, ref))
+            if not args.include_empty_doc_name and not data.doc_type.strip():
+                continue
+            rows_out.append(row_values(parsed, data, depo_account))
 
     write_dks_rows(wb_path, rows_out)
     print(f"Записано строк: {len(rows_out)} в {wb_path}")
