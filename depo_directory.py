@@ -143,6 +143,36 @@ def lookup_account_by_client_id(
     return None
 
 
+def lookup_depo_row_by_client_id(
+    rows: list[DepoDirectoryRow],
+    client_id: str,
+) -> DepoDirectoryRow | None:
+    """Полная строка справочника по ClientID ↔ коды выписки."""
+    target = normalize_match_token(client_id)
+    if not target:
+        return None
+    for row in rows:
+        dom = normalize_match_token(row.gpb_code_dom)
+        bank = normalize_match_token(row.gpb_code_bank)
+        if target == dom or target == bank:
+            return row
+    return None
+
+
+def lookup_depo_row_by_account_number(
+    rows: list[DepoDirectoryRow],
+    account: str,
+) -> DepoDirectoryRow | None:
+    """Строка по колонке «Номер счета депо» (для колонки E «Владелец»)."""
+    k = normalize_account_key(account)
+    if not k:
+        return None
+    for row in rows:
+        if normalize_account_key(row.account_number) == k:
+            return row
+    return None
+
+
 def load_depo_index(
     workbook_path: str,
     sheet_name: str = "Счета депо",
