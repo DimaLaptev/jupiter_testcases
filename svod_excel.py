@@ -6,10 +6,23 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from codifier_table import CodifierRow, lookup_codifier
-from depo_directory import DepoDirectoryRow, lookup_depo_row_by_account_number, lookup_depo_row_by_client_id
+from codifier_table import (
+    CodifierRow,
+    fallback_document_op_type,
+    lookup_codifier,
+    lookup_document_op_type_by_instruction,
+)
+from depo_directory import (
+    DepoDirectoryRow,
+    lookup_account_by_client_id,
+    lookup_depo_row_by_account_number,
+    lookup_depo_row_by_client_id,
+)
+from gpb_d_msg import DMsgDataRow, DMsgFile, instruction_type_df_dp
 from gpb_i_msg import IField, IMsgDataRow, IMsgFile, compute_depot_section
 
+
+SVOD_DASH = "-"
 
 SVOD_HEADERS = [
     "Дата операции",
@@ -41,6 +54,80 @@ def svod_technical_key(
 ) -> str:
     """Колонка Q: F_G_N_дата (как на скрине СВОД_операций)."""
     return f"{account_f.strip()}_{section_g.strip()}_{instruction_n.strip()}_{date_op.strip()}"
+
+
+def svod_technical_key_d(account_f: str, instruction_n: str, date_op: str) -> str:
+    """Колонка Q для строк из отчёта D: F_N_дата (напр. 10934_DF_04.02.2025)."""
+    return f"{account_f.strip()}_{instruction_n.strip()}_{date_op.strip()}"
+
+
+def _format_depo_account_cell(acc: str | None) -> str:
+    if not acc or not str(acc).strip():
+        return ""
+    s = str(acc).strip()
+    try:
+        return str(int(float(s)))
+    except (ValueError, TypeError):
+        return s
+
+
+def build_svod_row_from_d(
+    parsed: DMsgFile,
+    data: DMsgDataRow,
+    depo_rows: list[DepoDirectoryRow],
+    codifier_rows: list[CodifierRow],
+    client_id: str,
+) -> list:
+    """Одна строка «СВОД_операций» из отчёта DOC_INSTRUCT (D*.MSG), эталон 2025_02."""
+    h = parsed.header
+    op_date = (h.get("ReportDate") or "").strip()
+
+    acc_raw = lookup_account_by_client_id(depo_rows, client_id)
+    f_str = _format_depo_account_cell(acc_raw)
+    if not f_str:
+        f_str = SVOD_DASH
+
+    depo_by_client = lookup_depo_row_by_client_id(depo_rows, client_id)
+    depository = (depo_by_client.depository if depo_by_client else "").strip() or SVOD_DASH
+
+    acc_for_inst = f_str if f_str != SVOD_DASH else ""
+    inst_type = instruction_type_df_dp(acc_for_inst)
+
+    op_type = lookup_document_op_type_by_instruction(codifier_rows, inst_type)
+    if not op_type:
+        op_type = fallback_document_op_type(inst_type) or SVOD_DASH
+
+    if f_str != SVOD_DASH:
+        owner_row = lookup_depo_row_by_account_number(depo_rows, f_str)
+        owner = (owner_row.owner if owner_row else (depo_by_client.owner if depo_by_client else "")).strip()
+    else:
+        owner = (depo_by_client.owner if depo_by_client else "").strip()
+    if not owner:
+        owner = SVOD_DASH
+
+    nrn = data.ngri.strip()
+    tech = svod_technical_key_d(f_str, inst_type, op_date)
+
+    return [
+        op_date or SVOD_DASH,
+        depository,
+        SVOD_DASH,
+        op_type,
+        owner,
+        f_str,
+        SVOD_DASH,
+        SVOD_DASH,
+        SVOD_DASH,
+        SVOD_DASH,
+        SVOD_DASH,
+        nrn or SVOD_DASH,
+        "1",
+        inst_type,
+        SVOD_DASH,
+        SVOD_DASH,
+        tech,
+        parsed.path.name,
+    ]
 
 
 def build_svod_row(

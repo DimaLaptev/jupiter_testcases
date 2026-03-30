@@ -14,17 +14,70 @@ if str(_SRC) not in sys.path:
 
 from codifier_table import read_codifier_rows
 from depo_directory import read_depo_directory_rows
+from gpb_d_msg import parse_d_msg_file
 from gpb_i_msg import parse_i_msg_file, passes_execution_filter
 from openpyxl import Workbook, load_workbook
 from svod_excel import (
     SVOD_HEADERS,
     build_svod_row,
+    build_svod_row_from_d,
     create_workbook_with_svod_only,
     ensure_svod_sheet,
     write_svod_rows,
 )
 
 from dks_excel import SCHEETA_DEPO_HEADERS
+
+
+# Строки листа «Коды» для СВОД из D*.MSG (тип поручения DF/DP, пустой код операции)
+_CODE_DOC_DF = [
+    "",
+    "",
+    "Документы - зачисление",
+    "Документы - зачисление",
+    "",
+    "",
+    "",
+    "DF",
+    "только для 10934",
+]
+_CODE_DOC_DP = [
+    "",
+    "",
+    "Документы - списание",
+    "Документы - списание",
+    "",
+    "",
+    "",
+    "DP",
+    "",
+]
+
+
+def _codifier_has_document_df_dp_rows(workbook_path: str) -> bool:
+    for r in read_codifier_rows(workbook_path):
+        if r.op_code.strip():
+            continue
+        if r.instruction_type.strip().upper() not in ("DF", "DP"):
+            continue
+        if "документ" in r.op_type.lower():
+            return True
+    return False
+
+
+def append_document_codifier_rows_if_missing(path: Path) -> None:
+    """Добавляет строки «Документы - …» / DF|DP, если в «Коды» их ещё нет."""
+    if _codifier_has_document_df_dp_rows(str(path)):
+        return
+    wb = load_workbook(path)
+    if "Коды" not in wb.sheetnames:
+        wb.close()
+        return
+    ws = wb["Коды"]
+    ws.append(_CODE_DOC_DF)
+    ws.append(_CODE_DOC_DP)
+    wb.save(path)
+    wb.close()
 
 
 def _depo_demo_row() -> list:
@@ -99,6 +152,8 @@ def append_reference_sheets_if_missing(path: Path) -> None:
                 "",
             ]
         )
+        ws_cod.append(_CODE_DOC_DF)
+        ws_cod.append(_CODE_DOC_DP)
         changed = True
     else:
         ws_cod = wb["Коды"]
@@ -130,6 +185,8 @@ def append_reference_sheets_if_missing(path: Path) -> None:
                     "",
                 ]
             )
+            ws_cod.append(_CODE_DOC_DF)
+            ws_cod.append(_CODE_DOC_DP)
             changed = True
     if changed:
         wb.save(path)
@@ -200,6 +257,8 @@ def seed_minimal_reference_workbook(path: Path) -> None:
             "",
         ]
     )
+    ws_cod.append(_CODE_DOC_DF)
+    ws_cod.append(_CODE_DOC_DP)
 
     ws_svod = wb.create_sheet("СВОД_операций")
     for col, title in enumerate(SVOD_HEADERS, start=1):
@@ -232,13 +291,19 @@ def ensure_workbook_structure(path: Path, create: bool, seed: bool) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Парсинг I*.MSG и запись листа «СВОД_операций».",
+        description="Парсинг I*.MSG и D*.MSG и запись листа «СВОД_операций» (сначала I, затем D).",
     )
     parser.add_argument(
         "--input-dir",
         type=Path,
         default=_ROOT / "2026_01" / "GPB" / "I",
         help="Каталог с I*.MSG",
+    )
+    parser.add_argument(
+        "--input-dir-d",
+        type=Path,
+        default=_ROOT / "2026_01" / "GPB" / "D",
+        help="Каталог с D*.MSG для строк СВОД (DOC_INSTRUCT)",
     )
     parser.add_argument(
         "--workbook",
@@ -261,29 +326,28 @@ def main() -> int:
         action="store_true",
         help="Если нет листов «Счета депо» или «Коды», создать их с демо-данными",
     )
+    parser.add_argument(
+        "--no-d-msg",
+        action="store_true",
+        help="Не добавлять строки из D*.MSG (только отчёт I)",
+    )
+    parser.add_argument(
+        "--svod-d-only",
+        action="store_true",
+        help="Только строки из D*.MSG (не обрабатывать I*.MSG)",
+    )
+    parser.add_argument(
+        "--include-empty-doc-name",
+        action="store_true",
+        help="Для D*.MSG не отбрасывать строки с пустым наименованием документа",
+    )
     args = parser.parse_args()
 
     wb_path = args.workbook.resolve()
     ensure_workbook_structure(wb_path, args.create_workbook, args.seed_demo_data)
     if args.ensure_reference_sheets:
         append_reference_sheets_if_missing(wb_path)
-
-    input_dir = args.input_dir.resolve()
-    if not input_dir.is_dir():
-        print(f"Каталог не найден: {input_dir}", file=sys.stderr)
-        return 1
-
-    seen = set()
-    files: list[Path] = []
-    for pat in ("I*.MSG", "i*.MSG"):
-        for f in sorted(input_dir.glob(pat)):
-            rp = f.resolve()
-            if rp not in seen:
-                seen.add(rp)
-                files.append(f)
-    if not files:
-        print(f"Нет файлов I*.MSG в {input_dir}")
-        return 0
+    append_document_codifier_rows_if_missing(wb_path)
 
     depo_rows = read_depo_directory_rows(str(wb_path))
     cod_rows = read_codifier_rows(str(wb_path))
@@ -299,22 +363,79 @@ def main() -> int:
         )
 
     rows_out: list[list] = []
-    for fp in files:
-        parsed = parse_i_msg_file(fp)
-        rt = (parsed.header.get("ReportType") or "").strip()
-        if rt and rt.upper() != "INSTRUCTIONS":
-            print(f"Пропуск (не INSTRUCTIONS): {fp.name}", file=sys.stderr)
-            continue
-        client_id = (parsed.header.get("ClientID") or "").strip()
 
-        for data in parsed.rows:
-            if not passes_execution_filter(data):
+    if not args.svod_d_only:
+        input_dir = args.input_dir.resolve()
+        files_i: list[Path] = []
+        if not input_dir.is_dir():
+            print(f"Каталог I не найден (пропуск I*.MSG): {input_dir}", file=sys.stderr)
+        else:
+            seen_i = set()
+            for pat in ("I*.MSG", "i*.MSG"):
+                for f in sorted(input_dir.glob(pat)):
+                    rp = f.resolve()
+                    if rp not in seen_i:
+                        seen_i.add(rp)
+                        files_i.append(f)
+            if not files_i:
+                print(f"Нет файлов I*.MSG в {input_dir}")
+        for fp in files_i:
+            parsed = parse_i_msg_file(fp)
+            rt = (parsed.header.get("ReportType") or "").strip()
+            if rt and rt.upper() != "INSTRUCTIONS":
+                print(f"Пропуск (не INSTRUCTIONS): {fp.name}", file=sys.stderr)
                 continue
-            if len(data.parts) < 18:
-                continue
-            rows_out.append(
-                build_svod_row(parsed, data, depo_rows, cod_rows, client_id),
-            )
+            client_id = (parsed.header.get("ClientID") or "").strip()
+
+            for data in parsed.rows:
+                if not passes_execution_filter(data):
+                    continue
+                if len(data.parts) < 18:
+                    continue
+                rows_out.append(
+                    build_svod_row(parsed, data, depo_rows, cod_rows, client_id),
+                )
+
+    if not args.no_d_msg:
+        input_d = args.input_dir_d.resolve()
+        if not input_d.is_dir():
+            print(f"Каталог D не найден: {input_d}", file=sys.stderr)
+            if args.svod_d_only:
+                return 1
+        else:
+            seen_d = set()
+            files_d: list[Path] = []
+            for pat in ("D*.MSG", "d*.MSG"):
+                for f in sorted(input_d.glob(pat)):
+                    rp = f.resolve()
+                    if rp not in seen_d:
+                        seen_d.add(rp)
+                        files_d.append(f)
+            if not files_d:
+                print(f"Нет файлов D*.MSG в {input_d}")
+            for fp in files_d:
+                try:
+                    parsed = parse_d_msg_file(fp)
+                except OSError as e:
+                    print(f"Ошибка чтения {fp}: {e}", file=sys.stderr)
+                    continue
+                rt = (parsed.header.get("ReportType") or "").strip()
+                if rt and rt != "DOC_INSTRUCT":
+                    print(f"Пропуск D (не DOC_INSTRUCT): {fp.name}", file=sys.stderr)
+                    continue
+                client_id = (parsed.header.get("ClientID") or "").strip()
+                for data in parsed.rows:
+                    if not args.include_empty_doc_name and not data.doc_type.strip():
+                        continue
+                    rows_out.append(
+                        build_svod_row_from_d(
+                            parsed,
+                            data,
+                            depo_rows,
+                            cod_rows,
+                            client_id,
+                        ),
+                    )
 
     write_svod_rows(wb_path, rows_out)
     print(f"Записано строк: {len(rows_out)} в {wb_path}")

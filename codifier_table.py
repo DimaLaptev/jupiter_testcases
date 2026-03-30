@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -185,3 +186,53 @@ def lookup_codifier(
 
     r0 = candidates[0]
     return r0.instruction_type, r0.op_type
+
+
+def normalize_svod_document_op_type_display(op_type: str) -> str:
+    """
+    Приводит «Тип операции» к виду как на эталонном скрине Excel:
+    «Документы - зачисление» (пробел — дефис — пробел), вместо длинного тире «—».
+    """
+    t = (op_type or "").strip()
+    if not t:
+        return t
+    t = t.replace("—", "-").replace("–", "-")
+    t = re.sub(r"\s*-\s*", " - ", t)
+    return t.strip()
+
+
+def lookup_document_op_type_by_instruction(
+    rows: list[CodifierRow],
+    instruction_type_raw: str,
+) -> str:
+    """
+    Для строк СВОД из отчёта D: тип поручения (instruction type) DF/DP и пустой код операции
+    в строке кодификатора «Документы …». Возвращает нормализованный «Тип операции» или пусто.
+    """
+    inst = instruction_type_raw.strip().upper()
+    if inst not in ("DF", "DP"):
+        return ""
+
+    for r in rows:
+        if r.op_code.strip():
+            continue
+        if r.instruction_type.strip().upper() != inst:
+            continue
+        ot = r.op_type.strip()
+        if not ot:
+            continue
+        if "документ" not in ot.lower():
+            continue
+        return normalize_svod_document_op_type_display(ot)
+
+    return ""
+
+
+def fallback_document_op_type(instruction_type_raw: str) -> str:
+    """Если в «Коды» нет строки для DF/DP-документов — эталонные подписи колонки D."""
+    inst = instruction_type_raw.strip().upper()
+    if inst == "DF":
+        return "Документы - зачисление"
+    if inst == "DP":
+        return "Документы - списание"
+    return ""
