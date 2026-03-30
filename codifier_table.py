@@ -17,6 +17,7 @@ class CodifierRow:
     content_gpb: str
     instruction_type: str
     comment: str
+    content_gpb_rep: str = ""
 
 
 def _norm_header(cell: Any) -> str:
@@ -35,6 +36,14 @@ def _find_header_row(ws, max_scan: int = 40) -> tuple[int, dict[str, int]]:
         if "код операции" in col_map and "тип поручения" in col_map:
             return r, col_map
     return 1, {}
+
+
+def _col_content_gpb_rep(col_map: dict[str, int]) -> int | None:
+    """Колонка «Содержание ГПБ в REP» (если есть в шапке листа «Коды»)."""
+    for key, idx in col_map.items():
+        if "содержание" in key and "rep" in key:
+            return idx
+    return None
 
 
 def _cell(ws, r: int, col: int | None) -> str:
@@ -75,6 +84,7 @@ def read_codifier_rows(workbook_path: str, sheet_name: str = "Коды") -> list
     c_gpb = col("содержание гпб")
     c_inst = col("тип поручения")
     c_com = col("комментарий")
+    c_gpb_rep = _col_content_gpb_rep(col_map)
 
     if not c_op or not c_inst:
         wb.close()
@@ -92,6 +102,7 @@ def read_codifier_rows(workbook_path: str, sheet_name: str = "Коды") -> list
         gpb = _cell(ws, r, c_gpb) if c_gpb else ""
         inst = _cell(ws, r, c_inst)
         com = _cell(ws, r, c_com) if c_com else ""
+        gpb_rep = _cell(ws, r, c_gpb_rep) if c_gpb_rep else ""
         if not op and not ot and not inst:
             continue
         out.append(
@@ -102,6 +113,7 @@ def read_codifier_rows(workbook_path: str, sheet_name: str = "Коды") -> list
                 content_gpb=gpb,
                 instruction_type=inst,
                 comment=com,
+                content_gpb_rep=gpb_rep,
             )
         )
     wb.close()
