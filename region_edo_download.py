@@ -1,6 +1,7 @@
 """
 Выгрузка вложений (attachments) к электронным документам из ЭДО СЭД Регион
-за предыдущий день по всем контрагентам (contractors), возвращаемым API.
+за предыдущий день по МСК (или за период REGION_EDO_DOCUMENT_DATE_FROM/TO в .env)
+по всем контрагентам (contractors), возвращаемым API.
 
 Алгоритм (algorithm):
   1. Аутентификация (authentication) через SOAP API.
@@ -29,6 +30,8 @@ from config_region import (
     REGION_LOGIN,
     REGION_PASSWORD,
     REGION_WSDL_URL,
+    REGION_EDO_DOCUMENT_DATE_FROM,
+    REGION_EDO_DOCUMENT_DATE_TO,
     EDO_FOLDERS,
 )
 from region_api import RegionApiClient
@@ -50,6 +53,38 @@ def _yesterday_range() -> Tuple[str, str]:
     yesterday = today - timedelta(days=1)
     fmt = '%Y-%m-%d'
     return yesterday.strftime(fmt), yesterday.strftime(fmt)
+
+
+def _document_date_range() -> Tuple[str, str]:
+    """
+    Период фильтра DocumentDateFrom / DocumentDateTo.
+    Если заданы оба REGION_EDO_DOCUMENT_DATE_* в .env — используются они (тест / sanity).
+    Иначе — предыдущий день по МСК.
+    """
+    has_from = bool(REGION_EDO_DOCUMENT_DATE_FROM)
+    has_to = bool(REGION_EDO_DOCUMENT_DATE_TO)
+    if has_from != has_to:
+        logger.error(
+            "Задайте оба REGION_EDO_DOCUMENT_DATE_FROM и REGION_EDO_DOCUMENT_DATE_TO "
+            "или ни одного (сейчас задан только один).",
+        )
+        raise SystemExit(1)
+    if has_from and has_to:
+        return REGION_EDO_DOCUMENT_DATE_FROM, REGION_EDO_DOCUMENT_DATE_TO
+    return _yesterday_range()
+
+
+def _log_skipped_attachment(att: dict, idx: int, doc_id: str) -> None:
+    """Предупреждение, если вложение (attachment) есть в ответе API, но без base64-тела."""
+    att_id = (att.get('id') or '').strip()
+    att_name = (att.get('file_name') or '').strip()
+    if att_id or att_name:
+        logger.warning(
+            "    Вложение (attachment) idx=%d к документу id=%s: id=%r name=%r — "
+            "пустое тело в getDocumentById, файл не сохранён "
+            "(при REGION_DEBUG_XML смотрите сырой XML ответа).",
+            idx, doc_id, att_id or '?', att_name or '?',
+        )
 
 
 def _output_dir() -> str:
@@ -126,8 +161,15 @@ def _download_documents_from_folder(
         date_to=date_to,
     )
 
+    total_api = api.get_total_documents_count(folder, filtr)
+    logger.info(
+        "  [%s] папка '%s' — getTotalDocumentsCount (API)=%d",
+        contractor_name, folder, total_api,
+    )
+
     downloaded: list[dict] = []
     offset = 0
+    fetched_meta_count = 0
 
     while True:
         docs = api.get_document_info_from_folder(
@@ -142,6 +184,8 @@ def _download_documents_from_folder(
                     "  [%s] папка '%s' — документов нет", contractor_name, folder,
                 )
             break
+
+        fetched_meta_count += len(docs)
 
         if offset == 0:
             logger.info("  [%s] папка '%s' — загрузка документов...", contractor_name, folder)
@@ -190,6 +234,7 @@ def _download_documents_from_folder(
             for idx, att in enumerate(doc_full.get('attachments', []) if doc_full else []):
                 att_b64 = att.get('body_base64')
                 if not att_b64:
+                    _log_skipped_attachment(att, idx, doc_id)
                     continue
                 att_name = att.get('file_name') or f"attachment_{idx}"
                 base_safe = _safe_filename(file_name, doc_id)
@@ -224,6 +269,14 @@ def _download_documents_from_folder(
 
         offset += PAGE_SIZE
 
+    if total_api != fetched_meta_count:
+        logger.warning(
+            "  [%s] папка '%s' — расхождение (mismatch): getTotalDocumentsCount=%d, "
+            "собрано элементов DocumentInfo по страницам=%d "
+            "(пагинация (pagination) limit/offset или ответ сервера).",
+            contractor_name, folder, total_api, fetched_meta_count,
+        )
+
     return downloaded
 
 
@@ -249,6 +302,14 @@ def _download_documents_from_archive(
     if not docs:
         logger.debug("  [%s] архив — документов нет", contractor_name)
         return []
+
+    if len(docs) >= PAGE_SIZE:
+        logger.warning(
+            "  [%s] архив (getDocumentInfoByParams): получено %d документов (limit=%d). "
+            "В WSDL нет параметра offset для этой операции — при большем числе записей по фильтру "
+            "список может быть обрезан.",
+            contractor_name, len(docs), PAGE_SIZE,
+        )
 
     logger.info(
         "  [%s] архив (getDocumentInfoByParams) — найдено документов: %d",
@@ -300,6 +361,7 @@ def _download_documents_from_archive(
         for idx, att in enumerate(doc_full.get('attachments', []) if doc_full else []):
             att_b64 = att.get('body_base64')
             if not att_b64:
+                _log_skipped_attachment(att, idx, doc_id)
                 continue
             att_name = att.get('file_name') or f"attachment_{idx}"
             base_safe = _safe_filename(file_name, doc_id)
@@ -337,7 +399,7 @@ def _download_documents_from_archive(
 
 def main():
     logger.info("=" * 70)
-    logger.info("Выгрузка вложений ЭДО Регион за предыдущий день")
+    logger.info("Выгрузка вложений ЭДО Регион")
     logger.info("=" * 70)
 
     if not REGION_LOGIN or not REGION_PASSWORD:
@@ -347,8 +409,14 @@ def main():
         )
         sys.exit(1)
 
-    date_from, date_to = _yesterday_range()
-    logger.info("Период (period): %s — %s", date_from, date_to)
+    date_from, date_to = _document_date_range()
+    if REGION_EDO_DOCUMENT_DATE_FROM and REGION_EDO_DOCUMENT_DATE_TO:
+        logger.info(
+            "Период (period) из .env REGION_EDO_DOCUMENT_DATE_*: %s — %s",
+            date_from, date_to,
+        )
+    else:
+        logger.info("Период (period): %s — %s (предыдущий день по МСК)", date_from, date_to)
 
     output_dir = _output_dir()
     logger.info("Папка выгрузки (output): %s", os.path.abspath(output_dir))

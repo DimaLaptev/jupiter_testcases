@@ -1,0 +1,50 @@
+# Скопируйте это содержимое в файл .env
+
+# Имя пользователя (username) для входа в Exchange
+# Например: DOMAIN\username или username@domain.com
+MAIL_USERNAME=your.username
+
+# Пароль
+MAIL_PASSWORD=your-password
+
+# Адрес сервера Exchange
+MAIL_SERVER_NAME=mail.company.com
+
+# Email адрес почтового ящика
+MAIL_ADDRESS=your.email@company.com
+
+# Использовать автоопределение настроек (False = ручная настройка)
+USE_AUTODISCOVER=False
+
+# Проверка SSL (для тестовых серверов можно False)
+VERIFY_SSL=True
+
+# ============================================================
+# СЭД Регион (Region EDO) — SOAP API
+# ============================================================
+
+# Логин для СЭД Регион
+REGION_LOGIN=your_region_login
+
+# Пароль для СЭД Регион
+REGION_PASSWORD=your_region_password
+
+# WSDL URL (по умолчанию .NET endpoint)
+REGION_WSDL_URL=https://edo.region.ru/soap/soapdotnet/soap?wsdl
+
+# Опционально: диапазон дат документа для выгрузки (region_edo_download.py), формат YYYY-MM-DD.
+# Задавайте оба ключа или ни одного. Если не заданы — используется предыдущий календарный день по МСК.
+# REGION_EDO_DOCUMENT_DATE_FROM=2026-01-01
+# REGION_EDO_DOCUMENT_DATE_TO=2026-03-31
+
+# ============================================================
+# Настройки директорий (directories) для file_handler_2.py
+# ============================================================
+
+# Директории для исходных файлов
+DOMRF_OPEN_DIR=./DOMRF/open
+DOMRFIA_OPEN_DIR=./DOMRFIA/open
+
+# Базовая директория назначения (без {month})
+GPB_BASE_DIR=./
+

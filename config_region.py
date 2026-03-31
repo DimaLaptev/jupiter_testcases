@@ -16,6 +16,11 @@ REGION_WSDL_URL = os.getenv(
 )
 REGION_DEBUG_XML = os.getenv('REGION_DEBUG_XML', '').lower() in ('1', 'true', 'yes')
 
+# Опционально: период фильтра DocumentDate (YYYY-MM-DD) для region_edo_download.py.
+# Если заданы оба — вместо «вчера» по МСК используется этот диапазон (sanity / тест фильтра).
+REGION_EDO_DOCUMENT_DATE_FROM = (os.getenv('REGION_EDO_DOCUMENT_DATE_FROM') or '').strip()
+REGION_EDO_DOCUMENT_DATE_TO = (os.getenv('REGION_EDO_DOCUMENT_DATE_TO') or '').strip()
+
 EDO_FOLDERS = [
     'ReadyToRegister',
     'InWork',
