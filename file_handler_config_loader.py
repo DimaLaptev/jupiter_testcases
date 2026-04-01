@@ -191,8 +191,9 @@ def load_validate_rsd_config(
     """
     Читает excel-файл (Excel) для validate_rsd_files.py:
     лист «config», колонки section, key, value.
-    Ключи: RSD_DEPO_ACCOUNTS (список), RSD_SUBFOLDERS (список),
-    RSD_FILE_PREFIX (одна строка, по умолчанию D — префикс имён вида D_YYMMDD_…).
+    Ключи: RSD_DEPO_ACCOUNTS (список), RSD_SUBFOLDERS (список подпапок RSD: D, I, R, REP …).
+    Префикс имени файла (file name prefix) задаётся в коде: D→D_, I→I_, R→R_, REP→R-01_ (.xlsx).
+    Устаревший ключ RSD_FILE_PREFIX в Excel игнорируется.
     """
 
     path = Path(filename) if filename is not None else VALIDATE_RSD_CONFIG_PATH
@@ -201,7 +202,6 @@ def load_validate_rsd_config(
 
     raw_accounts: List[str] = []
     raw_folders: List[str] = []
-    prefix_values: List[str] = []
 
     for row in ws.iter_rows(min_row=2, values_only=True):
         _, key, value = (row + (None,) * 3)[:3]
@@ -220,21 +220,15 @@ def load_validate_rsd_config(
             folder = str(value).strip()
             if folder:
                 raw_folders.append(folder)
-        elif k == "RSD_FILE_PREFIX":
-            if value is not None and str(value).strip():
-                prefix_values.append(str(value).strip())
 
     if not raw_accounts:
         raise ValueError("validate_rsd_config: нет строк с key=RSD_DEPO_ACCOUNTS")
     if not raw_folders:
         raise ValueError("validate_rsd_config: нет строк с key=RSD_SUBFOLDERS")
 
-    file_prefix = prefix_values[0] if prefix_values else "D"
-
     return {
         "RSD_DEPO_ACCOUNTS": raw_accounts,
         "RSD_SUBFOLDERS": raw_folders,
-        "RSD_FILE_PREFIX": file_prefix,
     }
 
 

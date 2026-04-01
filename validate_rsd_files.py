@@ -1,7 +1,10 @@
 """
-Валидация файлов РСД: проверка наличия .MSG с «Счёт депо» (depo account) в имени за вчера
-в папках вида YYYY_MM/RSD/<подпапка>. Имя: {prefix}_YYMMDD_<цифры>.MSG (пример: D_260130_000300008201.MSG).
-Отправка отчёта в Outlook / Exchange — как validate_gpb_files.py.
+Валидация файлов РСД: счёт депо (depo account) в имени файла в подпапках YYYY_MM/RSD/…
+- D → папка D, имена D_YYMMDD_<цифры>.MSG
+- I → папка I, имена I_YYMMDD_<цифры>.MSG
+- R → папка R, имена R_YYMMDD_<цифры>.MSG
+- REP → папка REP, имена R-01_<YYMMDD>_<цифры> … .xlsx / .xls (дата в имени не обязана совпадать с «вчера»)
+Отправка отчёта — как validate_gpb_files.py.
 """
 
 import os
@@ -16,7 +19,23 @@ from file_handler_config_loader import load_validate_rsd_config
 _validate_rsd = load_validate_rsd_config()
 RSD_DEPO_ACCOUNTS: List[str] = _validate_rsd["RSD_DEPO_ACCOUNTS"]
 RSD_SUBFOLDERS: List[str] = _validate_rsd["RSD_SUBFOLDERS"]
-RSD_FILE_PREFIX: str = _validate_rsd["RSD_FILE_PREFIX"]
+
+# Префикс имени (name prefix) по имени подпапки; REP — отчёты Excel с R-01_
+_MSG_SUBFOLDERS = frozenset({"D", "I", "R"})
+
+
+def _msg_pattern_for_prefix(file_prefix: str, date_yymmdd: str):
+    esc_p = re.escape(file_prefix)
+    esc_d = re.escape(date_yymmdd)
+    return re.compile(
+        rf"^{esc_p}_{esc_d}_(?P<depo>\d+)\.msg$",
+        re.IGNORECASE,
+    )
+
+
+# R-01_260113_000300044001 ООО….xlsx — блок цифр счёта после второго «_»
+_REP_NAME_RE = re.compile(r"^R-01_\d{6}_(?P<depo>\d+)", re.IGNORECASE)
+_REP_EXTS = (".xlsx", ".xls")
 
 
 def get_base_path() -> str:
@@ -34,54 +53,62 @@ def get_rsd_month_path() -> str:
 
 
 def get_yesterday_yymmdd() -> str:
-    """Дата вчера в формате YYMMDD (как в имени файла РСД)."""
+    """Дата вчера в формате YYMMDD (как в имени .MSG)."""
     yesterday = datetime.now() - timedelta(days=1)
     return yesterday.strftime("%y%m%d")
 
 
-def _build_filename_pattern(file_prefix: str, date_yymmdd: str):
-    esc_p = re.escape(file_prefix)
-    esc_d = re.escape(date_yymmdd)
-    # D_260130_000300008201.MSG — после даты блок цифр (часто 12), сравниваем по int
-    return re.compile(
-        rf"^{esc_p}_{esc_d}_(?P<depo>\d+)\.msg$",
-        re.IGNORECASE,
-    )
+def _normalize_depo(depo_raw: str) -> str:
+    if not depo_raw.isdigit():
+        return ""
+    return str(int(depo_raw))
 
 
 def find_depo_accounts_in_folder(
     folder_path: str,
-    pattern: re.Pattern[str],
+    subfolder: str,
+    date_yymmdd: str,
     expected_accounts: Set[str],
 ) -> Set[str]:
-    """Возвращает множество нормализованных счетов депо, найденных в именах файлов."""
+    """Сканирует одну подпапку RSD с учётом типа (MSG vs REP)."""
     found: Set[str] = set()
     if not os.path.isdir(folder_path):
         return found
+
+    if subfolder == "REP":
+        for name in os.listdir(folder_path):
+            lower = name.lower()
+            if not lower.endswith(_REP_EXTS):
+                continue
+            m = _REP_NAME_RE.match(name)
+            if not m:
+                continue
+            normalized = _normalize_depo(m.group("depo"))
+            if normalized and normalized in expected_accounts:
+                found.add(normalized)
+        return found
+
+    if subfolder not in _MSG_SUBFOLDERS:
+        return found
+
+    pattern = _msg_pattern_for_prefix(subfolder, date_yymmdd)
     for name in os.listdir(folder_path):
         m = pattern.match(name)
         if not m:
             continue
-        depo_raw = m.group("depo")
-        if not depo_raw.isdigit():
-            continue
-        normalized = str(int(depo_raw))
-        if normalized in expected_accounts:
+        normalized = _normalize_depo(m.group("depo"))
+        if normalized and normalized in expected_accounts:
             found.add(normalized)
     return found
 
 
 def collect_missing_accounts(base_rsd: str, date_yymmdd: str) -> Dict[str, List[str]]:
-    """
-    Недостающие счета депо по каждой подпапке RSD.
-    Возвращает: { \"D\": [...], ... }
-    """
+    """Недостающие счета депо по каждой подпапке из конфига."""
     expected = set(RSD_DEPO_ACCOUNTS)
-    pattern = _build_filename_pattern(RSD_FILE_PREFIX, date_yymmdd)
     result: Dict[str, List[str]] = {sub: [] for sub in RSD_SUBFOLDERS}
     for sub in RSD_SUBFOLDERS:
         folder = os.path.join(base_rsd, sub)
-        found = find_depo_accounts_in_folder(folder, pattern, expected)
+        found = find_depo_accounts_in_folder(folder, sub, date_yymmdd, expected)
         missing = [a for a in RSD_DEPO_ACCOUNTS if a not in found]
         result[sub] = sorted(missing, key=lambda x: int(x))
     return result
@@ -193,11 +220,12 @@ def main() -> None:
     recipient = os.getenv("RSD_VALIDATION_RECIPIENT") or os.getenv("MAIL_ADDRESS", "")
 
     print("=" * 60)
-    print("Проверка файлов РСД (MSG, счёт депо в имени)")
+    print("Проверка файлов РСД (счёт депо в имени)")
     print("=" * 60)
     print(f"Папка: {base_rsd}")
-    print(f"Дата в имени файла (вчера, YYMMDD): {date_yymmdd}")
-    print(f"Префикс имён: {RSD_FILE_PREFIX}_")
+    print(f"Подпапки: {', '.join(RSD_SUBFOLDERS)}")
+    print(f"Дата в имени .MSG (вчера, YYMMDD): {date_yymmdd}")
+    print("Шаблоны: D/I/R → {папка}_YYMMDD_<счёт>.MSG; REP → R-01_*_<счёт>*.xlsx")
     print("=" * 60)
 
     missing_by_folder = collect_missing_accounts(base_rsd, date_yymmdd)
@@ -215,7 +243,7 @@ def main() -> None:
     if all_found:
         html_body = (
             "<html><body>Проверка РСД пройдена успешно, по всем счетам депо из справочника "
-            "найдены файлы за указанную дату.</body></html>"
+            "найдены файлы во всех настроенных подпапках.</body></html>"
         )
     else:
         html_body = build_email_body(missing_by_folder)
