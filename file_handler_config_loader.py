@@ -12,6 +12,9 @@ FILE_HANDLER_2_CONFIG_PATH = (
 VALIDATE_GPB_CONFIG_PATH = (
     Path(__file__).resolve().parent / "depo_validation" / "validate_gpb_config.xlsx"
 )
+VALIDATE_RSD_CONFIG_PATH = (
+    Path(__file__).resolve().parent / "depo_validation" / "validate_rsd_config.xlsx"
+)
 
 _VALID_FH2_DEST = frozenset({"D", "I", "R", "REP", "SPR"})
 
@@ -165,6 +168,73 @@ def load_validate_gpb_config(
     return {
         "GPB_STATEMENT_CODES": raw_codes,
         "GPB_SUBFOLDERS": raw_folders,
+    }
+
+
+def _normalize_rsd_depo_account(value: Any) -> str:
+    """Нормализует «Счёт депо» (depo account) для сравнения с фрагментом в имени файла."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value == int(value):
+        return str(int(value))
+    if isinstance(value, int):
+        return str(value)
+    s = str(value).strip()
+    if s.isdigit():
+        return str(int(s))
+    return s
+
+
+def load_validate_rsd_config(
+    filename: Optional[Union[str, Path]] = None,
+) -> Dict[str, Any]:
+    """
+    Читает excel-файл (Excel) для validate_rsd_files.py:
+    лист «config», колонки section, key, value.
+    Ключи: RSD_DEPO_ACCOUNTS (список), RSD_SUBFOLDERS (список),
+    RSD_FILE_PREFIX (одна строка, по умолчанию D — префикс имён вида D_YYMMDD_…).
+    """
+
+    path = Path(filename) if filename is not None else VALIDATE_RSD_CONFIG_PATH
+    wb = load_workbook(filename=path, data_only=True)
+    ws = wb["config"]
+
+    raw_accounts: List[str] = []
+    raw_folders: List[str] = []
+    prefix_values: List[str] = []
+
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        _, key, value = (row + (None,) * 3)[:3]
+        if key is None:
+            continue
+        k = str(key).strip()
+        if k == "RSD_DEPO_ACCOUNTS":
+            if value is None:
+                continue
+            acc = _normalize_rsd_depo_account(value)
+            if acc:
+                raw_accounts.append(acc)
+        elif k == "RSD_SUBFOLDERS":
+            if value is None:
+                continue
+            folder = str(value).strip()
+            if folder:
+                raw_folders.append(folder)
+        elif k == "RSD_FILE_PREFIX":
+            if value is not None and str(value).strip():
+                prefix_values.append(str(value).strip())
+
+    if not raw_accounts:
+        raise ValueError("validate_rsd_config: нет строк с key=RSD_DEPO_ACCOUNTS")
+    if not raw_folders:
+        raise ValueError("validate_rsd_config: нет строк с key=RSD_SUBFOLDERS")
+
+    file_prefix = prefix_values[0] if prefix_values else "D"
+
+    return {
+        "RSD_DEPO_ACCOUNTS": raw_accounts,
+        "RSD_SUBFOLDERS": raw_folders,
+        "RSD_FILE_PREFIX": file_prefix,
     }
 
 

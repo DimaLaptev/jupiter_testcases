@@ -23,10 +23,12 @@ VERIFY_SSL=True
 # СЭД Регион (Region EDO) — SOAP API
 # ============================================================
 
-# Логин для СЭД Регион
+# Логины для СЭД Регион (region_edo_download.py): несколько через запятую (comma-separated),
+# один и тот же REGION_PASSWORD используется для всех.
+# Пример: REGION_LOGIN=user_a@org,user_b@org,third_login
 REGION_LOGIN=your_region_login
 
-# Пароль для СЭД Регион
+# Пароль для СЭД Регион (общий для всех логинов из REGION_LOGIN)
 REGION_PASSWORD=your_region_password
 
 # WSDL URL (по умолчанию .NET endpoint)
@@ -47,4 +49,8 @@ DOMRFIA_OPEN_DIR=./DOMRFIA/open
 
 # Базовая директория назначения (без {month})
 GPB_BASE_DIR=./
+
+# Получатель отчётов validate_gpb_files.py / validate_rsd_files.py (если пусто — MAIL_ADDRESS)
+# GPB_VALIDATION_RECIPIENT=reports@company.com
+# RSD_VALIDATION_RECIPIENT=reports@company.com
 
