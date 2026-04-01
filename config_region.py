@@ -4,11 +4,21 @@
 """
 
 import os
+from typing import List, Optional
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-REGION_LOGIN = os.getenv('REGION_LOGIN')
+
+def _parse_region_logins(value: Optional[str]) -> List[str]:
+    """Список логинов из REGION_LOGIN: через запятую (comma-separated), пробелы обрезаются."""
+    if not value or not str(value).strip():
+        return []
+    return [part.strip() for part in str(value).split(',') if part.strip()]
+
+
+REGION_LOGINS: List[str] = _parse_region_logins(os.getenv('REGION_LOGIN'))
 REGION_PASSWORD = os.getenv('REGION_PASSWORD')
 REGION_WSDL_URL = os.getenv(
     'REGION_WSDL_URL',

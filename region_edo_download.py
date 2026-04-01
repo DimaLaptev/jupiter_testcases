@@ -1,7 +1,7 @@
 """
 Выгрузка вложений (attachments) к электронным документам из ЭДО СЭД Регион
 за предыдущий день по МСК (или за период REGION_EDO_DOCUMENT_DATE_FROM/TO в .env)
-по всем контрагентам (contractors), возвращаемым API.
+по всем логинам из REGION_LOGIN (через запятую в .env) и контрагентам (contractors), возвращаемым API.
 
 Алгоритм (algorithm):
   1. Аутентификация (authentication) через SOAP API.
@@ -27,7 +27,7 @@ from typing import Tuple
 import pytz
 
 from config_region import (
-    REGION_LOGIN,
+    REGION_LOGINS,
     REGION_PASSWORD,
     REGION_WSDL_URL,
     REGION_EDO_DOCUMENT_DATE_FROM,
@@ -149,6 +149,7 @@ def _download_documents_from_folder(
     date_from: str,
     date_to: str,
     output_dir: str,
+    region_login: str,
 ) -> list[dict]:
     """
     Скачивает все документы (documents) из указанной папки (folder)
@@ -224,6 +225,7 @@ def _download_documents_from_folder(
                     'filename': safe_name,
                     'filepath': filepath,
                     'size': size,
+                    'login': region_login,
                     'contractor': contractor_name,
                     'folder': folder,
                     'display_name': display_name,
@@ -255,6 +257,7 @@ def _download_documents_from_folder(
                     'filename': safe_att_name,
                     'filepath': att_path,
                     'size': att_size,
+                    'login': region_login,
                     'contractor': contractor_name,
                     'folder': folder,
                     'display_name': display_name,
@@ -287,6 +290,7 @@ def _download_documents_from_archive(
     date_from: str,
     date_to: str,
     output_dir: str,
+    region_login: str,
 ) -> list[dict]:
     """
     Скачивает документы из архива "СЭД Регион" (getDocumentInfoByParams)
@@ -351,6 +355,7 @@ def _download_documents_from_archive(
                 'filename': safe_name,
                 'filepath': filepath,
                 'size': size,
+                'login': region_login,
                 'contractor': contractor_name,
                 'folder': archive_label,
                 'display_name': display_name,
@@ -382,6 +387,7 @@ def _download_documents_from_archive(
                 'filename': safe_att_name,
                 'filepath': att_path,
                 'size': att_size,
+                'login': region_login,
                 'contractor': contractor_name,
                 'folder': archive_label,
                 'display_name': display_name,
@@ -402,9 +408,9 @@ def main():
     logger.info("Выгрузка вложений ЭДО Регион")
     logger.info("=" * 70)
 
-    if not REGION_LOGIN or not REGION_PASSWORD:
+    if not REGION_LOGINS or not REGION_PASSWORD:
         logger.error(
-            "Не заданы REGION_LOGIN / REGION_PASSWORD в .env файле. "
+            "Не заданы REGION_LOGIN (список логинов через запятую) / REGION_PASSWORD в .env. "
             "Скопируйте env_template.txt → .env и заполните значения."
         )
         sys.exit(1)
@@ -420,52 +426,63 @@ def main():
 
     output_dir = _output_dir()
     logger.info("Папка выгрузки (output): %s", os.path.abspath(output_dir))
-
-    api = RegionApiClient(
-        wsdl_url=REGION_WSDL_URL,
-        login=REGION_LOGIN,
-        password=REGION_PASSWORD,
-    )
-
-    user_id = api.authenticate()
-    if not user_id:
-        logger.error("Аутентификация (authentication) не пройдена — выход.")
-        sys.exit(1)
-
-    contractor_map = _contractor_map_from_api(api)
-    if not contractor_map:
-        logger.error(
-            "В ответе getContractors нет контрагентов с ContractorId — выход.",
-        )
-        sys.exit(1)
+    logger.info("Логинов к обходу (logins): %d", len(REGION_LOGINS))
 
     all_downloaded: list[dict] = []
 
-    for contractor_name, contractor_id in contractor_map.items():
-        logger.info("-" * 60)
-        logger.info("Контрагент (contractor): %s (id=%s)", contractor_name, contractor_id)
+    for region_login in REGION_LOGINS:
+        logger.info("=" * 60)
+        logger.info("Учётная запись (login): %s", region_login)
 
-        for folder in EDO_FOLDERS:
-            downloaded = _download_documents_from_folder(
+        api = RegionApiClient(
+            wsdl_url=REGION_WSDL_URL,
+            login=region_login,
+            password=REGION_PASSWORD,
+        )
+
+        user_id = api.authenticate()
+        if not user_id:
+            logger.warning(
+                "Аутентификация (authentication) не пройдена для логина %s — пропуск, следующий.",
+                region_login,
+            )
+            continue
+
+        contractor_map = _contractor_map_from_api(api)
+        if not contractor_map:
+            logger.warning(
+                "Для логина %s в ответе getContractors нет контрагентов с ContractorId — пропуск.",
+                region_login,
+            )
+            continue
+
+        for contractor_name, contractor_id in contractor_map.items():
+            logger.info("-" * 60)
+            logger.info("Контрагент (contractor): %s (id=%s)", contractor_name, contractor_id)
+
+            for folder in EDO_FOLDERS:
+                downloaded = _download_documents_from_folder(
+                    api=api,
+                    folder=folder,
+                    contractor_id=contractor_id,
+                    contractor_name=contractor_name,
+                    date_from=date_from,
+                    date_to=date_to,
+                    output_dir=output_dir,
+                    region_login=region_login,
+                )
+                all_downloaded.extend(downloaded)
+
+            downloaded = _download_documents_from_archive(
                 api=api,
-                folder=folder,
                 contractor_id=contractor_id,
                 contractor_name=contractor_name,
                 date_from=date_from,
                 date_to=date_to,
                 output_dir=output_dir,
+                region_login=region_login,
             )
             all_downloaded.extend(downloaded)
-
-        downloaded = _download_documents_from_archive(
-            api=api,
-            contractor_id=contractor_id,
-            contractor_name=contractor_name,
-            date_from=date_from,
-            date_to=date_to,
-            output_dir=output_dir,
-        )
-        all_downloaded.extend(downloaded)
 
     logger.info("=" * 70)
     logger.info("ИТОГО (total):")
@@ -478,8 +495,8 @@ def main():
         logger.info("-" * 60)
         for i, d in enumerate(all_downloaded, 1):
             logger.info(
-                "  %3d. [%s] %s  (%d байт)",
-                i, d['contractor'], d['filename'], d['size'],
+                "  %3d. [%s][%s] %s  (%d байт)",
+                i, d['login'], d['contractor'], d['filename'], d['size'],
             )
     else:
         logger.info("  Вложений (attachments) за %s не найдено.", date_from)
