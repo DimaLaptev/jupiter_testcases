@@ -78,10 +78,8 @@ def create_validate_rsd_config_xlsx() -> None:
     for r in range(start_acc, ws.max_row + 1):
         ws.cell(row=r, column=3).number_format = "@"
 
-    for sub in ("D",):
+    for sub in ("D", "I", "R", "REP"):
         ws.append(["rsd", "RSD_SUBFOLDERS", sub])
-
-    ws.append(["rsd", "RSD_FILE_PREFIX", "D"])
 
     VALIDATE_RSD_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     wb.save(VALIDATE_RSD_CONFIG_PATH)
