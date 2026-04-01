@@ -6,6 +6,14 @@ from openpyxl import load_workbook
 FILE_HANDLER_CONFIG_PATH = (
     Path(__file__).resolve().parent / "depo_validation" / "file_handler_config.xlsx"
 )
+FILE_HANDLER_2_CONFIG_PATH = (
+    Path(__file__).resolve().parent / "depo_validation" / "file_handler_2_config.xlsx"
+)
+VALIDATE_GPB_CONFIG_PATH = (
+    Path(__file__).resolve().parent / "depo_validation" / "validate_gpb_config.xlsx"
+)
+
+_VALID_FH2_DEST = frozenset({"D", "I", "R", "REP", "SPR"})
 
 
 def load_file_handler_config(
@@ -56,6 +64,108 @@ def load_file_handler_config(
         config[list_key] = raw.get(list_key, [])
 
     return config
+
+
+def load_file_handler_2_rules(
+    filename: Optional[Union[str, Path]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Читает excel-файл (Excel) со справочником правил для file_handler_2.py:
+    лист (sheet) «rules», колонки sort_order, extension, name_prefix, dest_folder.
+    Правила с одинаковым extension проверяются по порядку sort_order.
+    """
+
+    path = Path(filename) if filename is not None else FILE_HANDLER_2_CONFIG_PATH
+    wb = load_workbook(filename=path, data_only=True)
+    ws = wb["rules"]
+
+    rules: List[Dict[str, Any]] = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or all(c is None for c in row):
+            continue
+        order, ext, prefix, dest = (row + (None,) * 4)[:4]
+        if ext is None or str(ext).strip() == "":
+            continue
+        dest_key = str(dest).strip() if dest is not None else ""
+        if dest_key not in _VALID_FH2_DEST:
+            raise ValueError(
+                f"file_handler_2_config: неизвестный dest_folder {dest_key!r}, "
+                f"ожидается одно из {sorted(_VALID_FH2_DEST)}"
+            )
+        sort_order = 0
+        if order is not None:
+            if isinstance(order, int):
+                sort_order = order
+            elif isinstance(order, float):
+                sort_order = int(order)
+            else:
+                sort_order = int(str(order).strip())
+        rules.append(
+            {
+                "sort_order": sort_order,
+                "ext": str(ext).strip().lower(),
+                "prefix": str(prefix) if prefix is not None else "",
+                "dest": dest_key,
+            }
+        )
+
+    rules.sort(key=lambda r: (r["sort_order"], r["ext"], r["prefix"]))
+    return rules
+
+
+def _normalize_gpb_statement_code(value: Any) -> str:
+    """Сохраняет ведущие нули (leading zeros) для кодов из Excel."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value == int(value):
+        return f"{int(value):05d}"
+    if isinstance(value, int):
+        return f"{value:05d}"
+    s = str(value).strip()
+    if s.isdigit():
+        return s.zfill(5)
+    return s
+
+
+def load_validate_gpb_config(
+    filename: Optional[Union[str, Path]] = None,
+) -> Dict[str, Any]:
+    """
+    Читает excel-файл (Excel) для validate_gpb_files.py:
+    лист «config», колонки section, key, value (как file_handler_config).
+    Ключи: GPB_STATEMENT_CODES (список), GPB_SUBFOLDERS (список).
+    """
+
+    path = Path(filename) if filename is not None else VALIDATE_GPB_CONFIG_PATH
+    wb = load_workbook(filename=path, data_only=True)
+    ws = wb["config"]
+
+    raw_codes: List[str] = []
+    raw_folders: List[str] = []
+
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        _, key, value = (row + (None,) * 3)[:3]
+        if key is None or value is None:
+            continue
+        k = str(key).strip()
+        if k == "GPB_STATEMENT_CODES":
+            code = _normalize_gpb_statement_code(value)
+            if code:
+                raw_codes.append(code)
+        elif k == "GPB_SUBFOLDERS":
+            folder = str(value).strip()
+            if folder:
+                raw_folders.append(folder)
+
+    if not raw_codes:
+        raise ValueError("validate_gpb_config: нет строк с key=GPB_STATEMENT_CODES")
+    if not raw_folders:
+        raise ValueError("validate_gpb_config: нет строк с key=GPB_SUBFOLDERS")
+
+    return {
+        "GPB_STATEMENT_CODES": raw_codes,
+        "GPB_SUBFOLDERS": raw_folders,
+    }
 
 
 if __name__ == "__main__":
