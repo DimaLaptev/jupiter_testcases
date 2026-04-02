@@ -1,9 +1,15 @@
 """
-Экспорт факта (fact_value) по операциям (operation_id) для выбранного resist_id
-из сырых CSV — та же логика, что в notebooks/20_per_series_data_augmentation_vanil.ipynb (ячейка загрузки).
+Экспорт факта (fact_value) по операциям (operation_id) из сырых CSV — та же логика,
+что в notebooks/20_per_series_data_augmentation_vanil.ipynb (ячейка загрузки).
 
-По умолчанию id из EXCLUDED_RESIST_IDS исключаются до парсинга (как в ноутбуке).
-Для таких id без флага --include-excluded строк не будет — используйте --include-excluded.
+Режимы:
+- CSV (узкий long): нужны --resist-id и -o path.csv.
+- Excel (широкий): --excel path.xlsx — строки resist_id + date, колонки
+  «operation_id 1», «fact_value 1», «operation_id 2», «fact_value 2», …
+  по всем операциям в загруженных данных; опционально --resist-id сужает выборку.
+
+По умолчанию id из EXCLUDED_RESIST_IDS исключаются (как в ноутбуке).
+Для исключённых id без --include-excluded данных не будет.
 """
 
 from __future__ import annotations
@@ -191,17 +197,67 @@ def facts_for_resist(
     return sub[cols]
 
 
+def facts_wide_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Одна строка на пару (resist_id, date): колонки resist_id, date, затем пары
+    «operation_id k», «fact_value k» (k = 1..K), K = максимум операций на одну дату.
+    При нескольких строках на одну операцию в один период берётся последняя запись.
+    """
+    if df.empty:
+        return pd.DataFrame(columns=["resist_id", "date"])
+
+    d = df[["resist_id", "date", "operation_id", "fact_value"]].copy()
+    d = d.dropna(subset=["resist_id", "date"])
+    d["operation_id"] = d["operation_id"].astype(str)
+    d = d.drop_duplicates(subset=["resist_id", "date", "operation_id"], keep="last")
+
+    rows: list[tuple] = []
+    for (rid, dt), g in d.groupby(["resist_id", "date"], sort=True):
+        g = g.sort_values("operation_id", kind="mergesort")
+        pairs = list(zip(g["operation_id"].tolist(), g["fact_value"].tolist()))
+        rows.append((rid, dt, pairs))
+
+    max_k = max((len(p) for _, _, p in rows), default=0)
+    base = ["resist_id", "date"]
+    extra = []
+    for i in range(1, max_k + 1):
+        extra.extend([f"operation_id {i}", f"fact_value {i}"])
+    columns = base + extra
+
+    records = []
+    for rid, dt, pairs in rows:
+        rec: dict = {"resist_id": rid, "date": dt}
+        for i, (op, fv) in enumerate(pairs, start=1):
+            rec[f"operation_id {i}"] = op
+            rec[f"fact_value {i}"] = fv
+        records.append(rec)
+
+    out = pd.DataFrame(records, columns=columns)
+    return out.sort_values(["resist_id", "date"], kind="mergesort").reset_index(drop=True)
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Выгрузка fact_value по operation_id для одного resist_id из data/raw/*.csv."
+        description="Выгрузка fact_value из data/raw/*.csv: CSV по одному resist_id или Excel (широкий формат)."
     )
-    p.add_argument("--resist-id", type=int, required=True, help="Идентификатор resist_id.")
+    p.add_argument(
+        "--resist-id",
+        type=int,
+        default=None,
+        help="Фильтр по resist_id. Обязателен для -o CSV и для режима сводки без --excel.",
+    )
     p.add_argument(
         "-o",
         "--output",
         type=Path,
         default=None,
-        help="Путь к выходному CSV (если не задан — сводка и head в stdout).",
+        help="Выходной CSV (узкий формат); требуется --resist-id.",
+    )
+    p.add_argument(
+        "--excel",
+        type=Path,
+        default=None,
+        help="Выходной .xlsx: resist_id, date, operation_id 1, fact_value 1, ... по всем данным (или после --resist-id). Нужен пакет openpyxl.",
     )
     p.add_argument(
         "--include-excluded",
@@ -225,6 +281,13 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
+    if args.output is not None and args.resist_id is None:
+        print("Для -o/--output укажите --resist-id.", file=sys.stderr)
+        return 2
+    if args.output is None and args.excel is None and args.resist_id is None:
+        print("Укажите --resist-id (сводка/CSV) или --excel (Excel по всем resist_id).", file=sys.stderr)
+        return 2
+
     raw_paths = list(args.raw) if args.raw else default_raw_files()
     try:
         df_model39 = load_model39_from_raw(raw_paths, include_excluded=args.include_excluded)
@@ -236,27 +299,60 @@ def main() -> int:
         print("После загрузки и фильтров датафрейм пуст.", file=sys.stderr)
         return 1
 
-    avail = {int(x) for x in df_model39["resist_id"].dropna().unique()}
-    if args.resist_id not in avail:
-        sample = sorted(avail)[:15]
+    df_work = df_model39
+    if args.resist_id is not None:
+        avail = {int(x) for x in df_model39["resist_id"].dropna().unique()}
+        if args.resist_id not in avail:
+            sample = sorted(avail)[:15]
+            print(
+                f"Нет данных для resist_id={args.resist_id}. "
+                f"Примеры доступных id: {sample}... "
+                f"(для исключённых id попробуйте --include-excluded)",
+                file=sys.stderr,
+            )
+            return 1
+        df_work = df_model39[df_model39["resist_id"] == args.resist_id].copy()
+
+    wrote_file = False
+
+    if args.excel is not None:
+        try:
+            import openpyxl  # noqa: F401
+        except ImportError:
+            print(
+                "Для записи Excel установите openpyxl: pip install openpyxl",
+                file=sys.stderr,
+            )
+            return 1
+        wide = facts_wide_for_excel(df_work)
+        if wide.empty:
+            print("После сведения в широкий формат таблица пуста.", file=sys.stderr)
+            return 1
+        args.excel.parent.mkdir(parents=True, exist_ok=True)
+        wide.to_excel(args.excel, index=False, engine="openpyxl")
+        n_pairs = max(0, (len(wide.columns) - 2) // 2)
         print(
-            f"Нет данных для resist_id={args.resist_id}. "
-            f"Примеры доступных id: {sample}... "
-            f"(для исключённых id попробуйте --include-excluded)",
-            file=sys.stderr,
+            f"Excel: строк={len(wide)}, пар колонок operation_id/fact_value={n_pairs} -> {args.excel}"
         )
-        return 1
+        wrote_file = True
+
+    if args.output is not None:
+        out = facts_for_resist(df_model39, args.resist_id, full_rows=args.full_rows)
+        if out.empty:
+            print(f"Пустая выборка для resist_id={args.resist_id}.", file=sys.stderr)
+            return 1
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        out.to_csv(args.output, index=False)
+        print(f"CSV: строк={len(out)} -> {args.output}")
+        wrote_file = True
+
+    if wrote_file:
+        return 0
 
     out = facts_for_resist(df_model39, args.resist_id, full_rows=args.full_rows)
     if out.empty:
         print(f"Пустая выборка для resist_id={args.resist_id}.", file=sys.stderr)
         return 1
-
-    if args.output is not None:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        out.to_csv(args.output, index=False)
-        print(f"Записано строк: {len(out)} -> {args.output}")
-        return 0
 
     n_ops = out["operation_id"].nunique()
     print(f"resist_id={args.resist_id}: строк={len(out)}, операций (operation_id)={n_ops}")
