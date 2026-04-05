@@ -91,6 +91,27 @@ def svod_technical_key_vtb(
     return f"{base}_{safe}"
 
 
+def depository_fallback_from_source_path(path: Path) -> str:
+    """
+    Резерв для колонки «Депозитарий»: по сегменту пути входного файла.
+    Порядок: RSD → GPB → REGION → VTBSD (без учёта регистра).
+    """
+    p = Path(path)
+    try:
+        parts_upper = {part.upper() for part in p.resolve().parts}
+    except (OSError, RuntimeError):
+        parts_upper = {part.upper() for part in p.parts}
+    for segment, label in (
+        ("RSD", 'ООО "РСД"'),
+        ("GPB", "Банк ГПБ АО"),
+        ("REGION", 'АО "ДК РЕГИОН"'),
+        ("VTBSD", 'АО "ВТБ СД"'),
+    ):
+        if segment in parts_upper:
+            return label
+    return ""
+
+
 def _format_depo_account_cell(acc: str | None) -> str:
     if not acc or not str(acc).strip():
         return ""
@@ -175,7 +196,11 @@ def build_svod_row_from_d(
         f_str = SVOD_DASH
 
     depo_by_client = lookup_depo_row_by_client_id(depo_rows, client_id)
-    depository = (depo_by_client.depository if depo_by_client else "").strip() or SVOD_DASH
+    depository = (depo_by_client.depository if depo_by_client else "").strip()
+    if not depository:
+        depository = depository_fallback_from_source_path(parsed.path).strip()
+    if not depository:
+        depository = SVOD_DASH
 
     acc_for_inst = f_str if f_str != SVOD_DASH else ""
     inst_type = instruction_type_df_dp(acc_for_inst)
@@ -319,7 +344,9 @@ def build_svod_row_rsd(
     )
 
     depo_by_client = lookup_depo_row_by_client_id(depo_rows, client_id)
-    depository = depo_by_client.depository if depo_by_client else ""
+    depository = (depo_by_client.depository if depo_by_client else "").strip()
+    if not depository:
+        depository = depository_fallback_from_source_path(parsed.path).strip()
     owner_row = lookup_depo_row_by_account_number(depo_rows, f_raw)
     owner = owner_row.owner if owner_row else (depo_by_client.owner if depo_by_client else "")
 
@@ -386,7 +413,9 @@ def build_svod_row_r01(
     )
 
     owner_row = lookup_depo_row_by_account_number(depo_rows, f_raw)
-    depository = owner_row.depository if owner_row else ""
+    depository = (owner_row.depository if owner_row else "").strip()
+    if not depository:
+        depository = depository_fallback_from_source_path(result.path).strip()
     owner = owner_row.owner if owner_row else ""
 
     op_date = data.exec_date_display.strip()
@@ -467,7 +496,11 @@ def build_svod_row_vtb(
     )
     depository = (owner_row.depository if owner_row else "").strip()
     if not depository:
-        depository = (parsed.depository_name or "").strip() or SVOD_DASH
+        depository = (parsed.depository_name or "").strip()
+    if not depository:
+        depository = depository_fallback_from_source_path(parsed.path).strip()
+    if not depository:
+        depository = SVOD_DASH
     owner = (owner_row.owner if owner_row else "").strip() or SVOD_DASH
 
     basis_parts: list[str] = []
@@ -544,6 +577,8 @@ def build_svod_row_region(
 
     owner_row = lookup_depo_row_by_account_number(depo_rows, f_raw)
     depository = (owner_row.depository if owner_row else "").strip()
+    if not depository:
+        depository = depository_fallback_from_source_path(result.path).strip()
     owner = (owner_row.owner if owner_row else "").strip()
 
     nrn = (table_row.ngri or "").strip() or SVOD_DASH
