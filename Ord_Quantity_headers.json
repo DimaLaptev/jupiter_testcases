@@ -1,0 +1,43 @@
+{
+  "sheet_name": "Количество поручений",
+  "description": "Схема колонок листа матрицы для привязки индексов в openpyxl; человекочитаемая спека — memory/Ord_Quantity_sheet_spec.md",
+  "id_columns": [
+    { "header": "Депозитарий", "merge_rows": 2 },
+    { "header": "Владелец", "merge_rows": 2 },
+    { "header": "Счет Деп", "merge_rows": 2 }
+  ],
+  "data_groups": [
+    { "merge": "Z", "subheaders": ["Пор.", "Закл"], "instruction_types": ["Z"], "metrics": ["por_keys", "zakl_sum"] },
+    { "merge": "G", "subheaders": ["Пор.", "Закл"], "instruction_types": ["G"], "metrics": ["por_keys", "zakl_sum"] },
+    { "merge": "T", "subheaders": ["Пор.", "Закл"], "instruction_types": ["T"], "metrics": ["por_keys", "zakl_sum"] },
+    { "merge": "Y", "subheaders": ["Пор.", "Закл"], "instruction_types": ["Y"], "metrics": ["por_keys", "zakl_sum"] },
+    { "merge": "P", "subheaders": ["Пор.", "Закл"], "instruction_types": ["P"], "metrics": ["por_keys", "zakl_sum"] },
+    { "merge": "F", "subheaders": ["Пор.", "Закл"], "instruction_types": ["F"], "metrics": ["por_keys", "zakl_sum"] },
+    { "merge": "XP", "subheaders": ["Пор.", "Закл"], "instruction_types": ["XP", "DF"], "metrics": ["por_keys", "zakl_sum"] },
+    { "merge": "XF", "subheaders": ["Пор.", "Закл"], "instruction_types": ["XF", "DP"], "metrics": ["por_keys", "zakl_sum"] },
+    { "merge": "RP", "subheaders": ["Пор.", "Закл"], "instruction_types": ["RP"], "metrics": ["por_keys", "zakl_sum"] },
+    { "merge": "RF", "subheaders": ["Пор.", "Закл"], "instruction_types": ["RF"], "metrics": ["por_keys", "zakl_sum"] },
+    { "merge": "VP", "subheaders": ["Пор.", "Закл"], "instruction_types": ["VP"], "metrics": ["por_keys", "zakl_sum"] },
+    { "merge": "VF", "subheaders": ["Пор.", "Закл"], "instruction_types": ["VF"], "metrics": ["por_keys", "zakl_sum"] },
+    {
+      "merge": "Q",
+      "subheaders": ["Закл", "Лист"],
+      "instruction_types": ["Q"],
+      "metrics": ["zakl_sum", "list_rows"],
+      "skip_por": true
+    },
+    {
+      "merge": "Хранение комплектов",
+      "subheaders": ["в пред", "DF", "DP", "в тек"],
+      "placeholder": true,
+      "source": "TBD_Dks_or_manual"
+    },
+    { "merge": "S(u)", "subheaders": ["Закл", "Лист"], "placeholder": true, "source": "TBD" },
+    { "merge": "S(b)", "subheaders": ["Закл", "Лист"], "placeholder": true, "source": "TBD" },
+    { "merge": "Spr(u)", "subheaders": ["Закл", "Лист"], "placeholder": true, "source": "TBD" },
+    { "merge": "Spr(b)", "subheaders": ["Закл", "Лист"], "placeholder": true, "source": "TBD" },
+    { "merge": "Открытие счета", "subheaders": ["Пор."], "placeholder": true, "source": "TBD" },
+    { "merge": "Назначение УЛ", "subheaders": ["Пор."], "placeholder": true, "source": "TBD" },
+    { "merge": "Прочие расходы в сумме руб.", "subheaders": [""], "placeholder": true, "source": "TBD" }
+  ]
+}
