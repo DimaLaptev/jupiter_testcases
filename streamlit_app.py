@@ -86,7 +86,12 @@ def main() -> None:
     years = sorted(df_all["year"].dropna().astype(int).unique().tolist()) if "year" in df_all.columns else []
     if years:
         y_min, y_max = int(min(years)), int(max(years))
-        year_range = st.sidebar.slider("Год (year range)", y_min, y_max, (y_min, y_max))
+        # Streamlit slider (slider) требует min_value < max_value
+        if y_min == y_max:
+            year_range = (y_min, y_max)
+            st.sidebar.caption(f"Год (year): **{y_min}** — в данных только один год.")
+        else:
+            year_range = st.sidebar.slider("Год (year range)", y_min, y_max, (y_min, y_max))
     else:
         year_range = None
 
