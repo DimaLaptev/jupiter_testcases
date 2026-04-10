@@ -14,6 +14,7 @@ import os
 import sys
 
 from dotenv import load_dotenv
+import requests.exceptions as req_exc
 from requests import Session
 from zeep import Client
 from zeep.exceptions import Fault
@@ -30,6 +31,18 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None or raw == "":
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _hint_wsdl_unreachable(wsdl_url: str) -> None:
+    """Подсказки при ошибке сети на этапе WSDL (не SOAP-вызов)."""
+    logger.error(
+        "Проверьте: доступ к хосту из этой среды (Docker (Docker)/CI, firewall (межсетевой экран), "
+        "VPN, DNS), что порт 443 открыт, и что REGION_WSDL_URL верный."
+    )
+    logger.error(
+        "При необходимости скачайте WSDL локально и укажите file:///путь/к/файлу.wsdl в REGION_WSDL_URL."
+    )
+    logger.error("Текущий URL: %s", wsdl_url)
 
 
 def _log_last_http(last_http: dict[str, object]) -> None:
@@ -70,7 +83,7 @@ def main() -> None:
         last_http["reason"] = getattr(resp, "reason", None) or ""
         try:
             text = resp.text or ""
-            last_http["body_preview"] = text[:100] + ("..." if len(text) > 100 else "")
+            last_http["body_preview"] = text[:2000] + ("..." if len(text) > 2000 else "")
         except Exception as exc:  # noqa: BLE001
             last_http["body_preview"] = f"(не удалось прочитать тело ответа: {exc})"
         return resp
@@ -79,9 +92,38 @@ def main() -> None:
     session.verify = verify_ssl
     session.hooks["response"].append(_on_response)
     transport = Transport(session=session, timeout=120)
-    logger.info("Подключение к WSDL...")
-    client = Client(wsdl=wsdl_url, transport=transport)
-    service = client.service
+
+    try:
+        logger.info("Загрузка WSDL (wsdl), ожидайте...")
+        client = Client(wsdl=wsdl_url, transport=transport)
+        service = client.service
+    except req_exc.ConnectionError as exc:
+        logger.error(
+            "Не удалось подключиться к серверу для загрузки WSDL (ConnectionError): %s",
+            exc,
+        )
+        _hint_wsdl_unreachable(wsdl_url)
+        sys.exit(1)
+    except req_exc.Timeout as exc:
+        logger.error("Таймаут при загрузке WSDL (Timeout): %s", exc)
+        _hint_wsdl_unreachable(wsdl_url)
+        sys.exit(1)
+    except req_exc.SSLError as exc:
+        logger.error("Ошибка SSL при загрузке WSDL (SSLError): %s", exc)
+        logger.error("Попробуйте VERIFY_SSL=0 в .env только для отладки (небезопасно).")
+        sys.exit(1)
+    except OSError as exc:
+        # file:// и недоступный путь
+        logger.error("Ошибка доступа к WSDL (OSError): %s: %s", type(exc).__name__, exc)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "Ошибка при создании SOAP-клиента (zeep Client): %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        _hint_wsdl_unreachable(wsdl_url)
+        sys.exit(1)
 
     try:
         result = service.authentification(login, password)
@@ -92,6 +134,10 @@ def main() -> None:
             getattr(fault, "message", None) or str(fault),
             getattr(fault, "detail", None),
         )
+        _log_last_http(last_http)
+        sys.exit(1)
+    except req_exc.RequestException as exc:
+        logger.error("Сетевая ошибка при authentification (RequestException): %s: %s", type(exc).__name__, exc)
         _log_last_http(last_http)
         sys.exit(1)
     except Exception as exc:  # noqa: BLE001
