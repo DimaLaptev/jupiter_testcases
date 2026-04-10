@@ -1,111 +1,70 @@
 """
-Автономный модуль: рекурсивный прогноз WindowMedian-3 (как train_window_median_per_series в ноутбуках).
+WindowMedian-3.
 
-Не импортирует другие модули проекта. Внешние зависимости: numpy, pandas.
+Вызов: ``window_median_3_operation.start_forecast(operations, resist)``.
 """
 
 from __future__ import annotations
 
-import json
-from typing import Any, Callable, Dict, List, Mapping, Optional, Union
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
 
-OperationLike = Union[int, Any]
+try:
+    from app_history.models import ResistParameterCalculateHistory
+except ImportError:
+    ResistParameterCalculateHistory = None
 
 
 class WindowMedian_3:
-    """
-    Прогноз fact_value по операциям (operations) для resist (id модели):
-    рекурсивная медиана (recursive median) по последним WINDOW_SIZE наблюдениям,
-    горизонт 4 месяца (month start), как в predict у типового production-пайплайна.
-    """
+    """Предсказывает значения количества операций."""
 
     WINDOW_SIZE = 3
 
-    def __init__(
-        self,
-        get_history_rows: Optional[Callable[[Any], List[Mapping[str, Any]]]] = None,
-    ) -> None:
+    def start_forecast(self, operations: list, resist: str) -> dict:
+        """Публичная точка входа для прогноза: `operations`, `resist`.
+
+        Загружает историю, готовит словарь и записывает прогноз WindowMedian-3.
         """
-        get_history_rows(resist) — сырой ответ БД для _format_data.
-        Если None, используется пустой список (start вернёт {} без данных).
+        oper_data = {}
+        for id_oper in operations:
+            oper_data[id_oper] = {}
+
+        query_history_params = self._create_query_history_params(resist)
+        oper_data = self._format_data(oper_data, query_history_params)
+        oper_data_valid = self._delete_null_value(oper_data)
+        self._apply_window_median_forecast(oper_data_valid)
+        return oper_data_valid
+
+    def _conversions_dictionary_in_siries(self, dict_stoty_one_id: dict) -> pd.Series:
         """
-        self.get_history_rows = get_history_rows
-        self._query_override: Optional[List[Mapping[str, Any]]] = None
+        Функция преобразует словарь с историческими данными по одной операции.
+        Преобразование в объект Siries необходимо для обучения модели
 
-    def _create_query_history_params(self, resist: Any) -> List[Mapping[str, Any]]:
-        if self._query_override is not None:
-            return list(self._query_override)
-        if self.get_history_rows is not None:
-            return list(self.get_history_rows(resist))
-        return []
+        Parameters
+        ----------
+        dict_stoty_one_id : dict
+            Словарь, где ключи — даты, значения — количество операций в месяц.
 
-    def _format_data(
-        self,
-        operations: List[OperationLike],
-        query: List[Mapping[str, Any]],
-    ) -> Dict[Any, Dict[pd.Timestamp, float]]:
-        op_ids = {getattr(op, "pk", op) for op in operations}
-        out: Dict[Any, Dict[pd.Timestamp, float]] = {oid: {} for oid in op_ids}
-
-        for row in query:
-            period = row.get("period")
-            if period is None:
-                continue
-            pdt = pd.to_datetime(period)
-            if hasattr(pdt, "to_pydatetime"):
-                pdt = pd.Timestamp(pdt)
-            op_param = row.get("operation_parameter") or {}
-            if isinstance(op_param, str):
-                try:
-                    op_param = json.loads(op_param)
-                except Exception:
-                    op_param = {}
-            if isinstance(op_param, list):
-                for chunk in op_param:
-                    if not isinstance(chunk, dict):
-                        continue
-                    oid = chunk.get("operation_id", chunk.get("id"))
-                    if oid not in out:
-                        continue
-                    fv = chunk.get("fact_value")
-                    if fv is None:
-                        continue
-                    out[oid][pdt.normalize()] = float(fv)
-            elif isinstance(op_param, dict):
-                for oid in op_ids:
-                    if str(oid) in op_param:
-                        sub = op_param[str(oid)]
-                    elif oid in op_param:
-                        sub = op_param[oid]
-                    else:
-                        continue
-                    if isinstance(sub, dict) and "fact_value" in sub:
-                        out[oid][pdt.normalize()] = float(sub["fact_value"])
-        return out
-
-    def _delete_null_value(self, series: pd.Series) -> pd.Series:
-        """Удаление ведущих нулей до первого ненулевого значения."""
-        if series.empty:
-            return series
-        vals = series.values
-        non_zero = np.where(vals != 0)[0]
-        if len(non_zero) == 0:
-            return series
-        first_non_zero = int(non_zero[0])
-        return series.iloc[first_non_zero:].copy()
+        Returns
+        -------
+        training_data : pandas.core.series.Series
+            Одномерный массив, где индекс — даты, значения — количество операций.
+        """
+        training_data = pd.Series(dict_stoty_one_id)
+        training_data.index = pd.to_datetime(training_data.index)
+        return training_data
 
     def _forecast_window_median(
-        self, series: pd.Series, steps: int = 4, *, window_size: Optional[int] = None
+        self, series: pd.Series, steps: int = 4, *, window_size: int | None = None
     ) -> np.ndarray:
         """Рекурсивный прогноз: на каждом шаге median последних window_size значений history."""
         ws = self.WINDOW_SIZE if window_size is None else window_size
         if len(series) == 0:
             return np.array([])
         history = list(series.values.astype(float))
-        fc: List[float] = []
+        fc: list[float] = []
         for _ in range(steps):
             tail = history[-ws:] if len(history) >= ws else history
             if len(tail) == 0:
@@ -115,35 +74,92 @@ class WindowMedian_3:
             history.append(fc[-1])
         return np.maximum(np.asarray(fc, dtype=float), 0.0)
 
-    def _future_periods(self, last_index: pd.Timestamp, k: int = 4) -> pd.DatetimeIndex:
-        last = pd.Timestamp(last_index).to_period("M").to_timestamp()
-        return pd.date_range(last + pd.offsets.MonthBegin(1), periods=k, freq="MS")
+    def _apply_window_median_forecast(self, data_operation: dict) -> None:
+        """Вносит прогноз WindowMedian-3 в словари истории по операциям (после `_delete_null_value`)."""
+        for _, history in data_operation.items():
+            training_data = self._conversions_dictionary_in_siries(history)
+            training_data = training_data.sort_index()
+            training_data = training_data[~training_data.index.duplicated(keep="last")]
+            if len(training_data) == 0:
+                continue
 
-    def start(self, operations: List[OperationLike], resist: Any) -> Dict[Any, Dict[pd.Timestamp, float]]:
+            fc = self._forecast_window_median(training_data, steps=4)
+            if fc.size == 0:
+                continue
+
+            last = pd.Timestamp(training_data.index[-1]).to_period("M").to_timestamp()
+            periods = pd.date_range(last + pd.offsets.MonthBegin(1), periods=4, freq="MS")
+            forecast = pd.Series(fc, index=periods)
+
+            for date_in_dict, value in forecast.items():
+                if isinstance(date_in_dict, datetime):
+                    if value >= 0:
+                        history[date_in_dict.date()] = round(value, 2)
+                    else:
+                        history[date_in_dict.date()] = 0
+                else:
+                    print(" ERROR !!! datetime !!! ")
+                    print(date_in_dict, value)
+
+    def _create_query_history_params(self, resist: str):
+        """Формирует запрос для получения исторических данных по операциям до текущего отчетного периода в рамках определенной модели нагрузки.
+
+        Args:
+            resist: id модели нагрузки
         """
-        Возвращает по операции словарь период -> прогноз (4 следующих месяца от последнего факта).
-        Операции без факта или с нулевой историей после очистки пропускаются.
+        if ResistParameterCalculateHistory is None:
+            raise ImportError(
+                "Ошибка импорта: app_history.models.ResistParameterCalculateHistory"
+            )
+        start_date = datetime.strptime("2022-12-31", r"%Y-%m-%d")
+        now_period = (datetime.today().replace(day=1) - timedelta(days=1)).replace(
+            day=1
+        )
+        return ResistParameterCalculateHistory.objects.filter(
+            resist=int(resist),
+            period__gt=start_date,
+            period__lt=now_period,
+        ).values("period", "operation_parameter").order_by("period")
+
+    def _format_data(self, oper_data: dict, query_history_params) -> dict:
+        """Формируем данные количества операций в разбивке по отчетным периодам для каждой отдельной операции.
+
+        Args:
+            oper_data: словарь с соперациями для заполенения историческими значениями количества операций
+                в рамках каждой отдельной операции по датам
+            query_history_params: Запрос для получения исторических данных параметром операций
+        Return:
+            dict: заполненный oper_data словарь
         """
-        query = self._create_query_history_params(resist)
-        formatted = self._format_data(operations, query)
-        result: Dict[Any, Dict[pd.Timestamp, float]] = {}
+        for data in query_history_params:
+            period = data["period"]
+            param = data["operation_parameter"]
+            for oper in oper_data.keys():
+                if param.get(str(oper)):
+                    oper_data[oper][period] = param.get(str(oper)).get("fact_value")
 
-        for op in operations:
-            op_id = getattr(op, "pk", op)
-            hist_map = formatted.get(op_id, {})
-            if not hist_map:
-                continue
-            series = pd.Series(hist_map)
-            series.index = pd.to_datetime(series.index)
-            series = series.sort_index()
-            series = series[~series.index.duplicated(keep="last")]
-            series = self._delete_null_value(series)
-            if len(series) == 0:
-                continue
-            pred_arr = self._forecast_window_median(series, steps=4)
-            if pred_arr.size == 0:
-                continue
-            periods = self._future_periods(series.index[-1], k=4)
-            result[op_id] = {periods[i]: float(pred_arr[i]) for i in range(min(4, len(pred_arr)))}
+        return oper_data
 
-        return result
+    def _delete_null_value(self, oper_data: dict) -> dict:
+        """Убираем все даты с нулевыми значениями количества операций до первого не нулевого значения.
+
+        Args:
+            oper_data: словарь с количеством операций.
+        Return:
+            dict: очищенные данные
+        """
+        oper_data_valid = {}
+        for oper_id, data in oper_data.items():
+            pairs = list(data.items())
+            i_valid = None
+            for i, d in enumerate(pairs):
+                if d[1] > 0:
+                    i_valid = i
+                    break
+            if i_valid is not None:
+                oper_data_valid[oper_id] = dict(pairs[i_valid:])
+
+        return oper_data_valid
+
+
+window_median_3_operation = WindowMedian_3()
