@@ -1,21 +1,19 @@
 """
 Валидация файлов РСД: счёт депо (depo account) в имени файла в подпапках YYYY_MM/RSD/…
 - D / I / R — отдельный справочник счетов (MSG, из Excel: RSD_DEPO_ACCOUNTS_MSG);
-  D → D_YYMMDD_<цифры>.MSG и т.д.
+  D → D_<любой YYMMDD>_<счёт>.MSG (дата в имени не валидируется, только счёт).
 - REP — свой справочник (из Excel: RSD_DEPO_ACCOUNTS_REP);
-  имена R-01_<YYMMDD>_<цифры> … .xlsx / .xls; дополнительно открывается файл и в ячейке F13
-  ищется период «за DD.MM.YYYY», который должен совпадать с календарным «вчера».
+  имена R-01_<YYMMDD>_<цифры> … .xlsx / .xls
 Отправка отчёта — как validate_gpb_files.py.
 """
 
 import os
 import re
-from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional, Set
+from datetime import datetime
+from typing import Dict, List, Set
 
 from dotenv import load_dotenv
 
-from config_ews import RSD_VALIDATION_RECIPIENT
 from file_handler_config_loader import load_validate_rsd_config
 
 _validate_rsd = load_validate_rsd_config()
@@ -27,11 +25,11 @@ RSD_SUBFOLDERS: List[str] = _validate_rsd["RSD_SUBFOLDERS"]
 _MSG_SUBFOLDERS = frozenset({"D", "I", "R"})
 
 
-def _msg_pattern_for_prefix(file_prefix: str, date_yymmdd: str):
+def _msg_pattern_for_prefix(file_prefix: str):
+    """Имя: {prefix}_YYMMDD_<счёт>.MSG — YYMMDD не проверяется (любые 6 цифр)."""
     esc_p = re.escape(file_prefix)
-    esc_d = re.escape(date_yymmdd)
     return re.compile(
-        rf"^{esc_p}_{esc_d}_(?P<depo>\d+)\.msg$",
+        rf"^{esc_p}_\d{{6}}_(?P<depo>\d+)\.msg$",
         re.IGNORECASE,
     )
 
@@ -39,11 +37,6 @@ def _msg_pattern_for_prefix(file_prefix: str, date_yymmdd: str):
 # R-01_260113_000300044001 ООО….xlsx — блок цифр счёта после второго «_»
 _REP_NAME_RE = re.compile(r"^R-01_\d{6}_(?P<depo>\d+)", re.IGNORECASE)
 _REP_EXTS = (".xlsx", ".xls")
-# Ячейка F13: «за 12.01.2026» (период отчёта для сверки с «вчера»)
-_ZA_DDMMYYYY_IN_F13 = re.compile(
-    r"за\s*(\d{1,2})\.(\d{1,2})\.(\d{4})",
-    re.IGNORECASE,
-)
 
 
 def get_base_path() -> str:
@@ -58,78 +51,6 @@ def get_rsd_month_path() -> str:
     base = get_base_path()
     month_dir = datetime.now().strftime("%Y_%m")
     return os.path.join(base, month_dir, "RSD")
-
-
-def get_yesterday_yymmdd() -> str:
-    """Дата вчера в формате YYMMDD (как в имени .MSG)."""
-    yesterday = datetime.now() - timedelta(days=1)
-    return yesterday.strftime("%y%m%d")
-
-
-def get_yesterday_date() -> date:
-    """Календарное «вчера» (для сверки с датой периода в F13 отчёта REP)."""
-    return (datetime.now() - timedelta(days=1)).date()
-
-
-def _parse_za_date_from_f13_raw(raw: object) -> Optional[date]:
-    """Из значения ячейки F13 получает дату периода (ожидается «за DD.MM.YYYY» или дата Excel)."""
-    if raw is None:
-        return None
-    if isinstance(raw, datetime):
-        return raw.date()
-    if isinstance(raw, date):
-        return raw
-    text = str(raw).strip()
-    m = _ZA_DDMMYYYY_IN_F13.search(text)
-    if m:
-        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        try:
-            return date(y, mo, d)
-        except ValueError:
-            return None
-    return None
-
-
-def _rep_f13_period_equals_yesterday(file_path: str, yesterday: date) -> bool:
-    """
-    Открывает книгу REP (.xlsx / .xls), читает активный лист (active sheet), ячейку F13.
-    Дата периода в F13 должна совпадать с yesterday.
-    """
-    ext = os.path.splitext(file_path)[1].lower()
-    raw: object
-    try:
-        if ext == ".xlsx":
-            from openpyxl import load_workbook
-
-            wb = load_workbook(filename=file_path, data_only=True)
-            try:
-                ws = wb.active
-                raw = ws["F13"].value
-            finally:
-                wb.close()
-        elif ext == ".xls":
-            import xlrd
-
-            book = xlrd.open_workbook(file_path)
-            sheet = book.sheet_by_index(0)
-            raw = sheet.cell_value(12, 5)
-            if isinstance(raw, (int, float)):
-                try:
-                    t = xlrd.xldate_as_tuple(raw, book.datemode)
-                    raw = date(int(t[0]), int(t[1]), int(t[2]))
-                except (xlrd.XLDateError, ValueError, TypeError):
-                    pass
-        else:
-            return False
-    except OSError:
-        return False
-    except Exception:
-        return False
-
-    period = _parse_za_date_from_f13_raw(raw)
-    if period is None and isinstance(raw, date):
-        period = raw
-    return period == yesterday
 
 
 def _normalize_depo(depo_raw: str) -> str:
@@ -155,7 +76,6 @@ def _ordered_expected_for_subfolder(subfolder: str) -> List[str]:
 def find_depo_accounts_in_folder(
     folder_path: str,
     subfolder: str,
-    date_yymmdd: str,
     expected_accounts: Set[str],
 ) -> Set[str]:
     """Сканирует одну подпапку RSD с учётом типа (MSG vs REP)."""
@@ -164,7 +84,6 @@ def find_depo_accounts_in_folder(
         return found
 
     if subfolder == "REP":
-        yesterday_d = get_yesterday_date()
         for name in os.listdir(folder_path):
             lower = name.lower()
             if not lower.endswith(_REP_EXTS):
@@ -173,18 +92,14 @@ def find_depo_accounts_in_folder(
             if not m:
                 continue
             normalized = _normalize_depo(m.group("depo"))
-            if not normalized or normalized not in expected_accounts:
-                continue
-            full_path = os.path.join(folder_path, name)
-            if not _rep_f13_period_equals_yesterday(full_path, yesterday_d):
-                continue
-            found.add(normalized)
+            if normalized and normalized in expected_accounts:
+                found.add(normalized)
         return found
 
     if subfolder not in _MSG_SUBFOLDERS:
         return found
 
-    pattern = _msg_pattern_for_prefix(subfolder, date_yymmdd)
+    pattern = _msg_pattern_for_prefix(subfolder)
     for name in os.listdir(folder_path):
         m = pattern.match(name)
         if not m:
@@ -195,14 +110,14 @@ def find_depo_accounts_in_folder(
     return found
 
 
-def collect_missing_accounts(base_rsd: str, date_yymmdd: str) -> Dict[str, List[str]]:
+def collect_missing_accounts(base_rsd: str) -> Dict[str, List[str]]:
     """Недостающие счета депо по каждой подпапке из конфига."""
     result: Dict[str, List[str]] = {sub: [] for sub in RSD_SUBFOLDERS}
     for sub in RSD_SUBFOLDERS:
         expected = _expected_accounts_for_subfolder(sub)
         ordered = _ordered_expected_for_subfolder(sub)
         folder = os.path.join(base_rsd, sub)
-        found = find_depo_accounts_in_folder(folder, sub, date_yymmdd, expected)
+        found = find_depo_accounts_in_folder(folder, sub, expected)
         missing = [a for a in ordered if a not in found]
         result[sub] = missing
     return result
@@ -224,36 +139,30 @@ def build_email_body(missing_by_folder: Dict[str, List[str]]) -> str:
 
 
 def _send_via_exchangelib(subject: str, html_body: str, to_recipients: str) -> bool:
-    """Отправка через Exchange/EWS (exchangelib), ящик MAIL_1 (см. config_ews)."""
     try:
         from exchangelib import Credentials, Account, DELEGATE, Configuration, Version, Build
         from exchangelib import Message, Mailbox, HTMLBody
         from exchangelib.protocol import BaseProtocol, NoVerifyHTTPAdapter
         from config_ews import (
-            MAIL_1_ADDRESS,
-            MAIL_1_USERNAME,
-            MAIL_1_PASSWORD,
+            MAIL_ADDRESS,
+            MAIL_PASSWORD,
             MAIL_SERVER_NAME,
             USE_AUTODISCOVER,
+            VERIFY_SSL,
         )
     except ImportError:
         return False
 
-    raw_ssl = os.getenv("VERIFY_SSL")
-    verify_ssl = True
-    if raw_ssl is not None and raw_ssl != "":
-        verify_ssl = raw_ssl.strip().lower() in ("1", "true", "yes", "on")
-
-    if not MAIL_1_ADDRESS or not MAIL_1_USERNAME or not MAIL_1_PASSWORD:
+    if not MAIL_ADDRESS or not MAIL_PASSWORD:
         return False
 
     try:
-        if not verify_ssl:
+        if not VERIFY_SSL:
             BaseProtocol.HTTP_ADAPTER_CLS = NoVerifyHTTPAdapter
-        creds = Credentials(username=MAIL_1_USERNAME, password=MAIL_1_PASSWORD)
+        creds = Credentials(username=MAIL_ADDRESS, password=MAIL_PASSWORD)
         if USE_AUTODISCOVER:
             account = Account(
-                primary_smtp_address=MAIL_1_ADDRESS,
+                primary_smtp_address=MAIL_ADDRESS,
                 credentials=creds,
                 autodiscover=True,
                 access_type=DELEGATE,
@@ -265,7 +174,7 @@ def _send_via_exchangelib(subject: str, html_body: str, to_recipients: str) -> b
                 version=Version(build=Build(15, 1)),
             )
             account = Account(
-                primary_smtp_address=MAIL_1_ADDRESS,
+                primary_smtp_address=MAIL_ADDRESS,
                 config=config,
                 autodiscover=False,
                 access_type=DELEGATE,
@@ -316,20 +225,17 @@ def main() -> None:
     load_dotenv()
 
     base_rsd = get_rsd_month_path()
-    date_yymmdd = get_yesterday_yymmdd()
-    recipient = (RSD_VALIDATION_RECIPIENT or "").strip()
+    recipient = os.getenv("RSD_VALIDATION_RECIPIENT") or os.getenv("MAIL_ADDRESS", "")
 
     print("=" * 60)
     print("Проверка файлов РСД (счёт депо в имени)")
     print("=" * 60)
     print(f"Папка: {base_rsd}")
     print(f"Подпапки: {', '.join(RSD_SUBFOLDERS)}")
-    print(f"Дата в имени .MSG (вчера, YYMMDD): {date_yymmdd}")
-    print(f"REP: в F13 дата периода «за DD.MM.YYYY» = вчера ({get_yesterday_date().strftime('%d.%m.%Y')})")
-    print("Шаблоны: D/I/R → {папка}_YYMMDD_<счёт>.MSG; REP → R-01_*_<счёт>*.xlsx/.xls")
+    print("Шаблоны: D/I/R → {папка}_YYMMDD_<счёт>.MSG (дата не проверяется); REP → R-01_*_<счёт>*.xlsx")
     print("=" * 60)
 
-    missing_by_folder = collect_missing_accounts(base_rsd, date_yymmdd)
+    missing_by_folder = collect_missing_accounts(base_rsd)
     all_found = all(not missing_by_folder[f] for f in RSD_SUBFOLDERS)
 
     for folder in RSD_SUBFOLDERS:
@@ -352,7 +258,7 @@ def main() -> None:
     if recipient:
         send_email(subject, html_body, recipient)
     else:
-        print("\n[!] RSD_VALIDATION_RECIPIENT не задан в .env — письмо не отправлено")
+        print("\n[!] RSD_VALIDATION_RECIPIENT или MAIL_ADDRESS не задан в .env — письмо не отправлено")
         print("Тело письма:")
         print(html_body)
 
