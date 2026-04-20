@@ -1,16 +1,22 @@
 """
-Один SOAP-вызов (single SOAP call): getDocumentInfoFromFolderByParams.
-Скрипт автономен от region_api.py — только zeep (zeep) + WSDL (WSDL).
+Сценарий отладки SOAP СЭД Регион без region_api.py (только zeep (zeep) + WSDL (WSDL)).
 
-При отправке в stdout выводится XML тела SOAP-запроса (SOAP request envelope),
-после ответа — XML тела SOAP-ответа (SOAP response envelope). Краткие сообщения — в stderr (logging).
+Порядок (sequence):
+  1. getContractors — список ContractorId / DisplayName;
+  2. для каждого контрагента (contractor) и каждой папки из config_region.EDO_FOLDERS —
+     getDocumentInfoFromFolderByParams (наличие документов в папках (folders)).
+
+В stdout — полный XML SOAP envelope запроса и ответа на каждый вызов.
+Краткие сообщения — в stderr (logging), с обрезкой строк (truncation).
 
 Переменные окружения (environment):
   REGION_LOGIN, REGION_PASSWORD, REGION_WSDL_URL;
   REGION_EDO_DOCUMENT_DATE_FROM / TO — опционально, иначе «вчера» по МСК (pytz);
+  REGION_CONTRACTOR_ID — опционально: обработать только этот ContractorId (после getContractors);
   VERIFY_SSL=0 — только для отладки (небезопасно).
 
 Пример (example):
+  python region_edo_folder_probe.py
   python region_edo_folder_probe.py --contractor-id 12345 --folder InWork
 """
 
@@ -145,16 +151,60 @@ def _parse_document_infos(xml_str: str) -> list[dict]:
     return [dict(elem.attrib) for elem in root.findall(".//DocumentInfo")]
 
 
+def _parse_contractors(xml_str: str) -> list[dict]:
+    """Разбор ответа getContractors (как в region_api, без импорта)."""
+    if not xml_str:
+        return []
+    root = ET.fromstring(xml_str)
+    rows: list[dict] = []
+    for elem in root.findall(".//Contractors"):
+        rows.append({
+            "ContractorId": (elem.get("ContractorId") or "").strip(),
+            "DisplayName": (elem.get("DisplayName") or "").strip(),
+        })
+    return rows
+
+
+def _unique_contractors_by_id(rows: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    out: list[dict] = []
+    for r in rows:
+        cid = r.get("ContractorId") or ""
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        out.append(r)
+    return out
+
+
 def _envelope_to_unicode(env) -> str:
     return lxml_etree.tostring(env, encoding="unicode", pretty_print=True)
 
 
 def _print_stdout(title: str, xml_text: str) -> None:
-    """Полный XML в stdout (stdout), без обрезки — для отладки SOAP."""
     sys.stdout.write(f"\n=== {title} ===\n{xml_text}")
     if not xml_text.endswith("\n"):
         sys.stdout.write("\n")
     sys.stdout.flush()
+
+
+def _print_soap_roundtrip(history: HistoryPlugin, label: str) -> None:
+    """Печать последнего запроса/ответа из HistoryPlugin (после одного RPC (remote procedure call))."""
+    if history.last_sent and "envelope" in history.last_sent:
+        _print_stdout(
+            f"{label} — SOAP XML запроса (request envelope)",
+            _envelope_to_unicode(history.last_sent["envelope"]),
+        )
+    else:
+        logger.warning("%s: нет last_sent envelope.", label)
+
+    if history.last_received and "envelope" in history.last_received:
+        _print_stdout(
+            f"{label} — SOAP XML ответа (response envelope)",
+            _envelope_to_unicode(history.last_received["envelope"]),
+        )
+    else:
+        logger.warning("%s: нет last_received envelope.", label)
 
 
 def _log_fault(exc: Fault) -> None:
@@ -182,7 +232,7 @@ def main() -> None:
     load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="Один вызов getDocumentInfoFromFolderByParams + вывод XML запроса/ответа в stdout.",
+        description="getContractors, затем getDocumentInfoFromFolderByParams по папкам EDO_FOLDERS.",
     )
     parser.add_argument("--login", help="Логин (login); иначе REGION_LOGIN")
     parser.add_argument("--password", help="Пароль (password); иначе REGION_PASSWORD")
@@ -193,21 +243,25 @@ def main() -> None:
     )
     parser.add_argument(
         "--folder",
-        default="ReadyToRegister",
+        default=None,
         choices=EDO_FOLDERS,
-        help="Папка ЭДО (folder)",
+        help="Одна папка ЭДО (folder); если не задано — все из config_region.EDO_FOLDERS",
     )
     parser.add_argument(
         "--contractor-id",
         dest="contractor_id",
-        required=True,
-        help="ContractorId в фильтре (filter) — обязателен (без второго запроса getContractors).",
+        default="",
+        help="Только этот ContractorId; иначе все из getContractors (или REGION_CONTRACTOR_ID)",
     )
     parser.add_argument("--date-from", dest="date_from", default="", help="YYYY-MM-DD")
     parser.add_argument("--date-to", dest="date_to", default="", help="YYYY-MM-DD")
     parser.add_argument("--limit", default="100", help="limit (строка)")
     parser.add_argument("--offset", default="0", help="offset (строка)")
     args = parser.parse_args()
+
+    explicit_filter = (args.contractor_id or "").strip() or (
+        os.getenv("REGION_CONTRACTOR_ID") or ""
+    ).strip()
 
     login, password = _resolve_login_password(args)
     wsdl_url = (args.wsdl or REGION_WSDL_URL or "").strip()
@@ -223,16 +277,13 @@ def main() -> None:
         logger.error("Задайте оба --date-from и --date-to или ни одного.")
         raise SystemExit(1)
 
-    filtr_xml = build_filter_xml(
-        contractor_id=args.contractor_id.strip(),
-        date_from=date_from,
-        date_to=date_to,
-    )
+    folders: list[str] = [args.folder] if args.folder is not None else list(EDO_FOLDERS)
 
     logger.info("WSDL: %s", wsdl_url)
     logger.info("Логин (login): %s", login)
-    logger.info("Папка (folder): %s", args.folder)
-    logger.info("Период (period): %s — %s", date_from, date_to)
+    logger.info("Папки (folders): %s", folders)
+    logger.info("Период (period) DocumentDate: %s — %s", date_from, date_to)
+    logger.info("EDO_FOLDERS из config_region: %s", list(EDO_FOLDERS))
 
     verify_ssl = _env_bool("VERIFY_SSL", True)
     session = Session()
@@ -240,7 +291,7 @@ def main() -> None:
     transport = Transport(session=session, timeout=120)
     history = HistoryPlugin()
 
-    logger.info("Загрузка WSDL и один вызов getDocumentInfoFromFolderByParams…")
+    logger.info("Загрузка WSDL…")
     try:
         client = Client(wsdl=wsdl_url, transport=transport, plugins=[history])
         service = client.service
@@ -251,50 +302,82 @@ def main() -> None:
         logger.error("Ошибка Client: %s: %s", type(exc).__name__, exc)
         raise SystemExit(1) from exc
 
-    xml_result: str | None = None
+    contractors_xml: str | None = None
     try:
-        xml_result = service.getDocumentInfoFromFolderByParams(
-            login,
-            password,
-            args.folder,
-            filtr_xml,
-            str(args.limit),
-            str(args.offset),
-        )
+        contractors_xml = service.getContractors(login, password)
     except Fault as exc:
         _log_fault(exc)
         raise SystemExit(1) from exc
     except req_exc.RequestException as exc:
-        logger.error("Сеть при SOAP: %s", exc)
+        logger.error("Сеть при getContractors: %s", exc)
         raise SystemExit(1) from exc
 
-    if history.last_sent and "envelope" in history.last_sent:
-        _print_stdout(
-            "SOAP XML запроса (outgoing request envelope)",
-            _envelope_to_unicode(history.last_sent["envelope"]),
-        )
-    else:
-        logger.warning("HistoryPlugin: нет last_sent envelope — XML запроса не выведен.")
+    _print_soap_roundtrip(history, "getContractors")
 
-    if history.last_received and "envelope" in history.last_received:
-        _print_stdout(
-            "SOAP XML ответа (incoming response envelope)",
-            _envelope_to_unicode(history.last_received["envelope"]),
-        )
-    else:
-        logger.warning("HistoryPlugin: нет last_received envelope.")
+    raw_rows = _parse_contractors(contractors_xml or "")
+    contractors = _unique_contractors_by_id(raw_rows)
+    logger.info("Контрагентов в ответе (rows): %d, уникальных ContractorId: %d", len(raw_rows), len(contractors))
+    for r in contractors:
+        logger.info("  ContractorId=%s DisplayName=%s", r.get("ContractorId"), r.get("DisplayName"))
 
-    docs = _parse_document_infos(xml_result or "")
-    logger.info("Разбор тела ответа (payload): DocumentInfo записей: %d", len(docs))
-    for i, meta in enumerate(docs[:20], 1):
-        logger.info(
-            "  %d. id=%s file=%s",
-            i,
-            meta.get("DocumentId", ""),
-            (meta.get("DocumentFileName") or meta.get("DocumentDisplayName") or "")[:80],
-        )
-    if len(docs) > 20:
-        logger.info("  … и ещё %d (truncated list in log)", len(docs) - 20)
+    if not contractors:
+        logger.error("Список контрагентов пуст — запросы по папкам не выполняются.")
+        raise SystemExit(1)
+
+    if explicit_filter:
+        contractors = [c for c in contractors if c.get("ContractorId") == explicit_filter]
+        if not contractors:
+            logger.error(
+                "ContractorId=%r не найден среди записей getContractors — проверьте фильтр.",
+                explicit_filter,
+            )
+            raise SystemExit(1)
+        logger.info("Фильтр: только ContractorId=%s", explicit_filter)
+
+    for c in contractors:
+        cid = c.get("ContractorId") or ""
+        cname = c.get("DisplayName") or ""
+        filtr_xml = build_filter_xml(contractor_id=cid, date_from=date_from, date_to=date_to)
+        logger.info("Контрагент (contractor): id=%s name=%s", cid, cname)
+        logger.info("XML фильтра (filter): %s", filtr_xml[:200] + ("…" if len(filtr_xml) > 200 else ""))
+
+        for folder in folders:
+            label = f"getDocumentInfoFromFolderByParams contractor={cid!r} folder={folder!r}"
+            try:
+                xml_result = service.getDocumentInfoFromFolderByParams(
+                    login,
+                    password,
+                    folder,
+                    filtr_xml,
+                    str(args.limit),
+                    str(args.offset),
+                )
+            except Fault as exc:
+                _log_fault(exc)
+                logger.error("Пропуск папки из-за Fault: %s", folder)
+                continue
+            except req_exc.RequestException as exc:
+                logger.error("Сеть при %s: %s", label, exc)
+                continue
+
+            _print_soap_roundtrip(history, label)
+
+            docs = _parse_document_infos(xml_result or "")
+            logger.info(
+                "DocumentInfo в папке (folder) %s для contractor %s: %d",
+                folder,
+                cid,
+                len(docs),
+            )
+            for i, meta in enumerate(docs[:10], 1):
+                logger.info(
+                    "  %d. id=%s file=%s",
+                    i,
+                    meta.get("DocumentId", ""),
+                    (meta.get("DocumentFileName") or meta.get("DocumentDisplayName") or "")[:80],
+                )
+            if len(docs) > 10:
+                logger.info("  … ещё %d записей", len(docs) - 10)
 
     logger.info("Готово (done).")
 
