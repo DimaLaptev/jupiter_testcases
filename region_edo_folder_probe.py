@@ -4,9 +4,12 @@
 Порядок (sequence):
   1. getContractors — список ContractorId / DisplayName;
   2. для каждого контрагента (contractor) и каждой папки из config_region.EDO_FOLDERS —
-     getDocumentInfoFromFolderByParams (наличие документов в папках (folders)).
+     getDocumentInfoFromFolderByParams (наличие документов в папках (folders));
+  3. при флаге --download — для каждого файла (тело документа (body) и вложения (attachments))
+     запрос подтверждения yes в терминале (stdin), затем getDocumentById / getDocumentBody и запись на диск.
 
-В stdout — полный XML SOAP envelope запроса и ответа на каждый вызов.
+В stdout — полный XML SOAP envelope запроса и ответа на каждый вызов списков (getContractors / getDocumentInfoFromFolderByParams).
+Вызовы скачивания не дублируют envelope в stdout (только краткий лог в stderr).
 Краткие сообщения — в stderr (logging), с обрезкой строк (truncation).
 
 Переменные окружения (environment):
@@ -17,12 +20,14 @@
 
 Пример (example):
   python region_edo_folder_probe.py
-  python region_edo_folder_probe.py --contractor-id 12345 --folder InWork
+  python region_edo_folder_probe.py --download --output ./out
+  python region_edo_folder_probe.py --contractor-id 12345 --folder InWork --download
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import logging
 import os
 import sys
@@ -165,6 +170,114 @@ def _parse_contractors(xml_str: str) -> list[dict]:
     return rows
 
 
+def _safe_filename(name: str, document_id: str) -> str:
+    if not name:
+        name = f"document_{document_id}"
+    for ch in r'<>:"/\|?*':
+        name = name.replace(ch, "_")
+    return name
+
+
+def _unique_path(path: str) -> str:
+    if not os.path.exists(path):
+        return path
+    directory, base = os.path.dirname(path), os.path.basename(path)
+    name_part, ext = os.path.splitext(base)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(directory, f"{name_part}_{ts}{ext}")
+
+
+def _prompt_yes(stderr_question: str) -> bool:
+    """Подтверждение в терминале (terminal): y/yes/д/да — да (читает stdin (stdin))."""
+    sys.stderr.write(f"{stderr_question} [y/N]: ")
+    sys.stderr.flush()
+    try:
+        line = sys.stdin.readline()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    if not line:
+        return False
+    return line.strip().lower() in ("y", "yes", "д", "да")
+
+
+def _parse_document_by_id_xml(xml_str: str) -> dict | None:
+    """Разбор ответа getDocumentById (как в region_api, без импорта)."""
+    if not xml_str:
+        return None
+    root = ET.fromstring(xml_str)
+    doc_elem = root.find(".//Document")
+    if doc_elem is None:
+        return None
+    result: dict = dict(doc_elem.attrib)
+    result["body_base64"] = (doc_elem.text or "").strip()
+    signers = [dict(s.attrib) for s in root.findall(".//Signers")]
+    result["signers"] = signers
+    attachments: list[dict] = []
+    for xpath in (".//Attachments/*", ".//Attachment", ".//DocumentAttachment"):
+        for att in root.findall(xpath):
+            att_dict = dict(att.attrib)
+            body = (att.text or "").strip()
+            file_name = (
+                att_dict.get("FileName")
+                or att_dict.get("Name")
+                or att_dict.get("DocumentFileName")
+                or ""
+            )
+            att_id = (
+                att_dict.get("Id")
+                or att_dict.get("AttachmentId")
+                or att_dict.get("DocumentId")
+                or ""
+            )
+            if body or file_name or att_id:
+                attachments.append({
+                    "id": att_id,
+                    "file_name": file_name,
+                    "body_base64": body,
+                })
+    if attachments:
+        result["attachments"] = attachments
+    return result
+
+
+def _fetch_document_by_id(
+    service,
+    login: str,
+    password: str,
+    document_id: str,
+) -> dict | None:
+    try:
+        xml_str = service.getDocumentById(login, password, document_id)
+    except Fault as exc:
+        _log_fault(exc)
+        return None
+    except req_exc.RequestException as exc:
+        logger.error("Сеть при getDocumentById(%s): %s", document_id, exc)
+        return None
+    except ET.ParseError as exc:
+        logger.error("XML parse getDocumentById(%s): %s", document_id, exc)
+        return None
+    try:
+        return _parse_document_by_id_xml(xml_str)
+    except ET.ParseError as exc:
+        logger.error("XML parse ответа getDocumentById(%s): %s", document_id, exc)
+        return None
+
+
+def _fetch_document_body(service, login: str, password: str, document_id: str) -> str | None:
+    try:
+        result = service.getDocumentBody(login, password, document_id)
+    except Fault as exc:
+        _log_fault(exc)
+        return None
+    except req_exc.RequestException as exc:
+        logger.error("Сеть при getDocumentBody(%s): %s", document_id, exc)
+        return None
+    if not result:
+        return None
+    return result
+
+
 def _unique_contractors_by_id(rows: list[dict]) -> list[dict]:
     seen: set[str] = set()
     out: list[dict] = []
@@ -216,6 +329,90 @@ def _log_fault(exc: Fault) -> None:
     )
 
 
+def _interactive_save_document_files(
+    service,
+    login: str,
+    password: str,
+    meta: dict,
+    output_dir: str,
+    context: str,
+) -> None:
+    """
+    Перед каждым сохранением файла — запрос yes в терминале (stdin).
+    Основной файл (main body) и каждое вложение (attachment) — отдельно.
+    """
+    doc_id = (meta.get("DocumentId") or "").strip()
+    if not doc_id:
+        return
+    file_name = meta.get("DocumentFileName", "") or ""
+    display = (meta.get("DocumentDisplayName") or file_name) or doc_id
+    doc_full: dict | None = None
+
+    def ensure_full() -> dict | None:
+        nonlocal doc_full
+        if doc_full is None:
+            doc_full = _fetch_document_by_id(service, login, password, doc_id)
+            if not doc_full:
+                logger.warning("getDocumentById не вернул данные для id=%s", doc_id)
+        return doc_full
+
+    if _prompt_yes(
+        f"[{context}] Скачать основной файл (main file) документа id={doc_id} «{display}»",
+    ):
+        full = ensure_full()
+        if full:
+            body_b64 = (full.get("body_base64") or "").strip()
+            if not body_b64:
+                body_b64 = (_fetch_document_body(service, login, password, doc_id) or "").strip()
+            if body_b64:
+                safe = _safe_filename(file_name, doc_id)
+                path = _unique_path(os.path.join(output_dir, safe))
+                try:
+                    with open(path, "wb") as f:
+                        f.write(base64.b64decode(body_b64))
+                    logger.info("Сохранено: %s (%d байт)", path, os.path.getsize(path))
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Ошибка записи %s: %s", path, exc)
+            else:
+                logger.warning("Нет base64 тела (body) для id=%s", doc_id)
+
+    atts: list[dict] = list((doc_full or {}).get("attachments") or [])
+    if not atts and doc_full is None:
+        if not _prompt_yes(
+            f"[{context}] Запросить getDocumentById для списка вложений (attachments) id={doc_id}?",
+        ):
+            return
+        full = ensure_full()
+        if full:
+            atts = list(full.get("attachments") or [])
+
+    for idx, att in enumerate(atts):
+        att_name = (att.get("file_name") or f"attachment_{idx}") or f"attachment_{idx}"
+        att_id = att.get("id") or str(idx)
+        if not _prompt_yes(
+            f"[{context}] Скачать вложение (attachment) #{idx} «{att_name}» (id={att_id}) к документу id={doc_id}",
+        ):
+            continue
+        full = ensure_full()
+        if not full:
+            break
+        att_b64 = (att.get("body_base64") or "").strip()
+        if not att_b64:
+            logger.warning("Пустое тело вложения idx=%s doc=%s", idx, doc_id)
+            continue
+        base_safe = _safe_filename(file_name, doc_id)
+        name_part, _ = os.path.splitext(base_safe)
+        att_safe = _safe_filename(att_name, att_id)
+        safe_att = f"{name_part}_attachment_{idx}_{att_safe}"
+        path = _unique_path(os.path.join(output_dir, safe_att))
+        try:
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(att_b64))
+            logger.info("Сохранено вложение: %s (%d байт)", path, os.path.getsize(path))
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Ошибка вложения %s: %s", path, exc)
+
+
 def _resolve_login_password(args: argparse.Namespace) -> tuple[str, str]:
     login = (args.login or "").strip() or (REGION_LOGINS[0] if REGION_LOGINS else "")
     password = (args.password or "").strip() or (REGION_PASSWORD or "")
@@ -257,6 +454,16 @@ def main() -> None:
     parser.add_argument("--date-to", dest="date_to", default="", help="YYYY-MM-DD")
     parser.add_argument("--limit", default="100", help="limit (строка)")
     parser.add_argument("--offset", default="0", help="offset (строка)")
+    parser.add_argument(
+        "--download",
+        action="store_true",
+        help="Скачивание тел/вложений: перед каждым файлом запрос yes в терминале (terminal)",
+    )
+    parser.add_argument(
+        "--output",
+        default="region_edo_probe_out",
+        help="Каталог сохранения файлов при --download (output directory)",
+    )
     args = parser.parse_args()
 
     explicit_filter = (args.contractor_id or "").strip() or (
@@ -284,6 +491,9 @@ def main() -> None:
     logger.info("Папки (folders): %s", folders)
     logger.info("Период (period) DocumentDate: %s — %s", date_from, date_to)
     logger.info("EDO_FOLDERS из config_region: %s", list(EDO_FOLDERS))
+    if args.download:
+        os.makedirs(args.output, exist_ok=True)
+        logger.info("Скачивание (download): каталог %s", os.path.abspath(args.output))
 
     verify_ssl = _env_bool("VERIFY_SSL", True)
     session = Session()
@@ -378,6 +588,18 @@ def main() -> None:
                 )
             if len(docs) > 10:
                 logger.info("  … ещё %d записей", len(docs) - 10)
+
+            if args.download:
+                ctx = f"contractor={cid} folder={folder}"
+                for meta in docs:
+                    _interactive_save_document_files(
+                        service,
+                        login,
+                        password,
+                        meta,
+                        args.output,
+                        ctx,
+                    )
 
     logger.info("Готово (done).")
 
