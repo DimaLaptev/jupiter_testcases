@@ -55,8 +55,31 @@ from config_region import (
 )
 
 TERMINAL_LOG_MAX_CHARS = 300
+DOWNLOAD_LOG_MAX_CHARS = 200
 
 logger = logging.getLogger(__name__)
+
+
+def _truncate_download_output(text: str, max_len: int = DOWNLOAD_LOG_MAX_CHARS) -> str:
+    """Обрезка строки для логов при скачивании (download) — не длиннее max_len символов (characters)."""
+    s = "" if text is None else str(text)
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1] + "…"
+
+
+def _log_fault_download(exc: Fault) -> None:
+    """SOAP Fault при getDocumentById / getDocumentBody — сообщение не длиннее DOWNLOAD_LOG_MAX_CHARS."""
+    msg = _truncate_download_output(
+        " ".join(
+            (
+                f"code={getattr(exc, 'code', None)!r}",
+                f"message={(getattr(exc, 'message', None) or str(exc))!r}",
+                f"detail={getattr(exc, 'detail', None)!r}",
+            ),
+        ),
+    )
+    logger.error("SOAP Fault (download): %s", msg)
 
 
 class _TruncatingTerminalFormatter(logging.Formatter):
@@ -249,18 +272,30 @@ def _fetch_document_by_id(
     try:
         xml_str = service.getDocumentById(login, password, document_id)
     except Fault as exc:
-        _log_fault(exc)
+        _log_fault_download(exc)
         return None
     except req_exc.RequestException as exc:
-        logger.error("Сеть при getDocumentById(%s): %s", document_id, exc)
+        logger.error(
+            "Сеть при getDocumentById(%s): %s",
+            document_id,
+            _truncate_download_output(exc),
+        )
         return None
     except ET.ParseError as exc:
-        logger.error("XML parse getDocumentById(%s): %s", document_id, exc)
+        logger.error(
+            "XML parse getDocumentById(%s): %s",
+            document_id,
+            _truncate_download_output(exc),
+        )
         return None
     try:
         return _parse_document_by_id_xml(xml_str)
     except ET.ParseError as exc:
-        logger.error("XML parse ответа getDocumentById(%s): %s", document_id, exc)
+        logger.error(
+            "XML parse ответа getDocumentById(%s): %s",
+            document_id,
+            _truncate_download_output(exc),
+        )
         return None
 
 
@@ -268,10 +303,14 @@ def _fetch_document_body(service, login: str, password: str, document_id: str) -
     try:
         result = service.getDocumentBody(login, password, document_id)
     except Fault as exc:
-        _log_fault(exc)
+        _log_fault_download(exc)
         return None
     except req_exc.RequestException as exc:
-        logger.error("Сеть при getDocumentBody(%s): %s", document_id, exc)
+        logger.error(
+            "Сеть при getDocumentBody(%s): %s",
+            document_id,
+            _truncate_download_output(exc),
+        )
         return None
     if not result:
         return None
@@ -353,7 +392,12 @@ def _interactive_save_document_files(
         if doc_full is None:
             doc_full = _fetch_document_by_id(service, login, password, doc_id)
             if not doc_full:
-                logger.warning("getDocumentById не вернул данные для id=%s", doc_id)
+                logger.warning(
+                    "%s",
+                    _truncate_download_output(
+                        f"getDocumentById не вернул данные для id={doc_id}",
+                    ),
+                )
         return doc_full
 
     if _prompt_yes(
@@ -370,11 +414,22 @@ def _interactive_save_document_files(
                 try:
                     with open(path, "wb") as f:
                         f.write(base64.b64decode(body_b64))
-                    logger.info("Сохранено: %s (%d байт)", path, os.path.getsize(path))
+                    logger.info(
+                        "%s",
+                        _truncate_download_output(
+                            f"Сохранено: {path} ({os.path.getsize(path)} байт)",
+                        ),
+                    )
                 except Exception as exc:  # noqa: BLE001
-                    logger.error("Ошибка записи %s: %s", path, exc)
+                    logger.error(
+                        "%s",
+                        _truncate_download_output(f"Ошибка записи {path}: {exc}"),
+                    )
             else:
-                logger.warning("Нет base64 тела (body) для id=%s", doc_id)
+                logger.warning(
+                    "%s",
+                    _truncate_download_output(f"Нет base64 тела (body) для id={doc_id}"),
+                )
 
     atts: list[dict] = list((doc_full or {}).get("attachments") or [])
     if not atts and doc_full is None:
@@ -398,7 +453,10 @@ def _interactive_save_document_files(
             break
         att_b64 = (att.get("body_base64") or "").strip()
         if not att_b64:
-            logger.warning("Пустое тело вложения idx=%s doc=%s", idx, doc_id)
+            logger.warning(
+                "%s",
+                _truncate_download_output(f"Пустое тело вложения idx={idx} doc={doc_id}"),
+            )
             continue
         base_safe = _safe_filename(file_name, doc_id)
         name_part, _ = os.path.splitext(base_safe)
@@ -408,9 +466,17 @@ def _interactive_save_document_files(
         try:
             with open(path, "wb") as f:
                 f.write(base64.b64decode(att_b64))
-            logger.info("Сохранено вложение: %s (%d байт)", path, os.path.getsize(path))
+            logger.info(
+                "%s",
+                _truncate_download_output(
+                    f"Сохранено вложение: {path} ({os.path.getsize(path)} байт)",
+                ),
+            )
         except Exception as exc:  # noqa: BLE001
-            logger.error("Ошибка вложения %s: %s", path, exc)
+            logger.error(
+                "%s",
+                _truncate_download_output(f"Ошибка вложения {path}: {exc}"),
+            )
 
 
 def _resolve_login_password(args: argparse.Namespace) -> tuple[str, str]:
@@ -493,7 +559,12 @@ def main() -> None:
     logger.info("EDO_FOLDERS из config_region: %s", list(EDO_FOLDERS))
     if args.download:
         os.makedirs(args.output, exist_ok=True)
-        logger.info("Скачивание (download): каталог %s", os.path.abspath(args.output))
+        logger.info(
+            "%s",
+            _truncate_download_output(
+                f"Скачивание (download): каталог {os.path.abspath(args.output)}",
+            ),
+        )
 
     verify_ssl = _env_bool("VERIFY_SSL", True)
     session = Session()
