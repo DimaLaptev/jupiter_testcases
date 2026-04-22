@@ -10,7 +10,7 @@
 import os
 import re
 from datetime import datetime
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Tuple
 
 from dotenv import load_dotenv
 
@@ -54,6 +54,34 @@ def get_rsd_month_path() -> str:
     base = get_base_path()
     month_dir = datetime.now().strftime("%Y_%m")
     return os.path.join(base, month_dir, "RSD")
+
+
+def count_files_by_rsd_type(edo_path: str) -> Dict[str, int]:
+    """
+    Сколько файлов (files) в EDO соответствуют шаблону типа (без фильтра по справочнику счетов).
+    Ключи: D, I, R, R-01.
+    """
+    out = {"D": 0, "I": 0, "R": 0, "R-01": 0}
+    if not os.path.isdir(edo_path):
+        return out
+    p_d = _msg_pattern_for_prefix("D")
+    p_i = _msg_pattern_for_prefix("I")
+    p_r = _msg_pattern_for_prefix("R")
+    for name in os.listdir(edo_path):
+        fp = os.path.join(edo_path, name)
+        if not os.path.isfile(fp):
+            continue
+        lower = name.lower()
+        if lower.endswith(_REP_EXTS) and _REP_NAME_RE.match(name):
+            out["R-01"] += 1
+            continue
+        if p_d.match(name):
+            out["D"] += 1
+        elif p_i.match(name):
+            out["I"] += 1
+        elif p_r.match(name):
+            out["R"] += 1
+    return out
 
 
 def _count_files_in_dir(dir_path: str) -> int:
@@ -137,18 +165,47 @@ def collect_missing_accounts(base_rsd: str) -> Dict[str, List[str]]:
     return result
 
 
-def build_email_body(missing_by_folder: Dict[str, List[str]]) -> str:
-    """Формирует HTML-таблицу для письма."""
+def _html_file_counts_table(file_counts: Dict[str, int]) -> str:
+    """Сводка по количеству (count) найденных файлов по шаблону."""
+    order: List[Tuple[str, str]] = [
+        ("D", "D"),
+        ("I", "I"),
+        ("R", "R"),
+        ("R-01", "R-01"),
+    ]
+    rows = [f"<tr><td>{label}</td><td>{file_counts.get(key, 0)}</td></tr>" for key, label in order]
+    return f"""<p>Найдено файлов по шаблону (pattern):</p>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Тип</th><th>Количество</th></tr>
+{chr(10).join(rows)}
+</table>"""
+
+
+def build_email_html(
+    file_counts: Dict[str, int],
+    missing_by_folder: Dict[str, List[str]],
+) -> str:
+    """HTML письма: сводка по файлам, затем либо успех, либо таблица пропусков."""
+    count_block = _html_file_counts_table(file_counts)
+    if all(not missing_by_folder.get(f) for f in RSD_SUBFOLDERS):
+        return f"""<html><body>
+{count_block}
+<p>Проверка РСД пройдена успешно: по всем счетам депо из справочника в папке EDO
+найдены ожидаемые файлы.</p>
+</body></html>"""
     rows = []
     for folder in RSD_SUBFOLDERS:
         accs = missing_by_folder.get(folder, [])
         accs_str = ", ".join(accs) if accs else "—"
         rows.append(f"<tr><td>{folder}</td><td>{accs_str}</td></tr>")
-    return f"""<html><body>
+    miss_table = f"""<p>Недостающие счета:</p>
 <table border="1" cellpadding="4" cellspacing="0">
 <tr><th>Группа (шаблон)</th><th>Недостающие счета депо</th></tr>
 {chr(10).join(rows)}
-</table>
+</table>"""
+    return f"""<html><body>
+{count_block}
+{miss_table}
 </body></html>"""
 
 
@@ -258,9 +315,13 @@ def main() -> None:
         )
         return
 
+    file_counts = count_files_by_rsd_type(edo)
     missing_by_folder = collect_missing_accounts(base_rsd)
-    all_found = all(not missing_by_folder[f] for f in RSD_SUBFOLDERS)
 
+    print(
+        "Файлов по шаблону: "
+        f"D={file_counts['D']}, I={file_counts['I']}, R={file_counts['R']}, R-01={file_counts['R-01']}"
+    )
     for folder in RSD_SUBFOLDERS:
         missing = missing_by_folder[folder]
         status = "+" if not missing else "-"
@@ -270,13 +331,7 @@ def main() -> None:
         )
 
     subject = "Проверка файлов РСД (счета депо)"
-    if all_found:
-        html_body = (
-            "<html><body>Проверка РСД пройдена успешно, по всем счетам депо из справочника "
-            "найдены ожидаемые файлы в папке EDO.</body></html>"
-        )
-    else:
-        html_body = build_email_body(missing_by_folder)
+    html_body = build_email_html(file_counts, missing_by_folder)
 
     if recipient:
         send_email(subject, html_body, recipient)
