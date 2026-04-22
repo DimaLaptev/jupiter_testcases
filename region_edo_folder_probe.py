@@ -7,7 +7,8 @@
      getDocumentInfoFromFolderByParams (наличие документов в папках (folders));
   3. при флаге --download — перед [y/N] печать в stdout предпросмотра SOAP
      (Client.create_message (zeep) — тот же XML, что уйдёт в getDocumentById / getDocumentBody),
-     затем подтверждение (yes) и реальный вызов API (API call).
+     затем подтверждение (yes) и реальный вызов API (API call);
+     после согласия на скачивание — SOAP-ответ (response) автоматически пишется в .txt (HistoryPlugin).
 
 В stdout — полный XML SOAP envelope запроса и ответа на каждый вызов списков (getContractors / getDocumentInfoFromFolderByParams).
 Вызовы скачивания не дублируют envelope в stdout (только краткий лог в stderr).
@@ -396,6 +397,43 @@ def _print_get_document_body_preview(
     )
 
 
+def _auto_save_last_soap_response_to_txt(
+    history: HistoryPlugin,
+    output_dir: str,
+    operation_tag: str,
+    document_id: str,
+    context: str,
+) -> None:
+    """
+    Сохраняет последний SOAP-ответ (response envelope) из History в .txt (UTF-8) без отдельного prompt,
+    сразу после сетевого вызова (когда пользователь уже ответил yes на скачивание (download)).
+    """
+    if not (history.last_received and "envelope" in history.last_received):
+        return
+    op_safe = "".join(
+        c if c.isalnum() or c in "._-" else "_"
+        for c in (operation_tag or "op")
+    )[:48]
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = f"soap_response_{op_safe}_{document_id}_{ts}.txt"
+    path = _unique_path(os.path.join(output_dir, name))
+    try:
+        text = _envelope_to_unicode(history.last_received["envelope"])
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        logger.info(
+            "%s",
+            _truncate_download_output(
+                f"XML ответа (response) записан: {path} ({os.path.getsize(path)} байт)",
+            ),
+        )
+    except OSError as exc:
+        logger.error(
+            "%s",
+            _truncate_download_output(f"Ошибка записи .txt {path}: {exc}"),
+        )
+
+
 def _print_soap_roundtrip(history: HistoryPlugin, label: str) -> None:
     """Печать последнего запроса/ответа из HistoryPlugin (после одного RPC (remote procedure call))."""
     if history.last_sent and "envelope" in history.last_sent:
@@ -427,6 +465,7 @@ def _log_fault(exc: Fault) -> None:
 def _interactive_save_document_files(
     client: Client,
     service,
+    history: HistoryPlugin,
     login: str,
     password: str,
     meta: dict,
@@ -436,6 +475,7 @@ def _interactive_save_document_files(
     """
     Перед каждым [y/N] — в stdout предпросмотр SOAP-запроса (getDocumentById / getDocumentBody)
     через client.create_message (без сети). После согласия — реальный вызов service.*.
+    После согласия на скачивание/догрузку — XML SOAP-ответа (response) сохраняется в .txt автоматически.
     """
     doc_id = (meta.get("DocumentId") or "").strip()
     if not doc_id:
@@ -455,6 +495,9 @@ def _interactive_save_document_files(
         f"[{context}] Скачать основной файл (main file) документа id={doc_id} «{display}»",
     ):
         doc_full = _fetch_document_by_id(service, login, password, doc_id)
+        _auto_save_last_soap_response_to_txt(
+            history, output_dir, "getDocumentById", doc_id, context,
+        )
         if doc_full:
             body_b64 = (doc_full.get("body_base64") or "").strip()
             if not body_b64:
@@ -468,6 +511,9 @@ def _interactive_save_document_files(
                 body_b64 = (
                     _fetch_document_body(service, login, password, doc_id) or ""
                 ).strip()
+                _auto_save_last_soap_response_to_txt(
+                    history, output_dir, "getDocumentBody", doc_id, context,
+                )
             if body_b64:
                 safe = _safe_filename(file_name, doc_id)
                 path = _unique_path(os.path.join(output_dir, safe))
@@ -507,6 +553,9 @@ def _interactive_save_document_files(
         ):
             return
         doc_full = _fetch_document_by_id(service, login, password, doc_id)
+        _auto_save_last_soap_response_to_txt(
+            history, output_dir, "getDocumentById", doc_id, context,
+        )
         if doc_full:
             atts = list(doc_full.get("attachments") or [])
 
@@ -534,6 +583,9 @@ def _interactive_save_document_files(
             continue
         if doc_full is None:
             doc_full = _fetch_document_by_id(service, login, password, doc_id)
+            _auto_save_last_soap_response_to_txt(
+                history, output_dir, "getDocumentById", doc_id, context,
+            )
         if not doc_full:
             break
         att_b64 = (att.get("body_base64") or "").strip()
@@ -753,6 +805,7 @@ def main() -> None:
                     _interactive_save_document_files(
                         client,
                         service,
+                        history,
                         login,
                         password,
                         meta,
