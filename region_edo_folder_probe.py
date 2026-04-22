@@ -10,8 +10,13 @@
      затем подтверждение (yes) и реальный вызов API (API call);
      после согласия на скачивание — SOAP-ответ (response) автоматически пишется в .txt (HistoryPlugin).
 
-В stdout — полный XML SOAP envelope запроса и ответа на каждый вызов списков (getContractors / getDocumentInfoFromFolderByParams).
+В stdout — полный XML SOAP envelope запроса и ответа на каждый вызов списков (getContractors / getDocumentInfoFromFolderByParams),
+  с усечением (truncation) при длине > SOAP_STDOUT_MAX_CHARS (чтобы консоль не «висла» на мегабайтном XML).
 Вызовы скачивания не дублируют envelope в stdout (только краткий лог в stderr).
+
+Очень большой ответ getDocumentById (бесконечный base64 в XML) раньше мог рвать процесс на ET.fromstring (MemoryError)
+  до сохранения файла; теперь: сначала сохранение SOAP в .txt из History, затем потоковый iterparse при длине
+  ответа ≥ LARGE_GET_DOCUMENT_XML_CHARS или при MemoryError.
 Краткие сообщения — в stderr (logging), с обрезкой строк (truncation).
 
 Переменные окружения (environment):
@@ -33,6 +38,7 @@ import base64
 import logging
 import os
 import sys
+import tempfile
 from datetime import datetime, timedelta
 from typing import Tuple
 from xml.etree import ElementTree as ET
@@ -58,6 +64,10 @@ from config_region import (
 
 TERMINAL_LOG_MAX_CHARS = 300
 DOWNLOAD_LOG_MAX_CHARS = 200
+# Ответ getDocumentById с base64 в XML может превысить лимит DOM в памяти (Memory) — тогда fromstring падает.
+LARGE_GET_DOCUMENT_XML_CHARS = 8_000_000
+# Ограничение вывода в stdout, чтобы среда/терминал (terminal) не замирал на мегабайтном SOAP.
+SOAP_STDOUT_MAX_CHARS = 500_000
 
 logger = logging.getLogger(__name__)
 
@@ -225,11 +235,70 @@ def _prompt_yes(stderr_question: str) -> bool:
     return line.strip().lower() in ("y", "yes", "д", "да")
 
 
+def _local_xml_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
+def _parse_document_by_id_xml_streaming(xml_str: str) -> dict | None:
+    """
+    Потоковый разбор (iterparse) для очень длинного XML: избегает единовременного дерева DOM на весь ответ
+    (часто ломается на большом base64 в <Document>).
+    """
+    path: str | None = None
+    try:
+        fd, path = tempfile.mkstemp(suffix=".xml", prefix="gdi_")
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(xml_str)
+        for _event, elem in ET.iterparse(path, events=("end",)):
+            if _local_xml_name(elem.tag) == "Document":
+                result: dict = dict(elem.attrib)
+                result["body_base64"] = (elem.text or "").strip()
+                result["signers"] = []
+                result["attachments"] = []
+                return result
+            elem.clear()
+    except (MemoryError, OSError) as exc:
+        logger.error(
+            "%s",
+            _truncate_download_output(
+                f"Потоковый разбор getDocumentById: {type(exc).__name__}: {exc}",
+            ),
+        )
+        return None
+    except ET.ParseError as exc:
+        logger.error(
+            "XML parse (streaming) getDocumentById: %s",
+            _truncate_download_output(str(exc)),
+        )
+        return None
+    finally:
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    return None
+
+
 def _parse_document_by_id_xml(xml_str: str) -> dict | None:
     """Разбор ответа getDocumentById (как в region_api, без импорта)."""
     if not xml_str:
         return None
-    root = ET.fromstring(xml_str)
+    if len(xml_str) >= LARGE_GET_DOCUMENT_XML_CHARS:
+        return _parse_document_by_id_xml_streaming(xml_str)
+    try:
+        root = ET.fromstring(xml_str)
+    except MemoryError:
+        logger.warning(
+            "MemoryError при fromstring, переключение на потоковый разбор (iterparse)…",
+        )
+        return _parse_document_by_id_xml_streaming(xml_str)
+    except ET.ParseError as exc:
+        logger.error(
+            "XML parse getDocumentById (корневой): %s",
+            _truncate_download_output(str(exc)),
+        )
+        return None
     doc_elem = root.find(".//Document")
     if doc_elem is None:
         return None
@@ -270,6 +339,10 @@ def _fetch_document_by_id(
     login: str,
     password: str,
     document_id: str,
+    *,
+    history: HistoryPlugin | None = None,
+    output_dir: str | None = None,
+    context: str | None = None,
 ) -> dict | None:
     try:
         xml_str = service.getDocumentById(login, password, document_id)
@@ -283,25 +356,32 @@ def _fetch_document_by_id(
             _truncate_download_output(exc),
         )
         return None
-    except ET.ParseError as exc:
-        logger.error(
-            "XML parse getDocumentById(%s): %s",
-            document_id,
-            _truncate_download_output(exc),
+    if history is not None and output_dir is not None and context is not None:
+        _auto_save_last_soap_response_to_txt(
+            history, output_dir, "getDocumentById", document_id, context,
         )
-        return None
     try:
         return _parse_document_by_id_xml(xml_str)
-    except ET.ParseError as exc:
+    except MemoryError as exc:
         logger.error(
-            "XML parse ответа getDocumentById(%s): %s",
-            document_id,
-            _truncate_download_output(exc),
+            "%s",
+            _truncate_download_output(
+                f"MemoryError при разборе ответа getDocumentById: {exc}",
+            ),
         )
         return None
 
 
-def _fetch_document_body(service, login: str, password: str, document_id: str) -> str | None:
+def _fetch_document_body(
+    service,
+    login: str,
+    password: str,
+    document_id: str,
+    *,
+    history: HistoryPlugin | None = None,
+    output_dir: str | None = None,
+    context: str | None = None,
+) -> str | None:
     try:
         result = service.getDocumentBody(login, password, document_id)
     except Fault as exc:
@@ -314,6 +394,10 @@ def _fetch_document_body(service, login: str, password: str, document_id: str) -
             _truncate_download_output(exc),
         )
         return None
+    if history is not None and output_dir is not None and context is not None:
+        _auto_save_last_soap_response_to_txt(
+            history, output_dir, "getDocumentBody", document_id, context,
+        )
     if not result:
         return None
     return result
@@ -336,6 +420,11 @@ def _envelope_to_unicode(env) -> str:
 
 
 def _print_stdout(title: str, xml_text: str) -> None:
+    n = len(xml_text)
+    if n > SOAP_STDOUT_MAX_CHARS:
+        cut = f"\n\n… [усечение (truncation) до {SOAP_STDOUT_MAX_CHARS} из {n} символов (chars); "
+        cut += "полный ответ (response) см. .txt / лог (log) сервиса.]\n"
+        xml_text = xml_text[:SOAP_STDOUT_MAX_CHARS] + cut
     sys.stdout.write(f"\n=== {title} ===\n{xml_text}")
     if not xml_text.endswith("\n"):
         sys.stdout.write("\n")
@@ -418,19 +507,27 @@ def _auto_save_last_soap_response_to_txt(
     name = f"soap_response_{op_safe}_{document_id}_{ts}.txt"
     path = _unique_path(os.path.join(output_dir, name))
     try:
-        text = _envelope_to_unicode(history.last_received["envelope"])
-        with open(path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
+        env = history.last_received["envelope"]
+        try:
+            lxml_etree.ElementTree(env).write(
+                path, encoding="utf-8", pretty_print=True, xml_declaration=True,
+            )
+        except TypeError:
+            text = _envelope_to_unicode(env)
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
         logger.info(
             "%s",
             _truncate_download_output(
                 f"XML ответа (response) записан: {path} ({os.path.getsize(path)} байт)",
             ),
         )
-    except OSError as exc:
+    except (OSError, MemoryError) as exc:
         logger.error(
             "%s",
-            _truncate_download_output(f"Ошибка записи .txt {path}: {exc}"),
+            _truncate_download_output(
+                f"Ошибка записи .txt {path!r} ({type(exc).__name__}): {exc}",
+            ),
         )
 
 
@@ -494,9 +591,9 @@ def _interactive_save_document_files(
     if _prompt_yes(
         f"[{context}] Скачать основной файл (main file) документа id={doc_id} «{display}»",
     ):
-        doc_full = _fetch_document_by_id(service, login, password, doc_id)
-        _auto_save_last_soap_response_to_txt(
-            history, output_dir, "getDocumentById", doc_id, context,
+        doc_full = _fetch_document_by_id(
+            service, login, password, doc_id,
+            history=history, output_dir=output_dir, context=context,
         )
         if doc_full:
             body_b64 = (doc_full.get("body_base64") or "").strip()
@@ -509,11 +606,11 @@ def _interactive_save_document_files(
                     f"[{context}] Предпросмотр getDocumentBody (тело пусто в getDocumentById), documentId={doc_id!r}",
                 )
                 body_b64 = (
-                    _fetch_document_body(service, login, password, doc_id) or ""
+                    _fetch_document_body(
+                        service, login, password, doc_id,
+                        history=history, output_dir=output_dir, context=context,
+                    ) or ""
                 ).strip()
-                _auto_save_last_soap_response_to_txt(
-                    history, output_dir, "getDocumentBody", doc_id, context,
-                )
             if body_b64:
                 safe = _safe_filename(file_name, doc_id)
                 path = _unique_path(os.path.join(output_dir, safe))
@@ -524,6 +621,13 @@ def _interactive_save_document_files(
                         "%s",
                         _truncate_download_output(
                             f"Сохранено: {path} ({os.path.getsize(path)} байт)",
+                        ),
+                    )
+                except MemoryError as exc:
+                    logger.error(
+                        "%s",
+                        _truncate_download_output(
+                            f"MemoryError при декодировании/записи файла {path!r}: {exc}",
                         ),
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -552,9 +656,9 @@ def _interactive_save_document_files(
             f"[{context}] Запросить getDocumentById для списка вложений (attachments) id={doc_id}?",
         ):
             return
-        doc_full = _fetch_document_by_id(service, login, password, doc_id)
-        _auto_save_last_soap_response_to_txt(
-            history, output_dir, "getDocumentById", doc_id, context,
+        doc_full = _fetch_document_by_id(
+            service, login, password, doc_id,
+            history=history, output_dir=output_dir, context=context,
         )
         if doc_full:
             atts = list(doc_full.get("attachments") or [])
@@ -582,9 +686,9 @@ def _interactive_save_document_files(
         ):
             continue
         if doc_full is None:
-            doc_full = _fetch_document_by_id(service, login, password, doc_id)
-            _auto_save_last_soap_response_to_txt(
-                history, output_dir, "getDocumentById", doc_id, context,
+            doc_full = _fetch_document_by_id(
+                service, login, password, doc_id,
+                history=history, output_dir=output_dir, context=context,
             )
         if not doc_full:
             break
@@ -609,6 +713,13 @@ def _interactive_save_document_files(
                 "%s",
                 _truncate_download_output(
                     f"Сохранено вложение: {path} ({os.path.getsize(path)} байт)",
+                ),
+            )
+        except MemoryError as exc:
+            logger.error(
+                "%s",
+                _truncate_download_output(
+                    f"MemoryError при вложении {path!r}: {exc}",
                 ),
             )
         except Exception as exc:  # noqa: BLE001
