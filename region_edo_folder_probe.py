@@ -5,8 +5,9 @@
   1. getContractors — список ContractorId / DisplayName;
   2. для каждого контрагента (contractor) и каждой папки из config_region.EDO_FOLDERS —
      getDocumentInfoFromFolderByParams (наличие документов в папках (folders));
-  3. при флаге --download — для каждого файла (тело документа (body) и вложения (attachments))
-     запрос подтверждения yes в терминале (stdin), затем getDocumentById / getDocumentBody и запись на диск.
+  3. при флаге --download — перед [y/N] печать в stdout предпросмотра SOAP
+     (Client.create_message (zeep) — тот же XML, что уйдёт в getDocumentById / getDocumentBody),
+     затем подтверждение (yes) и реальный вызов API (API call).
 
 В stdout — полный XML SOAP envelope запроса и ответа на каждый вызов списков (getContractors / getDocumentInfoFromFolderByParams).
 Вызовы скачивания не дублируют envelope в stdout (только краткий лог в stderr).
@@ -340,6 +341,61 @@ def _print_stdout(title: str, xml_text: str) -> None:
     sys.stdout.flush()
 
 
+def _print_soap_request_preview(
+    client: Client,
+    operation_name: str,
+    heading: str,
+    args: tuple,
+) -> None:
+    """
+    Тот же payload (payload), что уйдёт в zeep в service.<operation_name>(*args),
+    без сети: Client.create_message (см. zeep) строит envelope (SOAP envelope).
+    """
+    try:
+        envelope = client.create_message(client.service, operation_name, *args)
+        xml_text = lxml_etree.tostring(
+            envelope, encoding="unicode", pretty_print=True,
+        )
+        _print_stdout(heading, xml_text)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "%s",
+            _truncate_download_output(
+                f"Предпросмотр SOAP (preview) {operation_name} не сформирован: {exc}",
+            ),
+        )
+
+
+def _print_get_document_id_preview(
+    client: Client,
+    login: str,
+    password: str,
+    document_id: str,
+    heading: str,
+    *,
+    stderr_note: str | None = None,
+) -> None:
+    """GET getDocumentById: показ XML запроса (request), затем вопрос [y/N] в отдельной строке."""
+    if stderr_note:
+        sys.stderr.write(stderr_note + "\n")
+        sys.stderr.flush()
+    _print_soap_request_preview(
+        client, "getDocumentById", heading, (login, password, document_id),
+    )
+
+
+def _print_get_document_body_preview(
+    client: Client,
+    login: str,
+    password: str,
+    document_id: str,
+    heading: str,
+) -> None:
+    _print_soap_request_preview(
+        client, "getDocumentBody", heading, (login, password, document_id),
+    )
+
+
 def _print_soap_roundtrip(history: HistoryPlugin, label: str) -> None:
     """Печать последнего запроса/ответа из HistoryPlugin (после одного RPC (remote procedure call))."""
     if history.last_sent and "envelope" in history.last_sent:
@@ -369,6 +425,7 @@ def _log_fault(exc: Fault) -> None:
 
 
 def _interactive_save_document_files(
+    client: Client,
     service,
     login: str,
     password: str,
@@ -377,8 +434,8 @@ def _interactive_save_document_files(
     context: str,
 ) -> None:
     """
-    Перед каждым сохранением файла — запрос yes в терминале (stdin).
-    Основной файл (main body) и каждое вложение (attachment) — отдельно.
+    Перед каждым [y/N] — в stdout предпросмотр SOAP-запроса (getDocumentById / getDocumentBody)
+    через client.create_message (без сети). После согласия — реальный вызов service.*.
     """
     doc_id = (meta.get("DocumentId") or "").strip()
     if not doc_id:
@@ -387,27 +444,30 @@ def _interactive_save_document_files(
     display = (meta.get("DocumentDisplayName") or file_name) or doc_id
     doc_full: dict | None = None
 
-    def ensure_full() -> dict | None:
-        nonlocal doc_full
-        if doc_full is None:
-            doc_full = _fetch_document_by_id(service, login, password, doc_id)
-            if not doc_full:
-                logger.warning(
-                    "%s",
-                    _truncate_download_output(
-                        f"getDocumentById не вернул данные для id={doc_id}",
-                    ),
-                )
-        return doc_full
-
+    _print_get_document_id_preview(
+        client,
+        login,
+        password,
+        doc_id,
+        f"[{context}] Предпросмотр getDocumentById (основной файл, main), documentId={doc_id!r}",
+    )
     if _prompt_yes(
         f"[{context}] Скачать основной файл (main file) документа id={doc_id} «{display}»",
     ):
-        full = ensure_full()
-        if full:
-            body_b64 = (full.get("body_base64") or "").strip()
+        doc_full = _fetch_document_by_id(service, login, password, doc_id)
+        if doc_full:
+            body_b64 = (doc_full.get("body_base64") or "").strip()
             if not body_b64:
-                body_b64 = (_fetch_document_body(service, login, password, doc_id) or "").strip()
+                _print_get_document_body_preview(
+                    client,
+                    login,
+                    password,
+                    doc_id,
+                    f"[{context}] Предпросмотр getDocumentBody (тело пусто в getDocumentById), documentId={doc_id!r}",
+                )
+                body_b64 = (
+                    _fetch_document_body(service, login, password, doc_id) or ""
+                ).strip()
             if body_b64:
                 safe = _safe_filename(file_name, doc_id)
                 path = _unique_path(os.path.join(output_dir, safe))
@@ -428,34 +488,61 @@ def _interactive_save_document_files(
             else:
                 logger.warning(
                     "%s",
-                    _truncate_download_output(f"Нет base64 тела (body) для id={doc_id}"),
+                    _truncate_download_output(
+                        f"Нет base64 тела (body) для id={doc_id}",
+                    ),
                 )
 
     atts: list[dict] = list((doc_full or {}).get("attachments") or [])
     if not atts and doc_full is None:
+        _print_get_document_id_preview(
+            client,
+            login,
+            password,
+            doc_id,
+            f"[{context}] Предпросмотр getDocumentById (список вложений, attachments), documentId={doc_id!r}",
+        )
         if not _prompt_yes(
             f"[{context}] Запросить getDocumentById для списка вложений (attachments) id={doc_id}?",
         ):
             return
-        full = ensure_full()
-        if full:
-            atts = list(full.get("attachments") or [])
+        doc_full = _fetch_document_by_id(service, login, password, doc_id)
+        if doc_full:
+            atts = list(doc_full.get("attachments") or [])
 
     for idx, att in enumerate(atts):
         att_name = (att.get("file_name") or f"attachment_{idx}") or f"attachment_{idx}"
         att_id = att.get("id") or str(idx)
+        cached_note: str | None = None
+        if doc_full is not None:
+            cached_note = (
+                f"[{context}] Справка: вложение из уже полученного ответа getDocumentById; "
+                f"ниже — тот же шаблон запроса, повторно SOAP при сохранении вложения не отправляется. "
+                f"documentId={doc_id!r} attachmentIndex={idx}"
+            )
+        _print_get_document_id_preview(
+            client,
+            login,
+            password,
+            doc_id,
+            f"[{context}] Предпросмотр getDocumentById (вложение (attachment) #{idx} «{att_name}»), documentId={doc_id!r}",
+            stderr_note=cached_note,
+        )
         if not _prompt_yes(
             f"[{context}] Скачать вложение (attachment) #{idx} «{att_name}» (id={att_id}) к документу id={doc_id}",
         ):
             continue
-        full = ensure_full()
-        if not full:
+        if doc_full is None:
+            doc_full = _fetch_document_by_id(service, login, password, doc_id)
+        if not doc_full:
             break
         att_b64 = (att.get("body_base64") or "").strip()
         if not att_b64:
             logger.warning(
                 "%s",
-                _truncate_download_output(f"Пустое тело вложения idx={idx} doc={doc_id}"),
+                _truncate_download_output(
+                    f"Пустое тело вложения idx={idx} doc={doc_id}",
+                ),
             )
             continue
         base_safe = _safe_filename(file_name, doc_id)
@@ -664,6 +751,7 @@ def main() -> None:
                 ctx = f"contractor={cid} folder={folder}"
                 for meta in docs:
                     _interactive_save_document_files(
+                        client,
                         service,
                         login,
                         password,
