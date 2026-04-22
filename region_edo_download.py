@@ -44,6 +44,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 100
+# Кусок base64 при decode в файл: кратен 4, снижает пик памяти (memory) на b64decode.
+B64_FILE_WRITE_CHUNK = 4 * 1024 * 1024
 
 
 def _yesterday_range() -> Tuple[str, str]:
@@ -105,6 +107,148 @@ def _safe_filename(name: str, document_id: str) -> str:
     return name
 
 
+def _b64decode_write_streaming(path: str, b64: str) -> None:
+    """
+    Декодирование base64 в файл порциями (chunked decode), без одного b64decode на весь ответ.
+    Куски кратны 4; последний кусок дополняется padding (padding) до кратности 4.
+    """
+    s = (b64 or "").replace("\n", "").replace("\r", "").replace(" ", "")
+    if not s:
+        raise ValueError("пустая base64 строка")
+    chunk = B64_FILE_WRITE_CHUNK
+    if chunk % 4 != 0:
+        chunk = (chunk // 4) * 4
+    with open(path, "wb") as f:
+        i = 0
+        n = len(s)
+        while i < n:
+            block = s[i : i + chunk]
+            i += len(block)
+            rest = len(block) % 4
+            if rest:
+                block = block + ("=" * (4 - rest))
+            f.write(base64.b64decode(block, validate=True))
+
+
+def _base_meta_dict(
+    doc_id: str,
+    safe_name: str,
+    filepath: str,
+    size: int,
+    region_login: str,
+    contractor_name: str,
+    folder: str,
+    display_name: str,
+    doc_meta: dict,
+) -> dict:
+    return {
+        "document_id": doc_id,
+        "filename": safe_name,
+        "filepath": filepath,
+        "size": size,
+        "login": region_login,
+        "contractor": contractor_name,
+        "folder": folder,
+        "display_name": display_name,
+        "document_date": doc_meta.get("DocumentDate", ""),
+    }
+
+
+def _download_one_document(
+    api: RegionApiClient,
+    doc_id: str,
+    file_name: str,
+    display_name: str,
+    doc_meta: dict,
+    output_dir: str,
+    region_login: str,
+    contractor_name: str,
+    folder: str,
+) -> list[dict]:
+    """
+    Сначала getDocumentBody (getDocumentBody) — без огромного XML getDocumentById;
+    при успехе тело (body) пишем без повторного getDocumentById для основного файла.
+    Иначе: getDocumentById (getDocumentById) → при пустом body в XML снова getDocumentBody.
+    При успехе только getDocumentBody для тела, getDocumentById вызывается отдельно
+    для списка вложений (attachments) (возможен тяжёлый ответ; основной файл уже на диске).
+    """
+    downloaded: list[dict] = []
+    saved_count = 0
+
+    first_gdb = api.get_document_body(doc_id)
+    s_gdb = (first_gdb or "").strip()
+    main_from_gdb = bool(s_gdb)
+    doc_full: dict | None = None
+    body_main = ""
+
+    if main_from_gdb:
+        body_main = s_gdb
+    else:
+        doc_full = api.get_document_by_id(doc_id)
+        body_main = (doc_full.get("body_base64") or "").strip() if doc_full else ""
+        if not body_main:
+            body_main = (api.get_document_body(doc_id) or "").strip()
+
+    if body_main:
+        safe_name = _safe_filename(file_name, doc_id)
+        filepath = os.path.join(output_dir, safe_name)
+        if os.path.exists(filepath):
+            name_part, ext = os.path.splitext(safe_name)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_name = f"{name_part}_{ts}{ext}"
+            filepath = os.path.join(output_dir, safe_name)
+        _b64decode_write_streaming(filepath, body_main)
+        size = os.path.getsize(filepath)
+        logger.info("    Сохранён: %s (%d байт)", filepath, size)
+        downloaded.append(
+            _base_meta_dict(
+                doc_id, safe_name, filepath, size, region_login,
+                contractor_name, folder, display_name, doc_meta,
+            ),
+        )
+        saved_count += 1
+        if main_from_gdb:
+            doc_full = api.get_document_by_id(doc_id)
+            if doc_full is None:
+                logger.warning(
+                    "    getDocumentById не удалось для id=%s — вложения (attachments) недоступны "
+                    "(основной файл уже сохранён через getDocumentBody).",
+                    doc_id,
+                )
+    for idx, att in enumerate((doc_full or {}).get("attachments", [])):
+        att_b64 = att.get("body_base64")
+        if not att_b64 or not (att_b64 or "").strip():
+            _log_skipped_attachment(att, idx, doc_id)
+            continue
+        att_name = att.get("file_name") or f"attachment_{idx}"
+        base_safe = _safe_filename(file_name, doc_id)
+        name_part, _ = os.path.splitext(base_safe)
+        att_safe = _safe_filename(att_name, att.get("id", str(idx)))
+        safe_att_name = f"{name_part}_attachment_{idx}_{att_safe}"
+        att_path = os.path.join(output_dir, safe_att_name)
+        if os.path.exists(att_path):
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_att_name = f"{name_part}_attachment_{idx}_{ts}_{att_safe}"
+            att_path = os.path.join(output_dir, safe_att_name)
+        _b64decode_write_streaming(att_path, att_b64)
+        att_size = os.path.getsize(att_path)
+        logger.info("    Сохранено вложение: %s (%d байт)", att_path, att_size)
+        downloaded.append(
+            _base_meta_dict(
+                doc_id, safe_att_name, att_path, att_size, region_login,
+                contractor_name, folder, display_name, doc_meta,
+            ),
+        )
+        saved_count += 1
+
+    if saved_count == 0:
+        logger.warning(
+            "    Тело документа (body) id=%s пустое и вложений не найдено — пропуск", doc_id,
+        )
+
+    return downloaded
+
+
 def _contractor_map_from_api(api: RegionApiClient) -> dict[str, str]:
     """
     Возвращает {DisplayName: ContractorId} для всех записей getContractors
@@ -162,15 +306,8 @@ def _download_documents_from_folder(
         date_to=date_to,
     )
 
-    total_api = api.get_total_documents_count(folder, filtr)
-    logger.info(
-        "  [%s] папка '%s' — getTotalDocumentsCount (API)=%d",
-        contractor_name, folder, total_api,
-    )
-
     downloaded: list[dict] = []
     offset = 0
-    fetched_meta_count = 0
 
     while True:
         docs = api.get_document_info_from_folder(
@@ -186,8 +323,6 @@ def _download_documents_from_folder(
                 )
             break
 
-        fetched_meta_count += len(docs)
-
         if offset == 0:
             logger.info("  [%s] папка '%s' — загрузка документов...", contractor_name, folder)
 
@@ -200,85 +335,20 @@ def _download_documents_from_folder(
                 "    Скачивание: id=%s  '%s'", doc_id, display_name,
             )
 
-            doc_full = api.get_document_by_id(doc_id)
-            body_b64 = None
-            if doc_full:
-                body_b64 = doc_full.get('body_base64')
-            if not body_b64:
-                body_b64 = api.get_document_body(doc_id)
-
-            saved_count = 0
-            if body_b64:
-                safe_name = _safe_filename(file_name, doc_id)
-                filepath = os.path.join(output_dir, safe_name)
-                if os.path.exists(filepath):
-                    name_part, ext = os.path.splitext(safe_name)
-                    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    safe_name = f"{name_part}_{ts}{ext}"
-                    filepath = os.path.join(output_dir, safe_name)
-                with open(filepath, 'wb') as f:
-                    f.write(base64.b64decode(body_b64))
-                size = os.path.getsize(filepath)
-                logger.info("    Сохранён: %s (%d байт)", filepath, size)
-                downloaded.append({
-                    'document_id': doc_id,
-                    'filename': safe_name,
-                    'filepath': filepath,
-                    'size': size,
-                    'login': region_login,
-                    'contractor': contractor_name,
-                    'folder': folder,
-                    'display_name': display_name,
-                    'document_date': doc_meta.get('DocumentDate', ''),
-                })
-                saved_count += 1
-
-            for idx, att in enumerate(doc_full.get('attachments', []) if doc_full else []):
-                att_b64 = att.get('body_base64')
-                if not att_b64:
-                    _log_skipped_attachment(att, idx, doc_id)
-                    continue
-                att_name = att.get('file_name') or f"attachment_{idx}"
-                base_safe = _safe_filename(file_name, doc_id)
-                name_part, _ = os.path.splitext(base_safe)
-                att_safe = _safe_filename(att_name, att.get('id', str(idx)))
-                safe_att_name = f"{name_part}_attachment_{idx}_{att_safe}"
-                att_path = os.path.join(output_dir, safe_att_name)
-                if os.path.exists(att_path):
-                    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    safe_att_name = f"{name_part}_attachment_{idx}_{ts}_{att_safe}"
-                    att_path = os.path.join(output_dir, safe_att_name)
-                with open(att_path, 'wb') as f:
-                    f.write(base64.b64decode(att_b64))
-                att_size = os.path.getsize(att_path)
-                logger.info("    Сохранено вложение: %s (%d байт)", att_path, att_size)
-                downloaded.append({
-                    'document_id': doc_id,
-                    'filename': safe_att_name,
-                    'filepath': att_path,
-                    'size': att_size,
-                    'login': region_login,
-                    'contractor': contractor_name,
-                    'folder': folder,
-                    'display_name': display_name,
-                    'document_date': doc_meta.get('DocumentDate', ''),
-                })
-                saved_count += 1
-
-            if saved_count == 0:
-                logger.warning(
-                    "    Тело документа (body) id=%s пустое и вложений не найдено — пропуск", doc_id,
-                )
+            batch = _download_one_document(
+                api=api,
+                doc_id=doc_id,
+                file_name=file_name,
+                display_name=display_name,
+                doc_meta=doc_meta,
+                output_dir=output_dir,
+                region_login=region_login,
+                contractor_name=contractor_name,
+                folder=folder,
+            )
+            downloaded.extend(batch)
 
         offset += PAGE_SIZE
-
-    if total_api != fetched_meta_count:
-        logger.warning(
-            "  [%s] папка '%s' — расхождение (mismatch): getTotalDocumentsCount=%d, "
-            "собрано элементов DocumentInfo по страницам=%d "
-            "(пагинация (pagination) limit/offset или ответ сервера).",
-            contractor_name, folder, total_api, fetched_meta_count,
-        )
 
     return downloaded
 
@@ -330,75 +400,18 @@ def _download_documents_from_archive(
 
         logger.info("    Скачивание: id=%s  '%s'", doc_id, display_name)
 
-        doc_full = api.get_document_by_id(doc_id)
-        body_b64 = None
-        if doc_full:
-            body_b64 = doc_full.get('body_base64')
-        if not body_b64:
-            body_b64 = api.get_document_body(doc_id)
-
-        saved_count = 0
-        if body_b64:
-            safe_name = _safe_filename(file_name, doc_id)
-            filepath = os.path.join(output_dir, safe_name)
-            if os.path.exists(filepath):
-                name_part, ext = os.path.splitext(safe_name)
-                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                safe_name = f"{name_part}_{ts}{ext}"
-                filepath = os.path.join(output_dir, safe_name)
-            with open(filepath, 'wb') as f:
-                f.write(base64.b64decode(body_b64))
-            size = os.path.getsize(filepath)
-            logger.info("    Сохранён: %s (%d байт)", filepath, size)
-            downloaded.append({
-                'document_id': doc_id,
-                'filename': safe_name,
-                'filepath': filepath,
-                'size': size,
-                'login': region_login,
-                'contractor': contractor_name,
-                'folder': archive_label,
-                'display_name': display_name,
-                'document_date': doc_meta.get('DocumentDate', ''),
-            })
-            saved_count += 1
-
-        for idx, att in enumerate(doc_full.get('attachments', []) if doc_full else []):
-            att_b64 = att.get('body_base64')
-            if not att_b64:
-                _log_skipped_attachment(att, idx, doc_id)
-                continue
-            att_name = att.get('file_name') or f"attachment_{idx}"
-            base_safe = _safe_filename(file_name, doc_id)
-            name_part, _ = os.path.splitext(base_safe)
-            att_safe = _safe_filename(att_name, att.get('id', str(idx)))
-            safe_att_name = f"{name_part}_attachment_{idx}_{att_safe}"
-            att_path = os.path.join(output_dir, safe_att_name)
-            if os.path.exists(att_path):
-                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                safe_att_name = f"{name_part}_attachment_{idx}_{ts}_{att_safe}"
-                att_path = os.path.join(output_dir, safe_att_name)
-            with open(att_path, 'wb') as f:
-                f.write(base64.b64decode(att_b64))
-            att_size = os.path.getsize(att_path)
-            logger.info("    Сохранено вложение: %s (%d байт)", att_path, att_size)
-            downloaded.append({
-                'document_id': doc_id,
-                'filename': safe_att_name,
-                'filepath': att_path,
-                'size': att_size,
-                'login': region_login,
-                'contractor': contractor_name,
-                'folder': archive_label,
-                'display_name': display_name,
-                'document_date': doc_meta.get('DocumentDate', ''),
-            })
-            saved_count += 1
-
-        if saved_count == 0:
-            logger.warning(
-                "    Тело документа (body) id=%s пустое и вложений не найдено — пропуск", doc_id,
-            )
+        batch = _download_one_document(
+            api=api,
+            doc_id=doc_id,
+            file_name=file_name,
+            display_name=display_name,
+            doc_meta=doc_meta,
+            output_dir=output_dir,
+            region_login=region_login,
+            contractor_name=contractor_name,
+            folder=archive_label,
+        )
+        downloaded.extend(batch)
 
     return downloaded
 

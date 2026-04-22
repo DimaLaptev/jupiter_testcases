@@ -11,6 +11,7 @@ SOAP-клиент (client) для web-службы интеграции СЭД �
 
 import logging
 import os
+import tempfile
 from typing import List, Optional
 
 from xml.etree import ElementTree as ET
@@ -23,14 +24,133 @@ from requests import Session
 
 logger = logging.getLogger(__name__)
 
+# Ответ getDocumentById (XML) с длиной ≥ этого — разбор через iterparse, без DOM на весь ответ.
+LARGE_GET_DOCUMENT_XML_CHARS = 8_000_000
+
+
+def _default_soap_timeout_seconds() -> int:
+    """
+    Таймаут (timeout) HTTP/Transport: переменная окружения (environment) REGION_SOAP_TIMEOUT (сек);
+    по умолчанию 600; допустимый диапазон (range) 60..7200.
+    """
+    raw = os.getenv("REGION_SOAP_TIMEOUT", "").strip()
+    if not raw:
+        return 600
+    try:
+        return max(60, min(int(raw), 7200))
+    except ValueError:
+        return 600
+
+
+def _local_xml_tag_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
+def _parse_get_document_by_id_xml_streaming(xml_str: str) -> Optional[dict]:
+    """
+    Потоковый разбор (iterparse) крупного XML: избегает единовременного дерева DOM
+    (часто ломается на большом base64 в <Document>). Вложения (attachments) и подписи (signers)
+    в этом режиме пусты — догружайте getDocumentById при небольшом ответе или getDocumentBody.
+    """
+    path: Optional[str] = None
+    try:
+        fd, path = tempfile.mkstemp(suffix=".xml", prefix="gdi_")
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(xml_str)
+        for _event, elem in ET.iterparse(path, events=("end",)):
+            if _local_xml_tag_name(elem.tag) == "Document":
+                result: dict = dict(elem.attrib)
+                result["body_base64"] = (elem.text or "").strip()
+                result["signers"] = []
+                result["attachments"] = []
+                return result
+            elem.clear()
+    except (MemoryError, OSError) as exc:
+        logger.error(
+            "getDocumentById: потоковый XML (streaming): %s: %s",
+            type(exc).__name__, exc,
+        )
+        return None
+    except ET.ParseError as exc:
+        logger.error("getDocumentById: XML parse (streaming): %s", exc)
+        return None
+    finally:
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    return None
+
+
+def _parse_get_document_by_id_xml(xml_str: str, document_id: str) -> Optional[dict]:
+    if not xml_str:
+        return None
+    if len(xml_str) >= LARGE_GET_DOCUMENT_XML_CHARS:
+        return _parse_get_document_by_id_xml_streaming(xml_str)
+    try:
+        root = ET.fromstring(xml_str)
+    except MemoryError:
+        logger.warning(
+            "getDocumentById(%s): MemoryError при fromstring, переключение на iterparse…",
+            document_id,
+        )
+        return _parse_get_document_by_id_xml_streaming(xml_str)
+    except ET.ParseError as exc:
+        logger.error("getDocumentById(%s): %s", document_id, exc)
+        return None
+    doc_elem = root.find(".//Document")
+    if doc_elem is None:
+        return None
+
+    result = dict(doc_elem.attrib)
+    result["body_base64"] = (doc_elem.text or "").strip()
+
+    signers = []
+    for s in root.findall(".//Signers"):
+        signers.append(dict(s.attrib))
+    result["signers"] = signers
+
+    attachments: list[dict] = []
+    for xpath in (".//Attachments/*", ".//Attachment", ".//DocumentAttachment"):
+        for att in root.findall(xpath):
+            att_dict = dict(att.attrib)
+            body = (att.text or "").strip()
+            file_name = (
+                att_dict.get("FileName")
+                or att_dict.get("Name")
+                or att_dict.get("DocumentFileName")
+                or ""
+            )
+            att_id = (
+                att_dict.get("Id")
+                or att_dict.get("AttachmentId")
+                or att_dict.get("DocumentId")
+                or ""
+            )
+            if body or file_name or att_id:
+                attachments.append({
+                    "id": att_id,
+                    "file_name": file_name,
+                    "body_base64": body,
+                })
+    if attachments:
+        result["attachments"] = attachments
+        logger.debug(
+            "getDocumentById(%s): вложения (attachments): %d", document_id, len(attachments),
+        )
+    return result
+
 
 class RegionApiClient:
     """Клиент (client) SOAP API СЭД Регион."""
 
     def __init__(self, wsdl_url: str, login: str, password: str,
-                 timeout: int = 120, verify_ssl: bool = True):
+                 timeout: Optional[int] = None, verify_ssl: bool = True):
         self.login = login
         self.password = password
+        if timeout is None:
+            timeout = _default_soap_timeout_seconds()
 
         session = Session()
         session.verify = verify_ssl
@@ -187,9 +307,13 @@ class RegionApiClient:
             - 'signers' — список подписантов (signers)
         Или None при неудаче.
         """
-        xml_str = self.service.getDocumentById(
-            self.login, self.password, document_id
-        )
+        try:
+            xml_str = self.service.getDocumentById(
+                self.login, self.password, document_id
+            )
+        except MemoryError as exc:
+            logger.error("getDocumentById(%s): MemoryError (zeep/HTTP): %s", document_id, exc)
+            return None
         if not xml_str:
             logger.warning("getDocumentById(%s) вернул null", document_id)
             return None
@@ -201,37 +325,7 @@ class RegionApiClient:
                 document_id, preview,
             )
 
-        root = ET.fromstring(xml_str)
-        doc_elem = root.find('.//Document')
-        if doc_elem is None:
-            return None
-
-        result = dict(doc_elem.attrib)
-        result['body_base64'] = (doc_elem.text or '').strip()
-
-        signers = []
-        for s in root.findall('.//Signers'):
-            signers.append(dict(s.attrib))
-        result['signers'] = signers
-
-        attachments = []
-        for xpath in ('.//Attachments/*', './/Attachment', './/DocumentAttachment'):
-            for att in root.findall(xpath):
-                att_dict = dict(att.attrib)
-                body = (att.text or '').strip()
-                file_name = att_dict.get('FileName') or att_dict.get('Name') or att_dict.get('DocumentFileName') or ''
-                att_id = att_dict.get('Id') or att_dict.get('AttachmentId') or att_dict.get('DocumentId') or ''
-                if body or file_name or att_id:
-                    attachments.append({
-                        'id': att_id,
-                        'file_name': file_name,
-                        'body_base64': body,
-                    })
-        if attachments:
-            result['attachments'] = attachments
-            logger.debug("getDocumentById(%s): найдено вложений (attachments): %d", document_id, len(attachments))
-
-        return result
+        return _parse_get_document_by_id_xml(xml_str, document_id)
 
     # ------------------------------------------------------------------
     # 4.2  Тело документа (document body) — base64
@@ -241,9 +335,13 @@ class RegionApiClient:
         Вызывает getDocumentBody(login, password, documentid).
         Возвращает строку base64 с телом документа или None.
         """
-        result = self.service.getDocumentBody(
-            self.login, self.password, document_id
-        )
+        try:
+            result = self.service.getDocumentBody(
+                self.login, self.password, document_id
+            )
+        except MemoryError as exc:
+            logger.error("getDocumentBody(%s): MemoryError: %s", document_id, exc)
+            return None
         if not result:
             logger.warning("getDocumentBody(%s) вернул null", document_id)
             return None
