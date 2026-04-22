@@ -43,6 +43,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _set_quiet_http_loggers() -> None:
+    """
+    Не даёт urllib3 / zeep / requests заливать консоль (stdout) полным телом HTTP-ответов
+    при глобальном logging.DEBUG.
+    """
+    for name in (
+        "zeep",
+        "zeep.client",
+        "zeep.transports",
+        "zeep.wsdl",
+        "zeep.wsdl.bindings",
+        "zeep.xsd",
+        "urllib3",
+        "urllib3.connectionpool",
+        "requests",
+    ):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+_set_quiet_http_loggers()
+
 PAGE_SIZE = 100
 # Кусок base64 при decode в файл: кратен 4, снижает пик памяти (memory) на b64decode.
 B64_FILE_WRITE_CHUNK = 4 * 1024 * 1024

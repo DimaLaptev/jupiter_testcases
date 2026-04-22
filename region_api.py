@@ -28,6 +28,28 @@ logger = logging.getLogger(__name__)
 LARGE_GET_DOCUMENT_XML_CHARS = 8_000_000
 
 
+def _region_debug_xml_max_chars() -> int:
+    """
+    Максимальная длина отладочного XML в лог: переменная (environment)
+    REGION_DEBUG_XML_MAX_CHARS; по умолчанию 8000. Значения 0 / full / unlimited —
+    без усечения (осторожно: ответ (response) getDocumentById может быть десятки МБ).
+    """
+    raw = (os.getenv("REGION_DEBUG_XML_MAX_CHARS") or "8000").strip().lower()
+    if raw in ("0", "full", "unlimited", "all"):
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 8000
+
+
+def _trunc_debug_xml(text: str) -> str:
+    cap = _region_debug_xml_max_chars()
+    if cap <= 0 or len(text) <= cap:
+        return text
+    return text[:cap] + f"\n... [усечено, всего {len(text)} символов (characters)]\n"
+
+
 def _default_soap_timeout_seconds() -> int:
     """
     Таймаут (timeout) HTTP/Transport: переменная окружения (environment) REGION_SOAP_TIMEOUT (сек);
@@ -272,14 +294,16 @@ class RegionApiClient:
                     encoding="unicode",
                     pretty_print=True,
                 )
-                print("\n=== getDocumentInfoFromFolderByParams ЗАПРОС ===\n" + req_xml)
+                req_xml = _trunc_debug_xml(req_xml)
+                logger.info("=== getDocumentInfoFromFolderByParams ЗАПРОС (request) ===\n%s", req_xml)
             if self._history.last_received and "envelope" in self._history.last_received:
                 resp_xml = lxml_etree.tostring(
                     self._history.last_received["envelope"],
                     encoding="unicode",
                     pretty_print=True,
                 )
-                print("\n=== getDocumentInfoFromFolderByParams ОТВЕТ ===\n" + resp_xml)
+                resp_xml = _trunc_debug_xml(resp_xml)
+                logger.info("=== getDocumentInfoFromFolderByParams ОТВЕТ (response) ===\n%s", resp_xml)
 
         if not xml_str:
             return []
@@ -319,10 +343,9 @@ class RegionApiClient:
             return None
 
         if os.getenv("REGION_DEBUG_XML", "").lower() in ("1", "true", "yes"):
-            preview = xml_str[:4000] + ("..." if len(xml_str) > 4000 else "")
             logger.info(
-                "[REGION_DEBUG_XML] getDocumentById(%s) raw XML (first 4000 chars): %s",
-                document_id, preview,
+                "[REGION_DEBUG_XML] getDocumentById(%s) raw XML:\n%s",
+                document_id, _trunc_debug_xml(xml_str),
             )
 
         return _parse_get_document_by_id_xml(xml_str, document_id)
