@@ -24,6 +24,7 @@
   REGION_EDO_DOCUMENT_DATE_FROM / TO — опционально, иначе «вчера» по МСК (pytz);
   REGION_CONTRACTOR_ID — опционально: обработать только этот ContractorId (после getContractors);
   VERIFY_SSL=0 — только для отладки (небезопасно).
+  REGION_SOAP_TIMEOUT — таймаут (timeout) HTTP/SOAP в секундах (по умолчанию 600, для крупных тел).
 
 Пример (example):
   python region_edo_folder_probe.py
@@ -68,6 +69,10 @@ DOWNLOAD_LOG_MAX_CHARS = 200
 LARGE_GET_DOCUMENT_XML_CHARS = 8_000_000
 # Ограничение вывода в stdout, чтобы среда/терминал (terminal) не замирал на мегабайтном SOAP.
 SOAP_STDOUT_MAX_CHARS = 500_000
+# Размер куска base64 при decode в файл (кратен 4; уменьшает пик памяти (memory) на b64decode).
+B64_FILE_WRITE_CHUNK = 4 * 1024 * 1024
+# Таймут (timeout) HTTP/SOAP для крупных тел (getDocumentById / getDocumentBody) — с.
+DEFAULT_SOAP_TIMEOUT = 600
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +139,18 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None or raw == "":
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _soap_timeout_seconds() -> int:
+    """Таймаут (timeout) для Transport: REGION_SOAP_TIMEOUT (секунды, seconds)."""
+    raw = (os.getenv("REGION_SOAP_TIMEOUT") or "").strip()
+    if not raw:
+        return DEFAULT_SOAP_TIMEOUT
+    try:
+        t = int(raw, 10)
+        return max(60, min(t, 7200))
+    except ValueError:
+        return DEFAULT_SOAP_TIMEOUT
 
 
 def _yesterday_moscow() -> Tuple[str, str]:
@@ -220,6 +237,29 @@ def _unique_path(path: str) -> str:
     name_part, ext = os.path.splitext(base)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     return os.path.join(directory, f"{name_part}_{ts}{ext}")
+
+
+def _b64decode_write_streaming(path: str, b64: str) -> None:
+    """
+    Декодирование base64 в файл порциями (chunked decode), без одного b64decode на десятки мегабайт.
+    Полные куски кратны 4; последний кусок дополняется padding (padding) до кратности 4.
+    """
+    s = (b64 or "").replace("\n", "").replace("\r", "").replace(" ", "")
+    if not s:
+        raise ValueError("пустая base64 строка")
+    chunk = B64_FILE_WRITE_CHUNK
+    if chunk % 4 != 0:
+        chunk = (chunk // 4) * 4
+    with open(path, "wb") as f:
+        i = 0
+        n = len(s)
+        while i < n:
+            block = s[i : i + chunk]
+            i += len(block)
+            rest = len(block) % 4
+            if rest:
+                block = block + ("=" * (4 - rest))
+            f.write(base64.b64decode(block, validate=True))
 
 
 def _prompt_yes(stderr_question: str) -> bool:
@@ -346,6 +386,14 @@ def _fetch_document_by_id(
 ) -> dict | None:
     try:
         xml_str = service.getDocumentById(login, password, document_id)
+    except MemoryError as exc:
+        logger.error(
+            "%s",
+            _truncate_download_output(
+                f"MemoryError при getDocumentById (zeep/HTTP), ответ слишком велик: {exc}",
+            ),
+        )
+        return None
     except Fault as exc:
         _log_fault_download(exc)
         return None
@@ -384,6 +432,14 @@ def _fetch_document_body(
 ) -> str | None:
     try:
         result = service.getDocumentBody(login, password, document_id)
+    except MemoryError as exc:
+        logger.error(
+            "%s",
+            _truncate_download_output(
+                f"MemoryError при getDocumentBody (zeep/HTTP): {exc}",
+            ),
+        )
+        return None
     except Fault as exc:
         _log_fault_download(exc)
         return None
@@ -570,9 +626,12 @@ def _interactive_save_document_files(
     context: str,
 ) -> None:
     """
-    Перед каждым [y/N] — в stdout предпросмотр SOAP-запроса (getDocumentById / getDocumentBody)
-    через client.create_message (без сети). После согласия — реальный вызов service.*.
-    После согласия на скачивание/догрузку — XML SOAP-ответа (response) сохраняется в .txt автоматически.
+    Перед [y/N] — предпросмотр getDocumentBody, затем getDocumentById (create_message).
+    После согласия: сначала getDocumentBody (компактный ответ для крупных файлов), при успехе основной
+    файл сохраняется без вызова getDocumentById (чтобы не тянуть десятки МБ XML в память (memory)).
+    Если getDocumentBody пуст — fallback getDocumentById + при необходимости getDocumentBody.
+    Вложения (attachments): при успехе только getDocumentById не вызывается; далее при отсутствии
+    вложений — существующий запрос «запросить getDocumentById для списка вложений».
     """
     doc_id = (meta.get("DocumentId") or "").strip()
     if not doc_id:
@@ -581,67 +640,98 @@ def _interactive_save_document_files(
     display = (meta.get("DocumentDisplayName") or file_name) or doc_id
     doc_full: dict | None = None
 
+    # Сначала getDocumentBody (тело без гигантского вложенного XML в getDocumentById) — важно для >40–50 МБ.
+    _print_get_document_body_preview(
+        client, login, password, doc_id,
+        f"[{context}] Предпросмотр getDocumentBody (тело, main) — рекомендуемый путь для крупных файлов, documentId={doc_id!r}",
+    )
     _print_get_document_id_preview(
         client,
         login,
         password,
         doc_id,
-        f"[{context}] Предпросмотр getDocumentById (основной файл, main), documentId={doc_id!r}",
+        f"[{context}] Предпросмотр getDocumentById (метаданные/вложения, при необходимости), documentId={doc_id!r}",
     )
     if _prompt_yes(
         f"[{context}] Скачать основной файл (main file) документа id={doc_id} «{display}»",
     ):
-        doc_full = _fetch_document_by_id(
-            service, login, password, doc_id,
-            history=history, output_dir=output_dir, context=context,
-        )
-        if doc_full:
-            body_b64 = (doc_full.get("body_base64") or "").strip()
-            if not body_b64:
-                _print_get_document_body_preview(
-                    client,
-                    login,
-                    password,
-                    doc_id,
-                    f"[{context}] Предпросмотр getDocumentBody (тело пусто в getDocumentById), documentId={doc_id!r}",
-                )
-                body_b64 = (
-                    _fetch_document_body(
-                        service, login, password, doc_id,
-                        history=history, output_dir=output_dir, context=context,
-                    ) or ""
-                ).strip()
-            if body_b64:
-                safe = _safe_filename(file_name, doc_id)
-                path = _unique_path(os.path.join(output_dir, safe))
-                try:
-                    with open(path, "wb") as f:
-                        f.write(base64.b64decode(body_b64))
-                    logger.info(
-                        "%s",
-                        _truncate_download_output(
-                            f"Сохранено: {path} ({os.path.getsize(path)} байт)",
-                        ),
-                    )
-                except MemoryError as exc:
-                    logger.error(
-                        "%s",
-                        _truncate_download_output(
-                            f"MemoryError при декодировании/записи файла {path!r}: {exc}",
-                        ),
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.error(
-                        "%s",
-                        _truncate_download_output(f"Ошибка записи {path}: {exc}"),
-                    )
-            else:
-                logger.warning(
+        main_saved = False
+        body_gdb = (
+            _fetch_document_body(
+                service, login, password, doc_id,
+                history=history, output_dir=output_dir, context=context,
+            ) or ""
+        ).strip()
+        if body_gdb:
+            safe = _safe_filename(file_name, doc_id)
+            out_path = _unique_path(os.path.join(output_dir, safe))
+            try:
+                _b64decode_write_streaming(out_path, body_gdb)
+                main_saved = True
+                logger.info(
                     "%s",
                     _truncate_download_output(
-                        f"Нет base64 тела (body) для id={doc_id}",
+                        f"Сохранено (getDocumentBody): {out_path} ({os.path.getsize(out_path)} байт)",
                     ),
                 )
+            except (OSError, MemoryError, ValueError) as exc:
+                logger.error(
+                    "%s",
+                    _truncate_download_output(
+                        f"Ошибка записи getDocumentBody → {out_path!r}: {type(exc).__name__}: {exc}",
+                    ),
+                )
+        # doc_full по умолчанию: не тянем getDocumentById, если main уже взят getDocumentBody
+        # (тот же ответ часто снова влечает 60+ МБ XML и рушит процесс OOM (MemoryError).
+        if main_saved:
+            doc_full = None
+        else:
+            doc_full = _fetch_document_by_id(
+                service, login, password, doc_id,
+                history=history, output_dir=output_dir, context=context,
+            )
+            if doc_full:
+                body_b64 = (doc_full.get("body_base64") or "").strip()
+                if not body_b64:
+                    _print_get_document_body_preview(
+                        client,
+                        login,
+                        password,
+                        doc_id,
+                        f"[{context}] Предпросмотр getDocumentBody (тело пусто в getDocumentById), documentId={doc_id!r}",
+                    )
+                    body_b64 = (
+                        _fetch_document_body(
+                            service, login, password, doc_id,
+                            history=history, output_dir=output_dir, context=context,
+                        ) or ""
+                    ).strip()
+                if body_b64 and not main_saved:
+                    safe = _safe_filename(file_name, doc_id)
+                    out_path = _unique_path(os.path.join(output_dir, safe))
+                    try:
+                        _b64decode_write_streaming(out_path, body_b64)
+                        main_saved = True
+                        logger.info(
+                            "%s",
+                            _truncate_download_output(
+                                f"Сохранено: {out_path} ({os.path.getsize(out_path)} байт)",
+                            ),
+                        )
+                    except (OSError, MemoryError, ValueError) as exc:
+                        logger.error(
+                            "%s",
+                            _truncate_download_output(
+                                f"Ошибка записи файла: {out_path!r}: {type(exc).__name__}: {exc}",
+                            ),
+                        )
+                if not main_saved and not body_b64:
+                    logger.warning(
+                        "%s",
+                        _truncate_download_output(
+                            f"Нет base64 тела (body) для id={doc_id} после getDocumentById / getDocumentBody",
+                        ),
+                    )
 
     atts: list[dict] = list((doc_full or {}).get("attachments") or [])
     if not atts and doc_full is None:
@@ -707,8 +797,7 @@ def _interactive_save_document_files(
         safe_att = f"{name_part}_attachment_{idx}_{att_safe}"
         path = _unique_path(os.path.join(output_dir, safe_att))
         try:
-            with open(path, "wb") as f:
-                f.write(base64.b64decode(att_b64))
+            _b64decode_write_streaming(path, att_b64)
             logger.info(
                 "%s",
                 _truncate_download_output(
@@ -819,10 +908,10 @@ def main() -> None:
     verify_ssl = _env_bool("VERIFY_SSL", True)
     session = Session()
     session.verify = verify_ssl
-    transport = Transport(session=session, timeout=120)
+    transport = Transport(session=session, timeout=_soap_timeout_seconds())
     history = HistoryPlugin()
 
-    logger.info("Загрузка WSDL…")
+    logger.info("Загрузка WSDL… (HTTP timeout (timeout) %s с)", _soap_timeout_seconds())
     try:
         client = Client(wsdl=wsdl_url, transport=transport, plugins=[history])
         service = client.service
