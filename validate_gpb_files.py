@@ -1,40 +1,93 @@
 """
 Валидация файлов ГПБ: проверка наличия файлов с кодами выписки за вчера
-в папках GPB/D, GPB/I, GPB/R. Отправка отчёта в Outlook.
+в одной папке GPB_BASE_DIR / DECODE (без вложенных D/I/R). Отчёт (email) в Outlook/Exchange.
+Если в папке нет файлов (0) — валидация (validation) и письмо (email) не выполняются.
+В письме: количества .MSG (MSG) с префиксами (prefix) D_, I_, R_ и файлов REP*.xls.
 """
 
 import os
 from dotenv import load_dotenv
 import re
 from datetime import datetime, timedelta
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 from file_handler_config_loader import load_validate_gpb_config
+from config_ews import GPB_BASE_DIR, DECODE
 
 _validate_gpb = load_validate_gpb_config()
 GPB_STATEMENT_CODES: List[str] = _validate_gpb["GPB_STATEMENT_CODES"]
-GPB_SUBFOLDERS: List[str] = _validate_gpb["GPB_SUBFOLDERS"]
+# GPB_SUBFOLDERS в Excel остаётся для load_validate_gpb_config; плоский обход — только base/DECODE.
 
 
 def get_base_path() -> str:
-    """Корневая папка (текущий месяц, напр. 2026_02)."""
-    from config_ews import GPB_BASE_DIR
-    base = os.path.abspath(GPB_BASE_DIR or ".")
-    return base
+    """Корневая папка (root): GPB_BASE_DIR."""
+    return os.path.abspath(GPB_BASE_DIR or ".")
 
 
-def get_gpb_month_path() -> str:
-    """Путь к папке GPB за текущий месяц: YYYY_MM/GPB."""
-    base = get_base_path()
-    now = datetime.now()
-    month_dir = now.strftime("%Y_%m")
-    return os.path.join(base, month_dir, "GPB")
+def get_validate_gpb_dir() -> str:
+    """Путь (path) к плоской папке проверки: base / DECODE (без YYYY_MM/GPB и без D, I, R)."""
+    return os.path.join(get_base_path(), DECODE)
 
 
-def get_yesterday_date_str() -> str:
-    """Дата вчера в формате YYYYMMDD."""
-    yesterday = datetime.now() - timedelta(days=1)
-    return yesterday.strftime("%Y%m%d")
+def _count_files_in_dir(dir_path: str) -> int:
+    """Число обычных файлов (files); каталога нет — 0. Подпапки (subfolders) не считаем."""
+    if not os.path.isdir(dir_path):
+        return 0
+    n = 0
+    for name in os.listdir(dir_path):
+        if os.path.isfile(os.path.join(dir_path, name)):
+            n += 1
+    return n
+
+
+# Имена вида «REP<что угодно>.xls» (регистр (case) без различия)
+_REP_XLS_NAME_RE = re.compile(r"^REP.*\.xls$", re.IGNORECASE)
+
+
+def count_rep_xls_files(dir_path: str) -> int:
+    """Сколько файлов (files) в каталоге с именем REP*.xls (только расширение (extension) .xls)."""
+    if not os.path.isdir(dir_path):
+        return 0
+    n = 0
+    for name in os.listdir(dir_path):
+        fp = os.path.join(dir_path, name)
+        if not os.path.isfile(fp):
+            continue
+        if _REP_XLS_NAME_RE.match(name):
+            n += 1
+    return n
+
+
+# Имена: D_ / I_ / R_ + … + .MSG (как в РСД); R-01 / REP* не сюда
+_D_MSG_PREFIX = re.compile(r"^D_", re.IGNORECASE)
+_I_MSG_PREFIX = re.compile(r"^I_", re.IGNORECASE)
+_R_MSG_PREFIX = re.compile(r"^R_", re.IGNORECASE)
+
+
+def count_d_i_r_files(dir_path: str) -> Dict[str, int]:
+    """Подсчёт только файлов .MSG: имя начинается с D_, I_ или R_ (регистр (case) без различия)."""
+    out = {"D": 0, "I": 0, "R": 0}
+    if not os.path.isdir(dir_path):
+        return out
+    for name in os.listdir(dir_path):
+        fp = os.path.join(dir_path, name)
+        if not os.path.isfile(fp):
+            continue
+        if not name.lower().endswith(".msg"):
+            continue
+        if _D_MSG_PREFIX.match(name):
+            out["D"] += 1
+        elif _I_MSG_PREFIX.match(name):
+            out["I"] += 1
+        elif _R_MSG_PREFIX.match(name):
+            out["R"] += 1
+    return out
+
+
+def get_yesterday_date_str(ref: Optional[datetime] = None) -> str:
+    """Дата проверки в формате YYYYMMDD (по умолчанию — календарный вчера)."""
+    d = ref if ref is not None else datetime.now() - timedelta(days=1)
+    return d.strftime("%Y%m%d")
 
 
 def find_files_with_codes(folder_path: str, date_str: str, codes: List[str]) -> Set[str]:
@@ -56,32 +109,60 @@ def find_files_with_codes(folder_path: str, date_str: str, codes: List[str]) -> 
     return found
 
 
-def collect_missing_codes(base_gpb: str, date_str: str) -> Dict[str, List[str]]:
+def collect_missing_codes(check_dir: str, date_str: str) -> Dict[str, List[str]]:
     """
-    Собирает недостающие коды по каждой папке D, I, R.
-    Возвращает: { "D": [...], "I": [...], "R": [...] }
+    Недостающие коды в одной папке check_dir (без подпапок D/I/R).
+    Возвращает одну строку отчёта: { DECODE: [...] }.
     """
-    result = {sub: [] for sub in GPB_SUBFOLDERS}
-    for sub in GPB_SUBFOLDERS:
-        folder = os.path.join(base_gpb, sub)
-        found = find_files_with_codes(folder, date_str, GPB_STATEMENT_CODES)
-        missing = [c for c in GPB_STATEMENT_CODES if c not in found]
-        result[sub] = sorted(missing)
-    return result
+    found = find_files_with_codes(check_dir, date_str, GPB_STATEMENT_CODES)
+    missing = [c for c in GPB_STATEMENT_CODES if c not in found]
+    return {DECODE: sorted(missing)}
 
 
-def build_email_body(missing_by_folder: Dict[str, List[str]]) -> str:
-    """Формирует HTML-таблицу для письма."""
+def _html_gpb_file_counts_table(
+    d_i_r: Dict[str, int],
+    rep_xls_count: int,
+) -> str:
+    """Сводка: .MSG D_/I_/R_ и REP*.xls."""
+    rows = [
+        f'<tr><td><code>D_*.msg</code></td><td>{d_i_r.get("D", 0)}</td></tr>',
+        f'<tr><td><code>I_*.msg</code></td><td>{d_i_r.get("I", 0)}</td></tr>',
+        f'<tr><td><code>R_*.msg</code></td><td>{d_i_r.get("R", 0)}</td></tr>',
+        f'<tr><td><code>REP*.xls</code></td><td>{rep_xls_count}</td></tr>',
+    ]
+    return f"""<p>Найдено файлов по шаблону (pattern):</p>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Тип</th><th>Количество</th></tr>
+{chr(10).join(rows)}
+</table>"""
+
+
+def build_email_html(
+    missing_by_folder: Dict[str, List[str]],
+    d_i_r_count: Dict[str, int],
+    rep_xls_count: int,
+) -> str:
+    """HTML письма: таблица D/I/R/REP*, затем успех или пропуски по кодам."""
+    count_block = _html_gpb_file_counts_table(d_i_r_count, rep_xls_count)
+    all_ok = all(not missing_by_folder.get(f) for f in missing_by_folder)
+    if all_ok:
+        return f"""<html><body>
+{count_block}
+<p>Проверка ГПБ пройдена успешно, все коды выписок найдены.</p>
+</body></html>"""
     rows = []
-    for folder in GPB_SUBFOLDERS:
+    for folder in missing_by_folder:
         codes = missing_by_folder.get(folder, [])
         codes_str = ", ".join(codes) if codes else "—"
         rows.append(f"<tr><td>{folder}</td><td>{codes_str}</td></tr>")
-    return f"""<html><body>
+    miss_table = f"""<p>Недостающие коды:</p>
 <table border="1" cellpadding="4" cellspacing="0">
 <tr><th>Папка</th><th>Недостающие коды выписки</th></tr>
 {chr(10).join(rows)}
-</table>
+</table>"""
+    return f"""<html><body>
+{count_block}
+{miss_table}
 </body></html>"""
 
 
@@ -171,8 +252,9 @@ def send_email(subject: str, html_body: str, to_recipients: str) -> bool:
 def main() -> None:
     load_dotenv()
 
-    base_gpb = get_gpb_month_path()
-    date_str = get_yesterday_date_str()
+    ref = datetime.now() - timedelta(days=1)
+    base_gpb = get_validate_gpb_dir()
+    date_str = get_yesterday_date_str(ref)
     recipient = os.getenv("GPB_VALIDATION_RECIPIENT") or os.getenv("MAIL_ADDRESS", "")
 
     print("=" * 60)
@@ -182,20 +264,32 @@ def main() -> None:
     print(f"Дата (вчера): {date_str}")
     print("=" * 60)
 
+    file_count = _count_files_in_dir(base_gpb)
+    if file_count == 0:
+        print(
+            "[!] В папке нет файлов (0) — валидация (validation) и отправка письма (email) пропущены."
+        )
+        return
+
+    d_i_r_count = count_d_i_r_files(base_gpb)
+    rep_xls_count = count_rep_xls_files(base_gpb)
+    print(
+        f"Всего файлов в папке: {file_count}; "
+        f".MSG D_/I_/R_: {d_i_r_count['D']}/{d_i_r_count['I']}/{d_i_r_count['R']}; "
+        f"REP*.xls={rep_xls_count}"
+    )
+
     missing_by_folder = collect_missing_codes(base_gpb, date_str)
 
-    all_found = all(not missing_by_folder[f] for f in GPB_SUBFOLDERS)
+    all_found = all(not missing_by_folder.get(f) for f in missing_by_folder)
 
-    for folder in GPB_SUBFOLDERS:
+    for folder in missing_by_folder:
         missing = missing_by_folder[folder]
         status = "+" if not missing else "-"
         print(f"{status} {folder}: {len(missing)} недостающих" + (f" — {', '.join(missing)}" if missing else ""))
 
     subject = "Ежедневная проверка файлов ГПБ"
-    if all_found:
-        html_body = "<html><body>Проверка ГПБ пройдена успешно, все коды выписок найдены</body></html>"
-    else:
-        html_body = build_email_body(missing_by_folder)
+    html_body = build_email_html(missing_by_folder, d_i_r_count, rep_xls_count)
 
     if recipient:
         send_email(subject, html_body, recipient)
