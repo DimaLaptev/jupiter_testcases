@@ -124,6 +124,42 @@ def read_depo_directory_rows(
     return rows_out
 
 
+def lookup_account_by_gpb_dom_code(
+    rows: list[DepoDirectoryRow],
+    client_id: str,
+) -> str | None:
+    """
+    «Номер счета депо» (колонка C): строка справочника, где ClientID совпал только с
+    «Код выписки ГПБ (ДОМ)» (колонка H), без сопоставления с кодом банка.
+    """
+    target = normalize_match_token(client_id)
+    if not target:
+        return None
+    for row in rows:
+        dom = normalize_match_token(row.gpb_code_dom)
+        if target == dom:
+            return row.account_number
+    return None
+
+
+def lookup_account_by_gpb_bank_code(
+    rows: list[DepoDirectoryRow],
+    client_id: str,
+) -> str | None:
+    """
+    «Номер счета депо» (колонка C): строка справочника, где ClientID совпал только с
+    «Код выписки ГПБ (БАНК)» (колонка I).
+    """
+    target = normalize_match_token(client_id)
+    if not target:
+        return None
+    for row in rows:
+        bank = normalize_match_token(row.gpb_code_bank)
+        if target == bank:
+            return row.account_number
+    return None
+
+
 def lookup_account_by_client_id(
     rows: list[DepoDirectoryRow],
     client_id: str,
