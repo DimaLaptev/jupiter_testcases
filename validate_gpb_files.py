@@ -185,24 +185,24 @@ def _send_via_exchangelib(subject: str, html_body: str, to_recipients: str) -> b
     try:
         from exchangelib import Credentials, Account, DELEGATE, Configuration, Version, Build
         from exchangelib import Message, Mailbox, HTMLBody
-        from exchangelib.protocol import BaseProtocol, NoVerifyHTTPAdapter
         from config_ews import (
-            MAIL_ADDRESS, MAIL_PASSWORD, MAIL_SERVER_NAME,
-            USE_AUTODISCOVER, VERIFY_SSL
+            MAIL_1_ADDRESS,
+            MAIL_1_PASSWORD,
+            MAIL_1_USERNAME,
+            MAIL_SERVER_NAME,
+            USE_AUTODISCOVER,
         )
     except ImportError:
         return False
 
-    if not MAIL_ADDRESS or not MAIL_PASSWORD:
+    if not MAIL_1_ADDRESS or not MAIL_1_PASSWORD or not MAIL_1_USERNAME:
         return False
 
     try:
-        if not VERIFY_SSL:
-            BaseProtocol.HTTP_ADAPTER_CLS = NoVerifyHTTPAdapter
-        creds = Credentials(username=MAIL_ADDRESS, password=MAIL_PASSWORD)
+        creds = Credentials(username=MAIL_1_USERNAME, password=MAIL_1_PASSWORD)
         if USE_AUTODISCOVER:
             account = Account(
-                primary_smtp_address=MAIL_ADDRESS,
+                primary_smtp_address=MAIL_1_ADDRESS,
                 credentials=creds,
                 autodiscover=True,
                 access_type=DELEGATE
@@ -214,7 +214,7 @@ def _send_via_exchangelib(subject: str, html_body: str, to_recipients: str) -> b
                 version=Version(build=Build(15, 1))
             )
             account = Account(
-                primary_smtp_address=MAIL_ADDRESS,
+                primary_smtp_address=MAIL_1_ADDRESS,
                 config=config,
                 autodiscover=False,
                 access_type=DELEGATE
