@@ -1,15 +1,14 @@
 """
-Валидация файлов ГПБ: проверка наличия файлов с кодами выписки за вчера
-в одной папке GPB_BASE_DIR / DECODE (без вложенных D/I/R). Отчёт (email) в Outlook/Exchange.
+Валидация файлов ГПБ: проверка, что коды выписок из справочника встречаются в именах файлов
+(D_/I_/R_) в папке GPB_BASE_DIR / DECODE (без даты в имени). Отчёт (email) в Outlook/Exchange.
 Если в папке нет файлов (0) — валидация (validation) и письмо (email) не выполняются.
-В письме: количества .MSG (MSG) с префиксами (prefix) D_, I_, R_ и файлов REP*.xls.
+В письме: количества .MSG (MSG) D_/I_/R_, файлов REP*.xls; недостающие коды — отдельно по D, I, R.
 """
 
 import os
 from dotenv import load_dotenv
 import re
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Set
 
 from file_handler_config_loader import load_validate_gpb_config
 from config_ews import GPB_BASE_DIR, DECODE
@@ -84,39 +83,49 @@ def count_d_i_r_files(dir_path: str) -> Dict[str, int]:
     return out
 
 
-def get_yesterday_date_str(ref: Optional[datetime] = None) -> str:
-    """Дата проверки в формате YYYYMMDD (по умолчанию — календарный вчера)."""
-    d = ref if ref is not None else datetime.now() - timedelta(days=1)
-    return d.strftime("%Y%m%d")
+# Сегменты из ровно 5 цифр (5-digit), не часть более длинного числа
+_STATEMENT_CODE_TOKEN = re.compile(r"(?<![0-9])(?P<code>\d{5})(?![0-9])")
 
 
-def find_files_with_codes(folder_path: str, date_str: str, codes: List[str]) -> Set[str]:
-    """
-    Ищет в папке файлы формата *_<date>_<code>.<ext> за указанную дату.
-    Возвращает множество найденных кодов.
-    """
-    found = set()
-    if not os.path.isdir(folder_path):
-        return found
-    # Паттерн: любые символы + _ + дата + _ + код выписки (5 цифр) + расширение
-    pattern = re.compile(rf"^.+_{re.escape(date_str)}_(?P<code>\d{{5}})\.[^.]+$", re.IGNORECASE)
-    for name in os.listdir(folder_path):
-        m = pattern.match(name)
-        if m:
-            code = m.group("code")
-            if code in codes:
-                found.add(code)
-    return found
+def _codes_from_filename(name: str, allowed: Set[str]) -> Set[str]:
+    """Коды выписки из справочника, найденные в имени файла (file name) как 5-значные (5-digit) числа."""
+    return {
+        m.group("code")
+        for m in _STATEMENT_CODE_TOKEN.finditer(name)
+        if m.group("code") in allowed
+    }
 
 
-def collect_missing_codes(check_dir: str, date_str: str) -> Dict[str, List[str]]:
+def collect_missing_codes(check_dir: str) -> Dict[str, List[str]]:
     """
-    Недостающие коды в одной папке check_dir (без подпапок D/I/R).
-    Возвращает одну строку отчёта: { DECODE: [...] }.
+    Недостающие коды отдельно по префиксам (prefix) D_, I_, R_: в каждом соответствующем файле
+    ищем все вхождения 5-значных кодов из справочника в имени (дата в имени не требуется).
     """
-    found = find_files_with_codes(check_dir, date_str, GPB_STATEMENT_CODES)
-    missing = [c for c in GPB_STATEMENT_CODES if c not in found]
-    return {DECODE: sorted(missing)}
+    found_d: Set[str] = set()
+    found_i: Set[str] = set()
+    found_r: Set[str] = set()
+    allowed = set(GPB_STATEMENT_CODES)
+    if os.path.isdir(check_dir):
+        for name in os.listdir(check_dir):
+            if not os.path.isfile(os.path.join(check_dir, name)):
+                continue
+            n = name.lower()
+            if not (n.startswith("d_") or n.startswith("i_") or n.startswith("r_")):
+                continue
+            in_name = _codes_from_filename(name, allowed)
+            if not in_name:
+                continue
+            if n.startswith("d_"):
+                found_d |= in_name
+            elif n.startswith("i_"):
+                found_i |= in_name
+            elif n.startswith("r_"):
+                found_r |= in_name
+    return {
+        "D": sorted([c for c in GPB_STATEMENT_CODES if c not in found_d]),
+        "I": sorted([c for c in GPB_STATEMENT_CODES if c not in found_i]),
+        "R": sorted([c for c in GPB_STATEMENT_CODES if c not in found_r]),
+    }
 
 
 def _html_gpb_file_counts_table(
@@ -137,27 +146,32 @@ def _html_gpb_file_counts_table(
 </table>"""
 
 
+_GPB_MISS_ORDER = ("D", "I", "R")
+
+
 def build_email_html(
     missing_by_folder: Dict[str, List[str]],
     d_i_r_count: Dict[str, int],
     rep_xls_count: int,
 ) -> str:
-    """HTML письма: таблица D/I/R/REP*, затем успех или пропуски по кодам."""
+    """HTML письма: таблица D/I/R/REP*, затем успех или пропуски по кодам по префиксам D_/I_/R_."""
     count_block = _html_gpb_file_counts_table(d_i_r_count, rep_xls_count)
-    all_ok = all(not missing_by_folder.get(f) for f in missing_by_folder)
+    all_ok = all(not missing_by_folder.get(f) for f in _GPB_MISS_ORDER)
     if all_ok:
         return f"""<html><body>
 {count_block}
-<p>Проверка ГПБ пройдена успешно, все коды выписок найдены.</p>
+<p>Проверка ГПБ пройдена успешно: по всем префиксам (prefix) D_/I_/R_ все коды выписок из справочника
+встречаются в именах файлов (file names).</p>
 </body></html>"""
     rows = []
-    for folder in missing_by_folder:
-        codes = missing_by_folder.get(folder, [])
+    for key in _GPB_MISS_ORDER:
+        codes = missing_by_folder.get(key, [])
         codes_str = ", ".join(codes) if codes else "—"
-        rows.append(f"<tr><td>{folder}</td><td>{codes_str}</td></tr>")
-    miss_table = f"""<p>Недостающие коды:</p>
+        label = f"{key}_*"
+        rows.append(f"<tr><td>{label}</td><td>{codes_str}</td></tr>")
+    miss_table = f"""<p>Недостающие коды (файлы .msg с префиксом (prefix) D_, I_, R_; код — 5 цифр в имени):</p>
 <table border="1" cellpadding="4" cellspacing="0">
-<tr><th>Папка</th><th>Недостающие коды выписки</th></tr>
+<tr><th>Тип</th><th>Недостающие коды</th></tr>
 {chr(10).join(rows)}
 </table>"""
     return f"""<html><body>
@@ -252,16 +266,13 @@ def send_email(subject: str, html_body: str, to_recipients: str) -> bool:
 def main() -> None:
     load_dotenv()
 
-    ref = datetime.now() - timedelta(days=1)
     base_gpb = get_validate_gpb_dir()
-    date_str = get_yesterday_date_str(ref)
     recipient = os.getenv("GPB_VALIDATION_RECIPIENT") or os.getenv("MAIL_ADDRESS", "")
 
     print("=" * 60)
     print("Ежедневная проверка файлов ГПБ")
     print("=" * 60)
-    print(f"Папка: {base_gpb}")
-    print(f"Дата (вчера): {date_str}")
+    print(f"Папка: {base_gpb} (коды в именах, без фиксированной даты)")
     print("=" * 60)
 
     file_count = _count_files_in_dir(base_gpb)
@@ -279,14 +290,15 @@ def main() -> None:
         f"REP*.xls={rep_xls_count}"
     )
 
-    missing_by_folder = collect_missing_codes(base_gpb, date_str)
+    missing_by_folder = collect_missing_codes(base_gpb)
 
-    all_found = all(not missing_by_folder.get(f) for f in missing_by_folder)
-
-    for folder in missing_by_folder:
-        missing = missing_by_folder[folder]
+    for key in _GPB_MISS_ORDER:
+        missing = missing_by_folder.get(key, [])
         status = "+" if not missing else "-"
-        print(f"{status} {folder}: {len(missing)} недостающих" + (f" — {', '.join(missing)}" if missing else ""))
+        print(
+            f"{status} префикс (prefix) {key}_: {len(missing)} недостающих"
+            + (f" — {', '.join(missing)}" if missing else "")
+        )
 
     subject = "Ежедневная проверка файлов ГПБ"
     html_body = build_email_html(missing_by_folder, d_i_r_count, rep_xls_count)
