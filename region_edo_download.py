@@ -10,7 +10,9 @@
   3. Для каждого контрагента:
      - папки ЭДО (ReadyToRegister, InWork, Archive): getDocumentInfoFromFolderByParams;
      - архив: getDocumentInfoByParams.
-     Для каждого документа — скачивание тела и вложений (base64 → файл).
+     Для каждого документа — скачивание тела; вложения (attachments) из getDocumentById
+     не запрашиваются повторно, если тело уже получено через getDocumentBody
+     (см. константу REGION_EDO_USE_GDBID_FOR_ATTACHMENTS ниже).
   4. Сохранение файлов в папку <YYYY_MM>/REGION/EDO/.
 
 Запуск (run):
@@ -35,6 +37,9 @@ from config_region import (
     EDO_FOLDERS,
 )
 from region_api import RegionApiClient
+
+# 1/True: после getDocumentBody снова вызвать getDocumentById ради вложений (attachments); 0 — нет
+REGION_EDO_USE_GDBID_FOR_ATTACHMENTS = 1
 
 logging.basicConfig(
     level=logging.INFO,
@@ -189,10 +194,10 @@ def _download_one_document(
 ) -> list[dict]:
     """
     Сначала getDocumentBody (getDocumentBody) — без огромного XML getDocumentById;
-    при успехе тело (body) пишем без повторного getDocumentById для основного файла.
-    Иначе: getDocumentById (getDocumentById) → при пустом body в XML снова getDocumentBody.
-    При успехе только getDocumentBody для тела, getDocumentById вызывается отдельно
-    для списка вложений (attachments) (возможен тяжёлый ответ; основной файл уже на диске).
+    при успехе тело (body) пишем как основной файл; второй getDocumentById «ради вложений»
+    по умолчанию не делаем (чтобы не тянуть крупный XML), см. константу в начале модуля.
+    Иначе: getDocumentById (getDocumentById) → при пустом body в XML снова getDocumentBody;
+    вложения из одного ответа getDocumentById (если есть) тогда обрабатываются как раньше.
     """
     downloaded: list[dict] = []
     saved_count = 0
@@ -230,12 +235,19 @@ def _download_one_document(
         )
         saved_count += 1
         if main_from_gdb:
-            doc_full = api.get_document_by_id(doc_id)
-            if doc_full is None:
-                logger.warning(
-                    "    getDocumentById не удалось для id=%s — вложения (attachments) недоступны "
-                    "(основной файл уже сохранён через getDocumentBody).",
-                    doc_id,
+            if REGION_EDO_USE_GDBID_FOR_ATTACHMENTS:
+                doc_full = api.get_document_by_id(doc_id)
+                if doc_full is None:
+                    logger.warning(
+                        "    getDocumentById не удалось для id=%s — вложения (attachments) недоступны "
+                        "(основной файл уже сохранён через getDocumentBody).",
+                        doc_id,
+                    )
+            else:
+                doc_full = None
+                logger.debug(
+                    "    Пропуск getDocumentById для вложений (getDocumentBody уже дал тело); "
+                    "REGION_EDO_USE_GDBID_FOR_ATTACHMENTS=1 — повторный вызов для списка вложений",
                 )
     for idx, att in enumerate((doc_full or {}).get("attachments", [])):
         att_b64 = att.get("body_base64")
