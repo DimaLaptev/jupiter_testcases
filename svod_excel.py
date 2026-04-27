@@ -125,20 +125,27 @@ def _format_depo_account_cell(acc: str | None) -> str:
         return s
 
 
-def _gpb_depo_flow_hint(f_svod: str, h_acc: str, j_acc: str) -> str | None:
+def _gpb_depo_flow_hint(
+    f_svod: str,
+    h_acc: str,
+    i_sec: str,
+    j_acc: str,
+    k_sec: str,
+) -> str | None:
     """
-    Направление для выбора строки «Коды»: «Счет депо» (после справочника) совпал
-    со счётом списания (debit, поле H в I*.MSG ГПБ) → debit / со счётом зачисления (J) → credit.
+    Направление для «Коды»: «Счет депо» совпал с любым из пары списания (H/I) → debit,
+    с любым из пары зачисления (J/K) → credit (формат Excel: в I могут быть и счёт, и раздел).
     """
     ks = normalize_account_key(f_svod)
-    kh, kj = normalize_account_key(h_acc), normalize_account_key(j_acc)
     if not ks:
         return None
-    on_h = bool(kh) and ks == kh
-    on_j = bool(kj) and ks == kj
-    if on_h and not on_j:
+    debit_keys = {normalize_account_key(h_acc), normalize_account_key(i_sec)} - {""}
+    credit_keys = {normalize_account_key(j_acc), normalize_account_key(k_sec)} - {""}
+    on_debit = ks in debit_keys
+    on_credit = ks in credit_keys
+    if on_debit and not on_credit:
         return "debit"
-    if on_j and not on_h:
+    if on_credit and not on_debit:
         return "credit"
     return None
 
@@ -154,12 +161,15 @@ def _gpb_g_depo_section(
 ) -> str:
     """Колонка «Раздел депо»: раздел списания или зачисления по стороне «Счет депо»; иначе §4.4 ТЗ."""
     ks = normalize_account_key(f_svod)
-    kh, kj = normalize_account_key(h_acc), normalize_account_key(j_acc)
-    on_h = bool(ks and kh and ks == kh)
-    on_j = bool(ks and kj and ks == kj)
-    if on_h and not on_j:
+    if not ks:
+        return compute_depot_section(f_raw, g_raw, h_acc, i_sec, j_acc, k_sec)
+    debit_keys = {normalize_account_key(h_acc), normalize_account_key(i_sec)} - {""}
+    credit_keys = {normalize_account_key(j_acc), normalize_account_key(k_sec)} - {""}
+    on_debit = ks in debit_keys
+    on_credit = ks in credit_keys
+    if on_debit and not on_credit:
         return str(i_sec).strip()
-    if on_j and not on_h:
+    if on_credit and not on_debit:
         return str(k_sec).strip()
     return compute_depot_section(f_raw, g_raw, h_acc, i_sec, j_acc, k_sec)
 
@@ -316,7 +326,7 @@ def build_svod_row(
         else (_format_depo_account_cell(f_raw) or (f_raw or "").strip())
     )
 
-    flow_hint = _gpb_depo_flow_hint(f_svod, h_acc, j_acc)
+    flow_hint = _gpb_depo_flow_hint(f_svod, h_acc, i_sec, j_acc, k_sec)
     g_out = _gpb_g_depo_section(f_svod, f_raw, g_raw, h_acc, i_sec, j_acc, k_sec)
 
     inst_type, op_type = lookup_codifier(
