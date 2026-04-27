@@ -10,6 +10,7 @@ from gpb_d_msg import read_text_with_encoding
 
 # Индексы полей (0-based) по строке `I_102_20260115_00248.MSG` (GBP_I_example.jpg)
 # 102;5405426;;12005;18;33563;233;25;98070.111;10934;233;0;98040.000;1;102459261;ZKL...;НГРИ;10000
+# H/I — счёт и раздел списания (debit); J/K — зачисления (credit); см. build_svod_row (svod_excel).
 class IField:
     DEPO = 0
     INTERNAL_NO = 1

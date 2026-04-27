@@ -24,6 +24,7 @@ from depo_directory import (
     lookup_account_by_gpb_dom_code,
     lookup_depo_row_by_account_number,
     lookup_depo_row_by_client_id,
+    normalize_account_key,
 )
 from gpb_d_msg import DMsgDataRow, DMsgFile, instruction_type_df_dp
 from gpb_i_msg import IField, IMsgDataRow, IMsgFile, compute_depot_section
@@ -68,7 +69,7 @@ def svod_technical_key(
     instruction_n: str,
     date_op: str,
 ) -> str:
-    """Колонка Q: F_G_N_дата (как на скрине СВОД_операций)."""
+    """Колонка Q: счёт_раздел_N_дата — счёт и раздел как в колонках «Счет депо» и «Раздел депо» строки."""
     return f"{account_f.strip()}_{section_g.strip()}_{instruction_n.strip()}_{date_op.strip()}"
 
 
@@ -122,6 +123,45 @@ def _format_depo_account_cell(acc: str | None) -> str:
         return str(int(float(s)))
     except (ValueError, TypeError):
         return s
+
+
+def _gpb_depo_flow_hint(f_svod: str, h_acc: str, j_acc: str) -> str | None:
+    """
+    Направление для выбора строки «Коды»: «Счет депо» (после справочника) совпал
+    со счётом списания (debit, поле H в I*.MSG ГПБ) → debit / со счётом зачисления (J) → credit.
+    """
+    ks = normalize_account_key(f_svod)
+    kh, kj = normalize_account_key(h_acc), normalize_account_key(j_acc)
+    if not ks:
+        return None
+    on_h = bool(kh) and ks == kh
+    on_j = bool(kj) and ks == kj
+    if on_h and not on_j:
+        return "debit"
+    if on_j and not on_h:
+        return "credit"
+    return None
+
+
+def _gpb_g_depo_section(
+    f_svod: str,
+    f_raw: str,
+    g_raw: str,
+    h_acc: str,
+    i_sec: str,
+    j_acc: str,
+    k_sec: str,
+) -> str:
+    """Колонка «Раздел депо»: раздел списания или зачисления по стороне «Счет депо»; иначе §4.4 ТЗ."""
+    ks = normalize_account_key(f_svod)
+    kh, kj = normalize_account_key(h_acc), normalize_account_key(j_acc)
+    on_h = bool(ks and kh and ks == kh)
+    on_j = bool(ks and kj and ks == kj)
+    if on_h and not on_j:
+        return str(i_sec).strip()
+    if on_j and not on_h:
+        return str(k_sec).strip()
+    return compute_depot_section(f_raw, g_raw, h_acc, i_sec, j_acc, k_sec)
 
 
 def _format_section_cell(sec: str | None) -> str:
@@ -261,19 +301,8 @@ def build_svod_row(
     j_acc = data.get(IField.J_CREDIT_ACC)
     k_sec = data.get(IField.K_CREDIT_SEC)
 
-    g_out = compute_depot_section(f_raw, g_raw, h_acc, i_sec, j_acc, k_sec)
-
     op_code = data.get(IField.OP_CODE)
     aux = data.get(IField.AUX_CODE)
-
-    inst_type, op_type = lookup_codifier(
-        codifier_rows,
-        op_code,
-        aux,
-        f_raw,
-        h_acc,
-        j_acc,
-    )
 
     depo_by_client = lookup_depo_row_by_client_id(depo_rows, client_id)
     depository = depo_by_client.depository if depo_by_client else ""
@@ -287,6 +316,19 @@ def build_svod_row(
         else (_format_depo_account_cell(f_raw) or (f_raw or "").strip())
     )
 
+    flow_hint = _gpb_depo_flow_hint(f_svod, h_acc, j_acc)
+    g_out = _gpb_g_depo_section(f_svod, f_raw, g_raw, h_acc, i_sec, j_acc, k_sec)
+
+    inst_type, op_type = lookup_codifier(
+        codifier_rows,
+        op_code,
+        aux,
+        f_svod,
+        h_acc,
+        j_acc,
+        flow_hint=flow_hint,
+    )
+
     owner_row = lookup_depo_row_by_account_number(depo_rows, f_svod or f_raw)
     owner = owner_row.owner if owner_row else (depo_by_client.owner if depo_by_client else "")
 
@@ -294,7 +336,12 @@ def build_svod_row(
     qty = data.get(IField.QTY) or "1"
     basis = data.get(IField.BASIS)
 
-    tech = svod_technical_key(f_raw, g_out, inst_type, op_date)
+    tech = svod_technical_key(f_svod, g_out, inst_type, op_date)
+
+    h_out = _format_depo_account_cell(h_acc) or (h_acc or "").strip()
+    i_out = _format_section_cell(i_sec) or (i_sec or "").strip()
+    j_out = _format_depo_account_cell(j_acc) or (j_acc or "").strip()
+    k_out = _format_section_cell(k_sec) or (k_sec or "").strip()
 
     return [
         op_date,
@@ -304,10 +351,10 @@ def build_svod_row(
         owner,
         f_svod,
         g_out,
-        h_acc,
-        i_sec,
-        j_acc,
-        k_sec,
+        h_out,
+        i_out,
+        j_out,
+        k_out,
         nrn,
         qty,
         inst_type,
