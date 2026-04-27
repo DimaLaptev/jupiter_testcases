@@ -52,8 +52,8 @@ class IMsgHeader:
 
 def _gpb_dom_sheet_excel_format(parts: list[str]) -> bool:
     """
-    True — формат как в выгрузке I.MSG в Excel (ДОМ.РФ): [2] пустой, пары списание/зачисление
-    в физических индексах 4–5 и 8–9. Отличие от «эталонной» строки ГПБ: K (логич. 10) обычно 0 или 1.
+    True — выгрузка I.MSG в Excel (ДОМ.РФ): [2] пустой; для СВОД списание **5–6**,
+    зачисление **9–10** (0-based). От эталона ГПБ: K в поз. **10** обычно **0** или **1**.
     """
     if len(parts) <= 10:
         return False
@@ -70,7 +70,7 @@ def gpb_i_row_layout(parts: list[str]) -> str:
     """
     standard — эталон GBP_I_example (H–K с инд. 7–10).
     compact — нет пустого [2], нет F/G в привычных позициях (код оп. с [2]).
-    sheet — пустой [2], но списание/зачисление для СВОД с [4–5] и [8–9] (как на скрине Excel).
+    sheet — пустой [2], списание/зачисление для СВОД с **[5–6]** и **[9–10]** (как на скрине Excel).
     """
     if len(parts) < 3:
         return "standard"
@@ -99,19 +99,20 @@ def gpb_i_resolve_field_index(parts: list[str], std_index: int) -> int | None:
             return 3 if 3 < len(parts) else None
         if std_index == IField.AUX_CODE:
             return 4 if 4 < len(parts) else None
-        if std_index in (IField.F_DEPO_ACC, IField.G_DEPO_SEC):
-            return std_index if std_index < len(parts) else None
-        if std_index == IField.H_DEBIT_ACC:
-            return 4 if 4 < len(parts) else None
-        if std_index == IField.I_DEBIT_SEC:
+        if std_index == IField.F_DEPO_ACC:
             return 5 if 5 < len(parts) else None
+        if std_index == IField.G_DEPO_SEC:
+            return 6 if 6 < len(parts) else None
+        if std_index == IField.H_DEBIT_ACC:
+            return 5 if 5 < len(parts) else None
+        if std_index == IField.I_DEBIT_SEC:
+            return 6 if 6 < len(parts) else None
         if std_index == IField.J_CREDIT_ACC:
-            return 8 if 8 < len(parts) else None
-        if std_index == IField.K_CREDIT_SEC:
             return 9 if 9 < len(parts) else None
+        if std_index == IField.K_CREDIT_SEC:
+            return 10 if 10 < len(parts) else None
         if std_index >= IField.EXTRA1:
-            ri = std_index - 1
-            return ri if 0 <= ri < len(parts) else None
+            return std_index if std_index < len(parts) else None
         return None
 
     if std_index in (IField.DEPO, IField.INTERNAL_NO):
