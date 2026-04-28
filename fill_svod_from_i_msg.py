@@ -28,7 +28,12 @@ from rsd_i_msg import (
     is_rsd_technical_row,
     rsd_execution_code,
 )
-from region_is_xls import RegionTableRow, parse_region_is_xls
+from region_is_xls import (
+    REGION_PARSE_SKIP_BAD_NAME,
+    REGION_PARSE_SKIP_UNREADABLE,
+    RegionTableRow,
+    parse_region_is_xls,
+)
 from rsd_r01_xlsx import parse_r01_xlsx
 from svod_excel import (
     ERRORS_SHEET_HEADERS,
@@ -596,12 +601,16 @@ def main() -> int:
                 if not files_reg:
                     print(f"Нет файлов IS*.xls в {region_dir}")
                 for fp in files_reg:
-                    pr = parse_region_is_xls(fp)
+                    pr, region_skip = parse_region_is_xls(fp)
                     if pr is None:
-                        print(
-                            f"Пропуск (не IS*.xls): {fp.name}",
-                            file=sys.stderr,
-                        )
+                        if region_skip == REGION_PARSE_SKIP_BAD_NAME:
+                            msg = "Пропуск REGION (имя не IS*.xls):"
+                        else:
+                            msg = (
+                                "Пропуск REGION (файл не прочитан, пустые листы "
+                                "или неподдерживаемый формат):"
+                            )
+                        print(f"{msg} {fp.name}", file=sys.stderr)
                         continue
                     tbody = pr.table_rows
                     if not tbody:

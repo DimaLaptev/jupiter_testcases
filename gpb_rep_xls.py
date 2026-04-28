@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,78 +17,189 @@ def _cell_str(val: Any) -> str:
     return str(val).strip()
 
 
-def _read_rows_openpyxl(path: Path) -> list[list[str]]:
+def _sheet_fill_score(rows: list[list[str]]) -> int:
+    """Оценка «полезности» листа: число непустых ячеек (cell)."""
+    return sum(1 for row in rows for cell in row if (cell or "").strip())
+
+
+def _read_rows_openpyxl_best_sheet(path: Path) -> list[list[str]]:
+    """Выбор листа с максимальным содержимым (на первом вкладке иногда только подпись)."""
     from openpyxl import load_workbook
 
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
-        ws = wb.active
-        rows: list[list[str]] = []
-        for row in ws.iter_rows(values_only=True):
-            if row is None:
+        best_rows: list[list[str]] = []
+        best_score = 0
+        for ws in wb.worksheets:
+            if not callable(getattr(ws, "iter_rows", None)):
                 continue
-            rows.append([_cell_str(x) for x in row])
-        return rows
+            try:
+                mat: list[list[str]] = []
+                for row in ws.iter_rows(values_only=True):
+                    if row is None:
+                        continue
+                    mat.append([_cell_str(x) for x in row])
+            except Exception:
+                continue
+            sc = _sheet_fill_score(mat)
+            if sc > best_score:
+                best_score = sc
+                best_rows = mat
+        return best_rows
     finally:
         wb.close()
 
 
-def _read_rows_xlrd(path: Path) -> list[list[str]]:
+def _read_rows_xlrd_best_sheet(path: Path) -> list[list[str]]:
     try:
         import xlrd
     except ModuleNotFoundError as e:
         raise RuntimeError(
-            "Для чтения бинарного Excel .xls (OLE) нужен пакет xlrd (import). "
+            'Для чтения бинарного Excel .xls (OLE) нужен пакет xlrd (import). '
             'Установите: pip install "xlrd>=2.0.1,<3"'
         ) from e
 
     book = xlrd.open_workbook(str(path), formatting_info=False)
-    sh = book.sheet_by_index(0)
-    rows: list[list[str]] = []
-    for r in range(sh.nrows):
-        row: list[str] = []
-        for c in range(sh.ncols):
-            cell = sh.cell(r, c)
-            v = cell.value
-            if v is None or v == "":
-                row.append("")
-            elif isinstance(v, float) and v == int(v):
-                row.append(str(int(v)))
-            else:
-                row.append(_cell_str(v))
-        rows.append(row)
-    return rows
+    best_rows: list[list[str]] = []
+    best_score = 0
+    for si in range(book.nsheets):
+        sh = book.sheet_by_index(si)
+        if sh.nrows == 0:
+            continue
+        mat: list[list[str]] = []
+        for r in range(sh.nrows):
+            row: list[str] = []
+            for c in range(sh.ncols):
+                cell = sh.cell(r, c)
+                v = cell.value
+                if v is None or v == "":
+                    row.append("")
+                elif isinstance(v, float) and v == int(v):
+                    row.append(str(int(v)))
+                else:
+                    row.append(_cell_str(v))
+            mat.append(row)
+        sc = _sheet_fill_score(mat)
+        if sc > best_score:
+            best_score = sc
+            best_rows = mat
+    return best_rows
+
+
+def _local_xml_tag(elem: ET.Element) -> str:
+    if not elem.tag:
+        return ""
+    return elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+
+
+def _read_rows_xml_spreadsheet_2003(path: Path) -> list[list[str]]:
+    """
+    Microsoft XML Spreadsheet 2003 («электронная таблица XML»), иногда сохранена как *.xls.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return []
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
+    if raw.startswith(b"\xff\xfe"):
+        text = raw[2:].decode("utf-16-le", errors="replace")
+    elif raw.startswith(b"\xfe\xff"):
+        text = raw[2:].decode("utf-16-be", errors="replace")
+    else:
+        text = raw.decode("utf-8", errors="replace")
+    sniff = text.lstrip()[:2000].lower()
+    if "<?xml" not in text[:2000].lower() and "worksheet" not in sniff:
+        return []
+
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return []
+
+    def cell_text(cell: ET.Element) -> str:
+        for ch in cell:
+            if _local_xml_tag(ch) != "Data":
+                continue
+            parts: list[str] = []
+            if ch.text:
+                parts.append(ch.text)
+            for sub in ch:
+                parts.append(sub.text or "")
+                if sub.tail:
+                    parts.append(sub.tail)
+            return "".join(parts).strip()
+        tail = "".join(cell.itertext()).strip()
+        return tail or ""
+
+    best_rows: list[list[str]] = []
+    best_score = 0
+    for tbl in root.iter():
+        if _local_xml_tag(tbl) != "Table":
+            continue
+        mat: list[list[str]] = []
+        for row in tbl.iter():
+            if _local_xml_tag(row) != "Row":
+                continue
+            line: list[str] = []
+            for cell in row:
+                if _local_xml_tag(cell) != "Cell":
+                    continue
+                line.append(cell_text(cell))
+            if line:
+                mat.append(line)
+        sc = _sheet_fill_score(mat)
+        if sc > best_score:
+            best_score = sc
+            best_rows = mat
+    return best_rows
 
 
 def read_rep_sheet_rows(path: Path) -> list[list[str]]:
     """
-    OOXML (.xlsx, в т.ч. под видом .xls) — по сигнатуре ZIP «PK» → openpyxl;
-    иначе бинарный .xls → xlrd (openpyxl старый .xls не читает).
+    Чтение активного содержимого книги Excel (Excel).
 
-    При повреждённом OLE (`CompDocError` и др.) пробуем openpyxl (переименованный OOXML),
-    при неудаче — пустой список (без падения пайплайна).
+    - OOXML (по байтам «PK» → ZIP) — openpyxl, лист с максимальным числом непустых ячеек.
+    - Бинарный .xls (BIFF/OLE) — xlrd по всем листам (аналогично выбор по наполнению).
+    - Распространённые обходные пути ошибок чтения: XML Spreadsheet 2003 (иногда сохранена как *.xls);
+      затем попытка openpyxl как для «переименованных» книг.
+
+    При критической ошибке — пустой список строк (не падаем).
     """
     path = Path(path)
     try:
-        with path.open("rb") as f:
-            head = f.read(4)
+        head = path.open("rb").read(8)
     except OSError:
         return []
-    if head[:2] == b"PK":
+
+    if len(head) >= 2 and head[:2] == b"PK":
         try:
-            return _read_rows_openpyxl(path)
+            return _read_rows_openpyxl_best_sheet(path)
         except Exception:
             return []
 
+    rows: list[list[str]] = []
     try:
-        return _read_rows_xlrd(path)
+        rows = _read_rows_xlrd_best_sheet(path)
     except RuntimeError:
         raise
     except Exception:
-        try:
-            return _read_rows_openpyxl(path)
-        except Exception:
-            return []
+        rows = []
+
+    if _sheet_fill_score(rows) > 0:
+        return rows
+
+    xml_try = _read_rows_xml_spreadsheet_2003(path)
+    if _sheet_fill_score(xml_try) > 0:
+        return xml_try
+
+    try:
+        ob = _read_rows_openpyxl_best_sheet(path)
+        if _sheet_fill_score(ob) > 0:
+            return ob
+    except Exception:
+        pass
+    return rows
 
 
 def parse_rep_filename(stem: str) -> tuple[str, str, str] | None:

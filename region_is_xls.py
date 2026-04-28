@@ -271,14 +271,22 @@ class RegionParseResult:
     table_rows: list[RegionTableRow] = field(default_factory=list)
 
 
-def parse_region_is_xls(path: Path) -> RegionParseResult | None:
+REGION_PARSE_SKIP_BAD_NAME = "bad_filename_prefix"
+"""Имя файла (filename) не начинается с IS* (после stem)."""
+
+REGION_PARSE_SKIP_UNREADABLE = "workbook_unreadable"
+"""Не удалось получить строки из книги Excel (Excel) или все листы без данных (cell values)."""
+
+
+def parse_region_is_xls(path: Path) -> tuple[RegionParseResult | None, str | None]:
+    """Успех: (result, None). Пропуск: (None, код из REGION_PARSE_*)."""
     path = Path(path)
     if not path.stem.upper().startswith("IS"):
-        return None
+        return None, REGION_PARSE_SKIP_BAD_NAME
 
     rows = read_rep_sheet_rows(path)
     if not rows:
-        return None
+        return None, REGION_PARSE_SKIP_UNREADABLE
 
     op_type = _scan_field(rows, 120, ("тип операции",))
     op_date = _scan_field(rows, 120, ("дата проведения операции",))
@@ -337,4 +345,4 @@ def parse_region_is_xls(path: Path) -> RegionParseResult | None:
         filename_account=fname_acc,
         filename_operation_title=fname_op,
         table_rows=table_out,
-    )
+    ), None
