@@ -8,20 +8,19 @@ from pathlib import Path
 from gpb_d_msg import read_text_with_encoding
 
 
-# Индексы полей (0-based) по строке `I_102_20260115_00248.MSG` (GBP_I_example.jpg)
-# 102;5405426;;12005;18;33563;233;25;98070.111;10934;233;0;98040.000;1;102459261;ZKL...;НГРИ;10000
-# H/I — счёт и раздел списания (debit); J/K — зачисления (credit); см. build_svod_row (svod_excel).
+# Строка данных I*.MSG ГПБ (INSTRUCTIONS): после split(';') не менее 18 полей. Разделение ГПБ/РСД — по каталогу
+# входа в `fill_svod_from_i_msg.py` (`--input-dir` vs `--input-dir-rsd`). Поле [2] может быть пустым или заполненным;
+# код операции и блоки 5–6 / 9–10 считаются с фиксированных позиций (см. `gpb_i_resolve_field_index`).
+# Пример: 102;5406274;;12212;7;26716;204;70;98040.000;32169;0;0;98000.100;1;…;10000
 #
-# «Компактная» строка (без пустого зарезервированного поля и без F/G в MSG), напр.:
-# 102;5406274;12212;7;26716;204;70;98040.000;32169;0;… — код оп. с инд. 2, H/I с 4–5, J/K с 8–9.
-#
-# «Выгрузка в Excel» при пустом [2] (как I_102_20260128_00109.MSG): те же 4–5 и 8–9 для колонок
-# списание/зачисление в СВОД, при этом F/G остаются на 5–6 для поля F сообщения (см. resolve).
+# Логические имена IField (§ ТЗ) сопоставляются с физическими индексами (0-based):
+# OP_CODE→3, AUX→4, F/G счёта депо→5–6; для колонок СВОД «списание/зачисление» те же 5–6 и 9–10
+# (H/I дублируют F/G по позициям; J/K на 9–10). Хвост с 11 — как в эталонной длине строки.
 GPB_I_ROW_MIN_LEN = 18
-GPB_I_ROW_MIN_LEN_COMPACT = 17
 
 
 class IField:
+    """Именованные поля строки; физические индексы через `gpb_i_resolve_field_index`."""
     DEPO = 0
     INTERNAL_NO = 1
     RESERVED = 2
@@ -50,92 +49,32 @@ class IMsgHeader:
         return self.raw.get(key, default)
 
 
-def _gpb_dom_sheet_excel_format(parts: list[str]) -> bool:
-    """
-    True — выгрузка I.MSG в Excel (ДОМ.РФ): [2] пустой; для СВОД списание **5–6**,
-    зачисление **9–10** (0-based). От эталона ГПБ: K в поз. **10** обычно **0** или **1**.
-    """
-    if len(parts) <= 10:
-        return False
-    if parts[2].strip():
-        return False
-    try:
-        k_std = int(float((parts[10] or "0").strip() or 0))
-    except (ValueError, TypeError):
-        return False
-    return k_std <= 1
-
-
-def gpb_i_row_layout(parts: list[str]) -> str:
-    """
-    standard — эталон GBP_I_example (H–K с инд. 7–10).
-    compact — нет пустого [2], нет F/G в привычных позициях (код оп. с [2]).
-    sheet — пустой [2], списание/зачисление для СВОД с **[5–6]** и **[9–10]** (как на скрине Excel).
-    """
-    if len(parts) < 3:
-        return "standard"
-    if parts[2].strip():
-        return "compact"
-    if _gpb_dom_sheet_excel_format(parts):
-        return "sheet"
-    return "standard"
-
-
 def gpb_i_resolve_field_index(parts: list[str], std_index: int) -> int | None:
     """
-    Сопоставляет «логический» индекс IField со смещением в фактической строке.
-    В compact F/G в файле нет — get вернёт пусто; хвост со сдвигом −1 относительно standard.
+    Единая раскладка ГПБ I*.MSG (выгрузка Excel): пустой резерв [2], списание в СВОД 5–6, зачисление 9–10.
     """
-    layout = gpb_i_row_layout(parts)
-    if layout == "standard":
-        if std_index < 0 or std_index >= len(parts):
-            return None
-        return std_index
-
-    if layout == "sheet":
-        if std_index in (IField.DEPO, IField.INTERNAL_NO, IField.RESERVED):
-            return std_index if std_index < len(parts) else None
-        if std_index == IField.OP_CODE:
-            return 3 if 3 < len(parts) else None
-        if std_index == IField.AUX_CODE:
-            return 4 if 4 < len(parts) else None
-        if std_index == IField.F_DEPO_ACC:
-            return 5 if 5 < len(parts) else None
-        if std_index == IField.G_DEPO_SEC:
-            return 6 if 6 < len(parts) else None
-        if std_index == IField.H_DEBIT_ACC:
-            return 5 if 5 < len(parts) else None
-        if std_index == IField.I_DEBIT_SEC:
-            return 6 if 6 < len(parts) else None
-        if std_index == IField.J_CREDIT_ACC:
-            return 9 if 9 < len(parts) else None
-        if std_index == IField.K_CREDIT_SEC:
-            return 10 if 10 < len(parts) else None
-        if std_index >= IField.EXTRA1:
-            return std_index if std_index < len(parts) else None
+    if std_index < 0:
         return None
-
-    if std_index in (IField.DEPO, IField.INTERNAL_NO):
+    if std_index in (IField.DEPO, IField.INTERNAL_NO, IField.RESERVED):
         return std_index if std_index < len(parts) else None
-    if std_index == IField.RESERVED:
-        return None
     if std_index == IField.OP_CODE:
-        return 2 if 2 < len(parts) else None
-    if std_index == IField.AUX_CODE:
         return 3 if 3 < len(parts) else None
-    if std_index in (IField.F_DEPO_ACC, IField.G_DEPO_SEC):
-        return None
-    if std_index == IField.H_DEBIT_ACC:
+    if std_index == IField.AUX_CODE:
         return 4 if 4 < len(parts) else None
-    if std_index == IField.I_DEBIT_SEC:
+    if std_index == IField.F_DEPO_ACC:
         return 5 if 5 < len(parts) else None
+    if std_index == IField.G_DEPO_SEC:
+        return 6 if 6 < len(parts) else None
+    if std_index == IField.H_DEBIT_ACC:
+        return 5 if 5 < len(parts) else None
+    if std_index == IField.I_DEBIT_SEC:
+        return 6 if 6 < len(parts) else None
     if std_index == IField.J_CREDIT_ACC:
-        return 8 if 8 < len(parts) else None
-    if std_index == IField.K_CREDIT_SEC:
         return 9 if 9 < len(parts) else None
+    if std_index == IField.K_CREDIT_SEC:
+        return 10 if 10 < len(parts) else None
     if std_index >= IField.EXTRA1:
-        ri = std_index - 1
-        return ri if 0 <= ri < len(parts) else None
+        return std_index if std_index < len(parts) else None
     return None
 
 
@@ -228,10 +167,7 @@ def passes_execution_filter(row: IMsgDataRow, min_code: int = 10000) -> bool:
 
 
 def is_gpb_i_row(parts: list[str]) -> bool:
-    """Табличная строка ГПБ INSTRUCTIONS: полная (≥18 полей) или компактная (≥17, без [2] и без F/G)."""
-    layout = gpb_i_row_layout(parts)
-    if layout == "compact":
-        return len(parts) >= GPB_I_ROW_MIN_LEN_COMPACT
+    """Достаточно полей для разбора строки табличной части ГПБ INSTRUCTIONS (маршрут ГПБ/РСД — по каталогу файла в скрипте)."""
     return len(parts) >= GPB_I_ROW_MIN_LEN
 
 
