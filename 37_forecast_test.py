@@ -91,13 +91,23 @@ WARN_COLS = [
 
 
 def calc_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float, float]:
-    """Метрики как в ноутбуке 37 (точность / стабильность / качество)."""
+    """Метрики как в ноутбуке 37 (точность / стабильность / качество).
+
+    Строки с нечисловым фактом или прогнозом (NaN/inf) исключаются — иначе ``np.mean(acc)``
+    давал бы NaN (пустая ячейка в Excel), а стабильность/качество оставались бы нулями.
+    """
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.maximum(np.asarray(y_pred, dtype=float), 0)
     y_pred = np.where(y_pred < 1e-3, 0.0, y_pred)
-    if len(y_true) == 0:
-        return 0.0, 0.0, 0.0
-    acc = np.empty_like(y_true)
+
+    valid = np.isfinite(y_true) & np.isfinite(y_pred)
+    if not np.any(valid):
+        return float("nan"), float("nan"), float("nan")
+
+    y_true = y_true[valid]
+    y_pred = y_pred[valid]
+
+    acc = np.empty_like(y_true, dtype=float)
     mask_zero = y_true == 0
     acc[mask_zero] = np.where(y_pred[mask_zero] == 0, 100.0, 0.0)
     mask_ok = ~mask_zero
@@ -804,9 +814,29 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Готовый CSV (date, fact_value, operation_id, resist_id [, fact_predict]). "
         f"Если не задан — сборка из {RAW_DIR} (data-2022 … data-2025), как nb37.",
     )
-    parser.add_argument("--resist-id", type=int, default=None)
+    rid_grp = parser.add_mutually_exclusive_group()
+    rid_grp.add_argument(
+        "--resist-id",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Один resist_id (только эти строки в прогоне)",
+    )
+    rid_grp.add_argument(
+        "--resist-ids",
+        type=str,
+        default=None,
+        metavar="LIST",
+        help="Несколько resist_id через запятую (comma-separated), напр. 124,125,130",
+    )
     parser.add_argument("--test-year", type=int, default=2025)
-    parser.add_argument("--test-months", type=str, default="7,8,9,10,11,12", help="Список месяцев через запятую")
+    parser.add_argument(
+        "--test-months",
+        type=str,
+        default="7,8,9,10,11,12",
+        help="Месяцы теста (test months), через запятую; метрики только по этим месяцам внутри --test-year "
+        "(по умолчанию второе полугодие (second half): июль–декабрь)",
+    )
     parser.add_argument(
         "--config",
         type=str,
@@ -851,9 +881,20 @@ def main(argv: Optional[List[str]] = None) -> None:
         df["fact_predict"] = pd.to_numeric(df["fact_predict"], errors="coerce")
     df = df.dropna(subset=["date", "fact_value", "operation_id", "resist_id"])
 
-    rid_list = sorted(df["resist_id"].dropna().unique().astype(int).tolist())
-    if args.resist_id is not None:
+    avail = set(df["resist_id"].dropna().unique().astype(int).tolist())
+    if args.resist_ids is not None:
+        rid_list = [int(x.strip()) for x in args.resist_ids.split(",") if x.strip()]
+        miss = [r for r in rid_list if r not in avail]
+        if miss:
+            parser.error(f"--resist-ids: нет в данных resist_id={miss}; доступно из файла: {sorted(avail)!r}")
+    elif args.resist_id is not None:
+        if args.resist_id not in avail:
+            parser.error(
+                f"--resist-id {args.resist_id} отсутствует в данных; доступно: {sorted(avail)!r}"
+            )
         rid_list = [args.resist_id]
+    else:
+        rid_list = sorted(avail)
 
     combine_frames: List[pd.DataFrame] = []
     per_rid_best: Dict[int, Dict[str, Any]] = {}
