@@ -92,20 +92,30 @@ def _parse_region_header_accounts_c(
 ) -> tuple[str, str, str, str]:
     """
     Счёт зачисления / списания и разделы из колонки C по меткам в A.
-    Раздел зачисления — «Наименование раздела…» до строки «со счета депо»;
-    раздел списания — после «со счета депо» (первая подходящая строка после).
+
+    Строки «на счет депо» и «со счета депо» в разных выгрузках могут идти в любом порядке.
+    Значение «Наименование раздела счета депо» для зачисления / списания выбирается по принадлежности
+    к блоку между соответствующими строками счёта зачисления и счёта списания в файле — без константы
+    «строго через 4 строки» от метки счёта.
     """
     from_acc = from_sec = to_acc = to_sec = ""
     scan = rows[:max_r]
 
-    i_from = -1
+    idx_to_acc = -1
+    idx_fr_acc = -1
     for ri, row in enumerate(scan):
         if not row:
             continue
-        label_raw = row[0].strip()
-        if _is_row_label_from_account(label_raw):
-            i_from = ri
-            break
+        l0 = row[0].strip()
+        if not l0:
+            continue
+        val = _value_col_c(row)
+        if not val:
+            continue
+        if idx_to_acc < 0 and _is_row_label_to_account(l0):
+            idx_to_acc = ri
+        if idx_fr_acc < 0 and _is_row_label_from_account(l0):
+            idx_fr_acc = ri
 
     for row in scan:
         if len(row) < 1:
@@ -141,13 +151,38 @@ def _parse_region_header_accounts_c(
             if v:
                 section_candidates.append((ri, v))
 
-    if i_from >= 0:
-        before = [x for x in section_candidates if x[0] < i_from]
-        after = [x for x in section_candidates if x[0] > i_from]
-        if before:
-            to_sec = before[-1][1]
-        if after:
-            from_sec = after[0][1]
+    if idx_to_acc < 0 and idx_fr_acc < 0:
+        return from_acc, from_sec, to_acc, to_sec
+
+    if idx_to_acc >= 0 and idx_fr_acc >= 0:
+        if idx_to_acc < idx_fr_acc:
+            # Зачисление (credit) блок выше в файле — списание (debit) ниже (классический порядок).
+            between_to_fr = [(ri, v) for ri, v in section_candidates if idx_to_acc < ri < idx_fr_acc]
+            if between_to_fr:
+                to_sec = between_to_fr[-1][1]
+
+            after_fr = [(ri, v) for ri, v in section_candidates if ri > idx_fr_acc]
+            if after_fr:
+                from_sec = after_fr[0][1]
+        else:
+            # Списание (debit) выше зачисления (credit) — блоки поменены местами.
+            between_fr_to = [(ri, v) for ri, v in section_candidates if idx_fr_acc < ri < idx_to_acc]
+            if between_fr_to:
+                from_sec = between_fr_to[-1][1]
+
+            after_to = [(ri, v) for ri, v in section_candidates if ri > idx_to_acc]
+            if after_to:
+                to_sec = after_to[-1][1]
+
+    elif idx_to_acc >= 0:
+        after_to = [(ri, v) for ri, v in section_candidates if ri > idx_to_acc]
+        if after_to:
+            to_sec = after_to[-1][1]
+
+    elif idx_fr_acc >= 0:
+        after_fr = [(ri, v) for ri, v in section_candidates if ri > idx_fr_acc]
+        if after_fr:
+            from_sec = after_fr[0][1]
 
     return from_acc, from_sec, to_acc, to_sec
 
@@ -332,17 +367,20 @@ def parse_region_is_xls(path: Path) -> tuple[RegionParseResult | None, str | Non
     footer_start = max(0, data_start)
     basis, reg_footer = _parse_footer(rows, footer_start)
 
-    return RegionParseResult(
-        path=path.resolve(),
-        operation_type=op_type,
-        op_date=op_date,
-        from_acc=from_acc,
-        from_sec=from_sec,
-        to_acc=to_acc,
-        to_sec=to_sec,
-        basis=basis,
-        reg_footer=reg_footer,
-        filename_account=fname_acc,
-        filename_operation_title=fname_op,
-        table_rows=table_out,
-    ), None
+    return (
+        RegionParseResult(
+            path=path.resolve(),
+            operation_type=op_type,
+            op_date=op_date,
+            from_acc=from_acc,
+            from_sec=from_sec,
+            to_acc=to_acc,
+            to_sec=to_sec,
+            basis=basis,
+            reg_footer=reg_footer,
+            filename_account=fname_acc,
+            filename_operation_title=fname_op,
+            table_rows=table_out,
+        ),
+        None,
+    )
