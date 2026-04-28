@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,63 @@ def _cell_str(val: Any) -> str:
 def _sheet_fill_score(rows: list[list[str]]) -> int:
     """Оценка «полезности» листа: число непустых ячеек (cell)."""
     return sum(1 for row in rows for cell in row if (cell or "").strip())
+
+
+def _calamine_cell_to_str(val: Any) -> str:
+    """Значение ячейки calamine → строка для дальнейшего парсинга (как xlrd/openpyxl)."""
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        return "TRUE" if val else "FALSE"
+    if isinstance(val, (datetime, date, time)):
+        return str(val)
+    if isinstance(val, timedelta):
+        return str(val)
+    if isinstance(val, float):
+        if val == int(val):
+            return str(int(val))
+        return str(val).strip()
+    return str(val).strip()
+
+
+def _read_rows_calamine_best_sheet(path: Path) -> list[list[str]]:
+    """
+    Библиотека calamine (Rust) — читает ряд вариантов .xls/.xlsx/.xlsb, где xlrd/openpyxl дают пусто.
+    """
+    try:
+        from python_calamine import CalamineWorkbook
+    except ModuleNotFoundError:
+        return []
+
+    try:
+        wb = CalamineWorkbook.from_path(path)
+    except Exception:
+        try:
+            wb = CalamineWorkbook.from_object(path)
+        except Exception:
+            return []
+
+    names = getattr(wb, "sheet_names", None) or []
+    if not names:
+        return []
+
+    best_rows: list[list[str]] = []
+    best_score = 0
+    for i in range(len(names)):
+        try:
+            sh = wb.get_sheet_by_index(i)
+        except Exception:
+            continue
+        try:
+            raw = sh.to_python(skip_empty_area=False)
+        except Exception:
+            continue
+        mat = [[_calamine_cell_to_str(c) for c in row] for row in raw]
+        sc = _sheet_fill_score(mat)
+        if sc > best_score:
+            best_score = sc
+            best_rows = mat
+    return best_rows
 
 
 def _read_rows_openpyxl_best_sheet(path: Path) -> list[list[str]]:
@@ -159,10 +217,10 @@ def read_rep_sheet_rows(path: Path) -> list[list[str]]:
     """
     Чтение активного содержимого книги Excel (Excel).
 
-    - OOXML (по байтам «PK» → ZIP) — openpyxl, лист с максимальным числом непустых ячеек.
-    - Бинарный .xls (BIFF/OLE) — xlrd по всем листам (аналогично выбор по наполнению).
-    - Распространённые обходные пути ошибок чтения: XML Spreadsheet 2003 (иногда сохранена как *.xls);
-      затем попытка openpyxl как для «переименованных» книг.
+    - OOXML (по байтам «PK» → ZIP) — openpyxl, лист по наполнению; при пустом результате — **python-calamine**.
+    - Бинарный .xls и прочее не-ZIP: **xlrd** и **python-calamine** (Rust); выбирается набор строк с большим числом непустых ячеек (при равенстве приоритет у calamine).
+
+    - Далее: XML Spreadsheet 2003 (как *.xls); запасной openpyxl.
 
     При критической ошибке — пустой список строк (не падаем).
     """
@@ -174,17 +232,28 @@ def read_rep_sheet_rows(path: Path) -> list[list[str]]:
 
     if len(head) >= 2 and head[:2] == b"PK":
         try:
-            return _read_rows_openpyxl_best_sheet(path)
+            oxml = _read_rows_openpyxl_best_sheet(path)
+            if _sheet_fill_score(oxml) > 0:
+                return oxml
         except Exception:
-            return []
+            pass
+        cm = _read_rows_calamine_best_sheet(path)
+        if _sheet_fill_score(cm) > 0:
+            return cm
+        return []
 
-    rows: list[list[str]] = []
+    rx: list[list[str]] = []
     try:
-        rows = _read_rows_xlrd_best_sheet(path)
+        rx = _read_rows_xlrd_best_sheet(path)
     except RuntimeError:
         raise
     except Exception:
-        rows = []
+        rx = []
+
+    rc = _read_rows_calamine_best_sheet(path)
+    sx = _sheet_fill_score(rx)
+    sc = _sheet_fill_score(rc)
+    rows = rc if sc >= sx else rx
 
     if _sheet_fill_score(rows) > 0:
         return rows
