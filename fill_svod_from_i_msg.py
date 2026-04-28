@@ -15,7 +15,13 @@ if str(_SRC) not in sys.path:
 from codifier_table import read_codifier_rows
 from depo_directory import read_depo_directory_rows
 from gpb_d_msg import parse_d_msg_file
-from gpb_i_msg import is_gpb_i_row, parse_i_msg_file, passes_execution_filter
+from gpb_i_msg import (
+    gpb_instruction_pair_key,
+    is_gpb_i_row,
+    normalize_ngri_for_match,
+    parse_i_msg_file,
+    passes_execution_filter,
+)
 from openpyxl import Workbook, load_workbook
 from rsd_i_msg import (
     is_rsd_i_row,
@@ -25,7 +31,9 @@ from rsd_i_msg import (
 from region_is_xls import RegionTableRow, parse_region_is_xls
 from rsd_r01_xlsx import parse_r01_xlsx
 from svod_excel import (
+    ERRORS_SHEET_HEADERS,
     SVOD_HEADERS,
+    build_gpb_i_d_match_index,
     build_svod_row,
     build_svod_row_from_d,
     build_svod_row_r01,
@@ -33,7 +41,9 @@ from svod_excel import (
     build_svod_row_rsd,
     build_svod_row_vtb,
     create_workbook_with_svod_only,
+    ensure_errors_sheet,
     ensure_svod_sheet,
+    select_d_msg_rows_for_svod,
     write_svod_rows,
 )
 from vtb_f752_xml import find_vtb_zip_for_xml, list_ngri_from_vtb_zip, parse_vtb_f752_xml
@@ -276,6 +286,10 @@ def seed_minimal_reference_workbook(path: Path) -> None:
     for col, title in enumerate(SVOD_HEADERS, start=1):
         ws_svod.cell(row=1, column=col, value=title)
 
+    ws_err = wb.create_sheet("Ошибки")
+    for col, title in enumerate(ERRORS_SHEET_HEADERS, start=1):
+        ws_err.cell(row=1, column=col, value=title)
+
     wb.save(path)
 
 
@@ -295,8 +309,14 @@ def ensure_workbook_structure(path: Path, create: bool, seed: bool) -> None:
         return
 
     wb = load_workbook(path)
+    changed = False
     if "СВОД_операций" not in wb.sheetnames:
         ensure_svod_sheet(wb)
+        changed = True
+    if "Ошибки" not in wb.sheetnames:
+        ensure_errors_sheet(wb)
+        changed = True
+    if changed:
         wb.save(path)
     wb.close()
 
@@ -406,7 +426,7 @@ def main() -> int:
     parser.add_argument(
         "--svod-d-only",
         action="store_true",
-        help="Только строки из D*.MSG (не обрабатывать I*.MSG)",
+        help="Только строки из D*.MSG из --input-dir-d (I*.MSG из --input-dir для сопоставления DF/DP рекомендуется)",
     )
     parser.add_argument(
         "--include-empty-doc-name",
@@ -436,13 +456,28 @@ def main() -> int:
 
     rows_out: list[list] = []
 
+    error_rows: list[list] = []
+    gpb_d_index: dict[tuple[str, str], str] = {}
+    gpb_d_stmt_keys: set[str] = set()
+    if not args.no_d_msg:
+        gpb_i_for_d = args.input_dir.resolve()
+        if gpb_i_for_d.is_dir():
+            gpb_d_index, gpb_d_stmt_keys = build_gpb_i_d_match_index(
+                gpb_i_for_d,
+                depo_rows,
+                cod_rows,
+            )
+
     if not args.svod_d_only:
         i_dirs: list[Path] = [args.input_dir.resolve()]
         if not args.no_rsd_msg:
             i_dirs.append(args.input_dir_rsd.resolve())
 
+        gpb_i_root = args.input_dir.resolve()
+
         seen_i: set[Path] = set()
         files_i: list[Path] = []
+        i_msg_from_gpb_dir: dict[Path, bool] = {}
         for input_dir in i_dirs:
             if not input_dir.is_dir():
                 print(
@@ -450,12 +485,15 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 continue
+            input_res = input_dir.resolve()
+            from_gpb_catalog = input_res == gpb_i_root
             for pat in ("I*.MSG", "i*.MSG"):
                 for f in sorted(input_dir.glob(pat)):
                     rp = f.resolve()
                     if rp not in seen_i:
                         seen_i.add(rp)
                         files_i.append(f)
+                        i_msg_from_gpb_dir[rp] = from_gpb_catalog
 
         if not files_i:
             print("Нет файлов I*.MSG в указанных каталогах ГПБ/РСД")
@@ -463,10 +501,13 @@ def main() -> int:
         for fp in files_i:
             parsed = parse_i_msg_file(fp)
             client_id = (parsed.header.get("ClientID") or "").strip()
+            from_gpb_catalog = i_msg_from_gpb_dir[fp.resolve()]
 
             for data in parsed.rows:
                 parts = data.parts
-                if is_gpb_i_row(parts):
+                if from_gpb_catalog:
+                    if not is_gpb_i_row(parts):
+                        continue
                     if not passes_execution_filter(data):
                         continue
                     rows_out.append(
@@ -646,9 +687,35 @@ def main() -> int:
                     print(f"Пропуск D (не DOC_INSTRUCT): {fp.name}", file=sys.stderr)
                     continue
                 client_id = (parsed.header.get("ClientID") or "").strip()
-                for data in parsed.rows:
-                    if not args.include_empty_doc_name and not data.doc_type.strip():
-                        continue
+                picked_rows = select_d_msg_rows_for_svod(
+                    parsed.rows,
+                    include_empty_doc_name=args.include_empty_doc_name,
+                )
+                for data in picked_rows:
+                    stmt_key = gpb_instruction_pair_key(fp)
+                    ng_key = normalize_ngri_for_match(data.ngri)
+                    i_flow = None
+                    if stmt_key is not None:
+                        hit = gpb_d_index.get((stmt_key, ng_key))
+                        if hit is not None:
+                            i_flow = hit  # "debit" | "credit"
+                    if i_flow is None:
+                        if stmt_key is None:
+                            reason = "key_unparsed"
+                        elif stmt_key not in gpb_d_stmt_keys:
+                            reason = "no_i_file"
+                        else:
+                            reason = "no_ngri_in_i"
+                        error_rows.append(
+                            [
+                                fp.name,
+                                stmt_key or "",
+                                data.ngri.strip(),
+                                reason,
+                                data.doc_type.strip(),
+                                (parsed.header.get("ReportDate") or "").strip(),
+                            ],
+                        )
                     rows_out.append(
                         build_svod_row_from_d(
                             parsed,
@@ -656,10 +723,15 @@ def main() -> int:
                             depo_rows,
                             cod_rows,
                             client_id,
+                            i_match_flow=i_flow,
                         ),
                     )
 
-    write_svod_rows(wb_path, rows_out)
+    write_svod_rows(
+        wb_path,
+        rows_out,
+        error_rows if not args.no_d_msg else [],
+    )
     print(f"Записано строк: {len(rows_out)} в {wb_path}")
     return 0
 

@@ -2,10 +2,29 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from gpb_d_msg import read_text_with_encoding
+
+
+def normalize_ngri_for_match(raw: str) -> str:
+    """Единая нормализация НГРИ для сопоставления D↔I (пробелы (whitespace))."""
+    s = (raw or "").strip()
+    s = re.sub(r"\s+", " ", s, flags=re.UNICODE)
+    return s
+
+
+def gpb_instruction_pair_key(path: Path) -> str | None:
+    """
+    Ключ пары I/D по имени файла: I_102_20260114_00070.MSG и D_102_20260114_00070.MSG → 102_20260114_00070.
+    """
+    stem = path.stem
+    m = re.match(r"^[iIdD]_(.+)$", stem)
+    if not m:
+        return None
+    return m.group(1).strip()
 
 
 # Строка данных I*.MSG ГПБ (INSTRUCTIONS): после split(';') не менее 18 полей. Разделение ГПБ/РСД — по каталогу

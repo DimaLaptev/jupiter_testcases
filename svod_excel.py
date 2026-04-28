@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Literal
 
 from openpyxl import Workbook, load_workbook
 
@@ -27,7 +28,17 @@ from depo_directory import (
     normalize_account_key,
 )
 from gpb_d_msg import DMsgDataRow, DMsgFile, instruction_type_df_dp
-from gpb_i_msg import IField, IMsgDataRow, IMsgFile, compute_depot_section
+from gpb_i_msg import (
+    IField,
+    IMsgDataRow,
+    IMsgFile,
+    compute_depot_section,
+    gpb_instruction_pair_key,
+    is_gpb_i_row,
+    normalize_ngri_for_match,
+    parse_i_msg_file,
+    passes_execution_filter,
+)
 from rsd_i_msg import (
     RsdIField,
     rsd_debit_credit_columns,
@@ -60,6 +71,15 @@ SVOD_HEADERS = [
     "Основание",
     "ОдноТипОперТипРазд",
     "Источник",
+]
+
+ERRORS_SHEET_HEADERS = [
+    "Источник",
+    "Ключ выписки",
+    "НГРИ",
+    "Причина",
+    "Наименование документа",
+    "Дата операции",
 ]
 
 
@@ -231,12 +251,193 @@ def _region_fgh_ijk(
     return f0, g0, h, i, j, k
 
 
+_DOC_OP_CREDIT = "Документы - зачисление"
+_DOC_OP_DEBIT = "Документы - списание"
+
+
+def select_d_msg_rows_for_svod(
+    rows: list[DMsgDataRow],
+    *,
+    include_empty_doc_name: bool,
+) -> list[DMsgDataRow]:
+    """Внутри одного D*.MSG: для каждого НГРИ — первая строка с непустым элементом 3 (наименование документа); иначе см. include_empty_doc_name."""
+    ngri_order: list[str] = []
+    by_ngri: dict[str, list[DMsgDataRow]] = {}
+    for data in rows:
+        ng = normalize_ngri_for_match(data.ngri)
+        if ng not in by_ngri:
+            ngri_order.append(ng)
+            by_ngri[ng] = []
+        by_ngri[ng].append(data)
+
+    out: list[DMsgDataRow] = []
+    for ng in ngri_order:
+        group = by_ngri[ng]
+        picked: DMsgDataRow | None = None
+        for data in group:
+            if data.doc_type.strip():
+                picked = data
+                break
+        if picked is None and include_empty_doc_name and group:
+            picked = group[0]
+        if picked is not None:
+            out.append(picked)
+    return out
+
+
+def classify_gpb_i_flow_for_d_match(
+    op_type: str,
+    f_svod: str,
+    h_acc: str,
+    i_sec: str,
+    j_acc: str,
+    k_sec: str,
+) -> Literal["debit", "credit"] | None:
+    """
+    Списание (debit) или зачисление (credit) для строки I*.MSG ГПБ: regex у конца строки «Тип операции»,
+    затем _gpb_depo_flow_hint, затем эвристика по подстрокам.
+    """
+    ot = (op_type or "").strip().lower()
+    # Дефис ASCII, en/em dash (тире) перед «списание»/«зачисление» в конце строки
+    m = re.search(r"(?:-|–|—)\s*(списание|зачисление)\s*$", ot)
+    if m:
+        w = m.group(1).lower()
+        if w == "списание":
+            return "debit"
+        if w == "зачисление":
+            return "credit"
+    hint = _gpb_depo_flow_hint(f_svod, h_acc, i_sec, j_acc, k_sec)
+    if hint == "debit":
+        return "debit"
+    if hint == "credit":
+        return "credit"
+    has_s = "списание" in ot
+    has_z = "зачисление" in ot
+    if has_s and not has_z:
+        return "debit"
+    if has_z and not has_s:
+        return "credit"
+    return None
+
+
+def gpb_i_row_op_type_and_accounts_for_d_match(
+    data: IMsgDataRow,
+    depo_rows: list[DepoDirectoryRow],
+    codifier_rows: list[CodifierRow],
+    client_id: str,
+) -> tuple[str, str, str, str, str, str]:
+    """
+    Как в build_svod_row для ГПБ I: (op_type из lookup_codifier, f_svod, h_acc, i_sec, j_acc, k_sec).
+    """
+    f_raw = data.get(IField.F_DEPO_ACC)
+    g_raw = data.get(IField.G_DEPO_SEC)
+    h_acc = data.get(IField.H_DEBIT_ACC)
+    i_sec = data.get(IField.I_DEBIT_SEC)
+    j_acc = data.get(IField.J_CREDIT_ACC)
+    k_sec = data.get(IField.K_CREDIT_SEC)
+
+    op_code = data.get(IField.OP_CODE)
+    aux = data.get(IField.AUX_CODE)
+
+    depo_by_client = lookup_depo_row_by_client_id(depo_rows, client_id)
+
+    acc_from_ref = lookup_account_by_gpb_dom_code(depo_rows, client_id)
+    if not acc_from_ref:
+        acc_from_ref = lookup_account_by_gpb_bank_code(depo_rows, client_id)
+    f_svod = (
+        _format_depo_account_cell(acc_from_ref)
+        if acc_from_ref
+        else (_format_depo_account_cell(f_raw) or (f_raw or "").strip())
+    )
+
+    flow_hint = _gpb_depo_flow_hint(f_svod, h_acc, i_sec, j_acc, k_sec)
+    _gpb_g_depo_section(f_svod, f_raw, g_raw, h_acc, i_sec, j_acc, k_sec)
+
+    _inst_type, op_type = lookup_codifier(
+        codifier_rows,
+        op_code,
+        aux,
+        f_svod,
+        h_acc,
+        j_acc,
+        flow_hint=flow_hint,
+    )
+    _ = depo_by_client
+    return op_type, f_svod, h_acc, i_sec, j_acc, k_sec
+
+
+def build_gpb_i_d_match_index(
+    gpb_i_dir: Path,
+    depo_rows: list[DepoDirectoryRow],
+    codifier_rows: list[CodifierRow],
+) -> tuple[dict[tuple[str, str], Literal["debit", "credit"]], set[str]]:
+    """
+    Индекс (ключ выписки из имени I-файла, нормализованный НГРИ) → направление для D;
+    множество ключей выписки по всем разобранным I*.MSG в каталоге.
+    """
+    index: dict[tuple[str, str], Literal["debit", "credit"]] = {}
+    stmt_keys: set[str] = set()
+    if not gpb_i_dir.is_dir():
+        return index, stmt_keys
+
+    seen: set[Path] = set()
+    files_i: list[Path] = []
+    for pat in ("I*.MSG", "i*.MSG"):
+        for f in sorted(gpb_i_dir.glob(pat)):
+            rp = f.resolve()
+            if rp not in seen:
+                seen.add(rp)
+                files_i.append(f)
+
+    for fp in files_i:
+        stmt = gpb_instruction_pair_key(fp)
+        if stmt is None:
+            continue
+        stmt_keys.add(stmt)
+        try:
+            parsed = parse_i_msg_file(fp)
+        except OSError:
+            continue
+        client_id = (parsed.header.get("ClientID") or "").strip()
+        for row in parsed.rows:
+            parts = row.parts
+            if not is_gpb_i_row(parts):
+                continue
+            if not passes_execution_filter(row):
+                continue
+            nrn = row.get(IField.NRN)
+            ng_key = normalize_ngri_for_match(nrn)
+            pair_key = (stmt, ng_key)
+            if pair_key in index:
+                continue
+            op_type, f_svod, h_acc, i_sec, j_acc, k_sec = gpb_i_row_op_type_and_accounts_for_d_match(
+                row,
+                depo_rows,
+                codifier_rows,
+                client_id,
+            )
+            flow = classify_gpb_i_flow_for_d_match(
+                op_type,
+                f_svod,
+                h_acc,
+                i_sec,
+                j_acc,
+                k_sec,
+            )
+            if flow is None:
+                continue
+            index[pair_key] = flow
+    return index, stmt_keys
+
+
 def build_svod_row_from_d(
     parsed: DMsgFile,
     data: DMsgDataRow,
     depo_rows: list[DepoDirectoryRow],
     codifier_rows: list[CodifierRow],
     client_id: str,
+    *,
+    i_match_flow: Literal["debit", "credit"] | None = None,
 ) -> list:
     """Одна строка «СВОД_операций» из отчёта DOC_INSTRUCT (D*.MSG), эталон 2025_02."""
     h = parsed.header
@@ -255,11 +456,18 @@ def build_svod_row_from_d(
         depository = SVOD_DASH
 
     acc_for_inst = f_str if f_str != SVOD_DASH else ""
-    inst_type = instruction_type_df_dp(acc_for_inst)
+    if i_match_flow == "debit":
+        inst_type = "DP"
+        op_type = _DOC_OP_DEBIT
+    elif i_match_flow == "credit":
+        inst_type = "DF"
+        op_type = _DOC_OP_CREDIT
+    else:
+        inst_type = instruction_type_df_dp(acc_for_inst)
 
-    op_type = lookup_document_op_type_by_instruction(codifier_rows, inst_type)
-    if not op_type:
-        op_type = fallback_document_op_type(inst_type) or SVOD_DASH
+        op_type = lookup_document_op_type_by_instruction(codifier_rows, inst_type)
+        if not op_type:
+            op_type = fallback_document_op_type(inst_type) or SVOD_DASH
 
     if f_str != SVOD_DASH:
         owner_row = lookup_depo_row_by_account_number(depo_rows, f_str)
@@ -686,6 +894,14 @@ def ensure_svod_sheet(wb) -> None:
         ws.cell(row=1, column=col, value=title)
 
 
+def ensure_errors_sheet(wb) -> None:
+    if "Ошибки" not in wb.sheetnames:
+        wb.create_sheet("Ошибки")
+    ws = wb["Ошибки"]
+    for col, title in enumerate(ERRORS_SHEET_HEADERS, start=1):
+        ws.cell(row=1, column=col, value=title)
+
+
 def clear_svod_data(ws) -> None:
     max_r = ws.max_row or 1
     if max_r <= 1:
@@ -695,7 +911,20 @@ def clear_svod_data(ws) -> None:
             ws.cell(row=r, column=c, value=None)
 
 
-def write_svod_rows(path: Path, rows_out: list[list]) -> None:
+def clear_errors_data(ws) -> None:
+    max_r = ws.max_row or 1
+    if max_r <= 1:
+        return
+    for r in range(2, max_r + 1):
+        for c in range(1, len(ERRORS_SHEET_HEADERS) + 1):
+            ws.cell(row=r, column=c, value=None)
+
+
+def write_svod_rows(
+    path: Path,
+    rows_out: list[list],
+    error_rows: list[list] | None = None,
+) -> None:
     wb = load_workbook(path)
     ensure_svod_sheet(wb)
     ws = wb["СВОД_операций"]
@@ -703,15 +932,25 @@ def write_svod_rows(path: Path, rows_out: list[list]) -> None:
     for i, row in enumerate(rows_out, start=2):
         for j, val in enumerate(row, start=1):
             ws.cell(row=i, column=j, value=val)
+    ensure_errors_sheet(wb)
+    ws_err = wb["Ошибки"]
+    clear_errors_data(ws_err)
+    if error_rows:
+        for i, row in enumerate(error_rows, start=2):
+            for j, val in enumerate(row, start=1):
+                ws_err.cell(row=i, column=j, value=val)
     wb.save(path)
 
 
 def create_workbook_with_svod_only(path: Path) -> None:
-    """Минимальная книга только с заголовком СВОД (если файла нет)."""
+    """Минимальная книга с заголовками СВОД и «Ошибки» (если файла нет)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     ws = wb.active
     ws.title = "СВОД_операций"
     for col, title in enumerate(SVOD_HEADERS, start=1):
         ws.cell(row=1, column=col, value=title)
+    ws_err = wb.create_sheet("Ошибки")
+    for col, title in enumerate(ERRORS_SHEET_HEADERS, start=1):
+        ws_err.cell(row=1, column=col, value=title)
     wb.save(path)
