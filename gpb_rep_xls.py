@@ -33,7 +33,13 @@ def _read_rows_openpyxl(path: Path) -> list[list[str]]:
 
 
 def _read_rows_xlrd(path: Path) -> list[list[str]]:
-    import xlrd
+    try:
+        import xlrd
+    except ModuleNotFoundError as e:
+        raise RuntimeError(
+            "Для чтения бинарного Excel .xls (OLE) нужен пакет xlrd (import). "
+            'Установите: pip install "xlrd>=2.0.1,<3"'
+        ) from e
 
     book = xlrd.open_workbook(str(path), formatting_info=False)
     sh = book.sheet_by_index(0)
@@ -56,7 +62,10 @@ def _read_rows_xlrd(path: Path) -> list[list[str]]:
 def read_rep_sheet_rows(path: Path) -> list[list[str]]:
     """
     OOXML (.xlsx, в т.ч. под видом .xls) — по сигнатуре ZIP «PK» → openpyxl;
-    иначе бинарный .xls → xlrd; при сбое xlrd — повторная попытка openpyxl.
+    иначе бинарный .xls → xlrd (openpyxl старый .xls не читает).
+
+    При повреждённом OLE (`CompDocError` и др.) пробуем openpyxl (переименованный OOXML),
+    при неудаче — пустой список (без падения пайплайна).
     """
     path = Path(path)
     try:
@@ -65,11 +74,20 @@ def read_rep_sheet_rows(path: Path) -> list[list[str]]:
     except OSError:
         return []
     if head[:2] == b"PK":
-        return _read_rows_openpyxl(path)
+        try:
+            return _read_rows_openpyxl(path)
+        except Exception:
+            return []
+
     try:
         return _read_rows_xlrd(path)
+    except RuntimeError:
+        raise
     except Exception:
-        return _read_rows_openpyxl(path)
+        try:
+            return _read_rows_openpyxl(path)
+        except Exception:
+            return []
 
 
 def parse_rep_filename(stem: str) -> tuple[str, str, str] | None:

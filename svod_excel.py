@@ -82,6 +82,9 @@ ERRORS_SHEET_HEADERS = [
     "Дата операции",
 ]
 
+REGION_ERROR_FILENAME_PARSE = "region_filename_parse"
+REGION_ERROR_ACCOUNT_MISMATCH = "region_filename_account_mismatch"
+
 
 def svod_technical_key(
     account_f: str,
@@ -211,6 +214,45 @@ def _region_op_date_from_stem(stem: str) -> str:
         return ""
     yy, mm, dd = m.groups()
     return f"{dd}.{mm}.20{yy}"
+
+
+def _normalize_region_filename_account(s: str) -> str:
+    """Единое сравнение токена из имени файла со счётом в выгрузке REGION."""
+    if not s or not str(s).strip():
+        return ""
+    t = str(s).strip()
+    try:
+        f = float(t.replace(",", "."))
+        if abs(f - int(f)) < 1e-9:
+            return str(int(f))
+    except (ValueError, TypeError):
+        pass
+    return t.casefold()
+
+
+def _region_accounts_equal_for_filename(token: str, account: str) -> bool:
+    a = _normalize_region_filename_account(token)
+    b = _normalize_region_filename_account(account)
+    return bool(a and b and a == b)
+
+
+def region_error_row_region(
+    result: RegionParseResult,
+    table_row: RegionTableRow,
+    *,
+    reason: str,
+    doc_detail: str,
+    op_date: str,
+) -> list:
+    """Одна строка листа «Ошибки» для конфликта имени REGION IS*.xls и счетов из файла."""
+    return [
+        result.path.name,
+        "",
+        (table_row.ngri or "").strip(),
+        reason,
+        doc_detail.strip(),
+        op_date,
+    ]
 
 
 def _region_fgh_ijk(
@@ -823,28 +865,102 @@ def build_svod_row_region(
     table_row: RegionTableRow,
     depo_rows: list[DepoDirectoryRow],
     codifier_rows: list[CodifierRow],
-) -> list:
-    """Одна строка «СВОД_операций» из отчёта REGION IS*.xls (одна строка таблицы — одна строка СВОД)."""
-    op_date = (result.op_date or "").strip() or _region_op_date_from_stem(
-        result.path.stem,
-    )
+) -> tuple[list | None, list | None]:
+    """Одна строка «СВОД_операций» из REGION IS*.xls или строка «Ошибки».
 
-    inst_type, op_type, op_code = lookup_codifier_region(
-        codifier_rows,
-        result.operation_type,
-    )
-    if not op_type.strip():
-        op_type = SVOD_DASH
-    op_code_cell = op_code if op_code else SVOD_DASH
+    Возвращает (svod_row | None, error_row | None): при несовпадении токена счёта
+    в имени файла со счётами в теле — только error_row.
+    """
+    stem = result.path.stem
+    op_date = (result.op_date or "").strip() or _region_op_date_from_stem(stem)
+    cod_label = (result.filename_operation_title or "").strip() or (
+        result.operation_type or ""
+    ).strip()
 
-    f_raw, g_raw, h_acc, i_sec, j_acc, k_sec = _region_fgh_ijk(
-        result.operation_type,
-        op_type,
-        result.from_acc,
-        result.from_sec,
-        result.to_acc,
-        result.to_sec,
-    )
+    inst_type, op_type, op_code = lookup_codifier_region(codifier_rows, cod_label)
+    op_type_disp = op_type.strip() if op_type.strip() else SVOD_DASH
+    op_code_cell = op_code.strip() if op_code.strip() else SVOD_DASH
+    op_resolved = op_type.strip()
+
+    fa, fs = (result.from_acc or "").strip(), (result.from_sec or "").strip()
+    ta, ts = (result.to_acc or "").strip(), (result.to_sec or "").strip()
+    token = (result.filename_account or "").strip()
+    has_from = bool(fa)
+    has_to = bool(ta)
+    filename_ok = stem.count("_") >= 3
+
+    def err(reason: str, detail: str) -> tuple[list | None, list | None]:
+        return None, region_error_row_region(
+            result,
+            table_row,
+            reason=reason,
+            doc_detail=detail,
+            op_date=op_date,
+        )
+
+    body_has_account = has_from or has_to
+    if body_has_account and not filename_ok:
+        return err(
+            REGION_ERROR_FILENAME_PARSE,
+            "ожидается имя с тремя подчёркиваниями: ..._<счёт>_<операция>",
+        )
+
+    if has_from and has_to:
+        m_to = _region_accounts_equal_for_filename(token, ta)
+        m_from = _region_accounts_equal_for_filename(token, fa)
+        if not m_to and not m_from:
+            return err(
+                REGION_ERROR_ACCOUNT_MISMATCH,
+                f"token={token}; from_acc={fa}; to_acc={ta}",
+            )
+        h_acc, i_sec, j_acc, k_sec = fa, fs, ta, ts
+        if m_to:
+            f_raw, g_raw = ta, ts
+        else:
+            f_raw, g_raw = fa, fs
+    elif has_to and not has_from:
+        if not _region_accounts_equal_for_filename(token, ta):
+            return err(
+                REGION_ERROR_ACCOUNT_MISMATCH,
+                f"token={token}; to_acc={ta}",
+            )
+        f_raw, g_raw, h_acc, i_sec, j_acc, k_sec = _region_fgh_ijk(
+            cod_label,
+            op_resolved,
+            "",
+            "",
+            ta,
+            ts,
+        )
+    elif has_from and not has_to:
+        if not _region_accounts_equal_for_filename(token, fa):
+            return err(
+                REGION_ERROR_ACCOUNT_MISMATCH,
+                f"token={token}; from_acc={fa}",
+            )
+        f_raw, g_raw, h_acc, i_sec, j_acc, k_sec = _region_fgh_ijk(
+            cod_label,
+            op_resolved,
+            fa,
+            fs,
+            "",
+            "",
+        )
+    else:
+        if token:
+            return err(
+                REGION_ERROR_ACCOUNT_MISMATCH,
+                "в файле нет счетов списания/зачисления для сверки с token",
+            )
+        f_raw, g_raw, h_acc, i_sec, j_acc, k_sec = _region_fgh_ijk(
+            cod_label,
+            op_resolved,
+            "",
+            "",
+            "",
+            "",
+        )
+
     f_raw = _format_depo_account_cell(f_raw) or f_raw
     g_raw = _format_section_cell(g_raw) or g_raw
     h_acc = _format_depo_account_cell(h_acc) or h_acc
@@ -864,26 +980,29 @@ def build_svod_row_region(
 
     tech = svod_technical_key(f_raw, g_raw, inst_cell, op_date)
 
-    return [
-        op_date,
-        depository,
-        op_code_cell,
-        op_type,
-        owner,
-        f_raw,
-        g_raw,
-        h_acc,
-        i_sec,
-        j_acc,
-        k_sec,
-        nrn,
-        "1",
-        inst_cell,
-        "",
-        basis,
-        tech,
-        result.path.name,
-    ]
+    return (
+        [
+            op_date,
+            depository,
+            op_code_cell,
+            op_type_disp,
+            owner,
+            f_raw,
+            g_raw,
+            h_acc,
+            i_sec,
+            j_acc,
+            k_sec,
+            nrn,
+            "1",
+            inst_cell,
+            "",
+            basis,
+            tech,
+            result.path.name,
+        ],
+        None,
+    )
 
 
 def ensure_svod_sheet(wb) -> None:

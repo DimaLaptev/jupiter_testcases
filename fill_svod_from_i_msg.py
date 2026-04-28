@@ -607,14 +607,16 @@ def main() -> int:
                     if not tbody:
                         tbody = [RegionTableRow(ngri="")]
                     for tr in tbody:
-                        rows_out.append(
-                            build_svod_row_region(
-                                pr,
-                                tr,
-                                depo_rows,
-                                cod_rows,
-                            ),
+                        svod_r, region_err = build_svod_row_region(
+                            pr,
+                            tr,
+                            depo_rows,
+                            cod_rows,
                         )
+                        if region_err is not None:
+                            error_rows.append(region_err)
+                        if svod_r is not None:
+                            rows_out.append(svod_r)
 
         if not args.no_vtb_xml:
             vtb_xml_dir = args.input_dir_vtb_xml.resolve()
@@ -730,7 +732,7 @@ def main() -> int:
     write_svod_rows(
         wb_path,
         rows_out,
-        error_rows if not args.no_d_msg else [],
+        error_rows,
     )
     print(f"Записано строк: {len(rows_out)} в {wb_path}")
     return 0
