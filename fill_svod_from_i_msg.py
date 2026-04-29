@@ -51,7 +51,11 @@ from svod_excel import (
     select_d_msg_rows_for_svod,
     write_svod_rows,
 )
-from vtb_f752_xml import find_vtb_zip_for_xml, list_ngri_from_vtb_zip, parse_vtb_f752_xml
+from vtb_f752_xml import (
+    find_vtb_zip_for_xml,
+    list_ngri_from_vtb_zip,
+    parse_vtb_f752_xml,
+)
 
 from dks_excel import SCHEETA_DEPO_HEADERS
 
@@ -384,7 +388,7 @@ def main() -> int:
         "--input-dir-vtb-zip",
         type=Path,
         default=_ROOT / "2026_01" / "VTBSD" / "REP" / "XML_приложения",
-        help="Каталог с ZIP-приложениями (список закладных .xls внутри)",
+        help="Каталог с ZIP-приложениями: для каждого *.xml ищется одноимённый *.zip; НГРИ читаются из .xls внутри архива",
     )
     parser.add_argument(
         "--no-vtb-xml",
@@ -395,6 +399,11 @@ def main() -> int:
         "--no-vtb-zip",
         action="store_true",
         help="Не читать ZIP для НГРИ (по одной строке СВОД на XML с пустым НГРИ)",
+    )
+    parser.add_argument(
+        "--debug-vtb-ngri",
+        action="store_true",
+        help="Подробный вывод в stderr при извлечении НГРИ из ZIP ВТБ СД (архив, .xls/.xlsx, ошибки)",
     )
     parser.add_argument(
         "--input-dir-d",
@@ -645,6 +654,12 @@ def main() -> int:
                     vtb_files.append(p)
                 if not vtb_files:
                     print(f"Нет файлов *.xml в {vtb_xml_dir}")
+                dbg_z = args.debug_vtb_ngri
+                if dbg_z and not args.no_vtb_zip and not vtb_zip_dir.is_dir():
+                    print(
+                        f"[VTB НГРИ] каталог ZIP-приложений не найден (--input-dir-vtb-zip): {vtb_zip_dir}",
+                        file=sys.stderr,
+                    )
                 for xp in vtb_files:
                     pr_vtb = parse_vtb_f752_xml(xp)
                     if pr_vtb is None:
@@ -655,9 +670,23 @@ def main() -> int:
                         continue
                     ngri_list: list[str] = []
                     if not args.no_vtb_zip and vtb_zip_dir.is_dir():
-                        zp = find_vtb_zip_for_xml(xp, vtb_zip_dir)
+                        zp = find_vtb_zip_for_xml(
+                            xp,
+                            vtb_zip_dir,
+                            debug=dbg_z,
+                            context=xp.name,
+                        )
                         if zp is not None:
-                            ngri_list = list_ngri_from_vtb_zip(zp)
+                            ngri_list = list_ngri_from_vtb_zip(
+                                zp,
+                                debug=dbg_z,
+                                context=xp.name,
+                            )
+                            if dbg_z and ngri_list:
+                                print(
+                                    f"[VTB НГРИ] {xp.name}: итого НГРИ из архива: {len(ngri_list)}",
+                                    file=sys.stderr,
+                                )
                     if not ngri_list:
                         ngri_list = [""]
                     for ng in ngri_list:
