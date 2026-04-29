@@ -89,6 +89,18 @@ WARN_COLS = [
     "statsmodels_module",
 ]
 
+# Отключённые семейства (family) моделей для этого скрипта (не попадают в комбайн и недоступны в --config).
+DISABLED_FN_FOR_SCRIPT: frozenset[str] = frozenset({"prophet", "tbats", "zip", "greykite"})
+
+
+def series_configs_allowed_in_forecast_script() -> Dict[str, dict]:
+    """Подмножество ``SERIES_CONFIGS``: имена конфигураций без отключённых ``fn``."""
+    return {
+        name: cfg
+        for name, cfg in SERIES_CONFIGS.items()
+        if cfg.get("fn") not in DISABLED_FN_FOR_SCRIPT
+    }
+
 
 def calc_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float, float]:
     """Метрики как в ноутбуке 37 (точность / стабильность / качество).
@@ -842,7 +854,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         type=str,
         default=None,
         metavar="NAME",
-        help="Только одна конфигурация из SERIES_CONFIGS (иначе по умолчанию — все конфигурации / комбайн)",
+        help="Одна конфигурация из разрешённого подмножества SERIES_CONFIGS "
+        "(семейства prophet/tbats/zip/greykite в скрипте отключены — см. DISABLED_FN_FOR_SCRIPT)",
     )
     parser.add_argument("--out-xlsx", type=Path, default=OUT_XLSX_DEFAULT)
     parser.add_argument("--no-excel", action="store_true")
@@ -853,13 +866,24 @@ def main(argv: Optional[List[str]] = None) -> None:
         _run_unit_tests()
         return
 
+    allowed_cfgs = series_configs_allowed_in_forecast_script()
+    if not allowed_cfgs:
+        parser.error("пустое подмножество конфигураций после DISABLED_FN_FOR_SCRIPT")
+
     if args.config is not None:
+        if args.config not in SERIES_CONFIGS:
+            parser.error(
+                f"неизвестная --config {args.config!r}; см. SERIES_CONFIGS в tsa_per_series_nb37_trainers.py"
+            )
+        fn = SERIES_CONFIGS[args.config].get("fn")
+        if fn in DISABLED_FN_FOR_SCRIPT:
+            parser.error(
+                f"--config {args.config!r}: семейство fn={fn!r} отключено в 37_forecast_test.py "
+                f"(DISABLED_FN_FOR_SCRIPT)"
+            )
         configs_to_run = [args.config]
     else:
-        configs_to_run = list(SERIES_CONFIGS.keys())
-
-    if len(configs_to_run) == 1 and configs_to_run[0] not in SERIES_CONFIGS:
-        parser.error(f"неизвестная --config {configs_to_run[0]!r}; см. SERIES_CONFIGS в tsa_per_series_nb37_trainers.py")
+        configs_to_run = list(allowed_cfgs.keys())
 
     months = [int(x.strip()) for x in args.test_months.split(",") if x.strip()]
     if args.csv is not None:
@@ -907,7 +931,8 @@ def main(argv: Optional[List[str]] = None) -> None:
             flush=True,
         )
 
-    for rid in rid_list:
+    n_rid = len(rid_list)
+    for irid, rid in enumerate(rid_list, start=1):
         if single_mode:
             cfg0 = configs_to_run[0]
             preds, warns, meta = forecast_expand_history_monthly(
@@ -959,6 +984,10 @@ def main(argv: Optional[List[str]] = None) -> None:
                 winner_by_operation=winner_by_op,
                 single_config_label=None,
             )
+
+        _q = df_res_full.iloc[0]["Качество, %"] if len(df_res_full) else float("nan")
+        _q_show = "nan" if pd.isna(_q) else f"{float(_q):.2f}"
+        print(f"[{irid}/{n_rid}] resist_id={rid} → Качество, % = {_q_show}", flush=True)
 
         combine_frames.append(df_res_full)
         per_rid_best[int(rid)] = {
