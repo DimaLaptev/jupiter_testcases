@@ -51,6 +51,8 @@ from vtb_f752_xml import VtbF752ParseResult, vtb_combine_section
 
 
 SVOD_DASH = "-"
+# Депозитарий (depository) для ВТБ СД, если «Счета депо» не нашлись по счёту в колонке F.
+SVOD_DEPOSITORY_VTB_SD = 'АО "ВТБ СД"'
 
 SVOD_HEADERS = [
     "Дата операции",
@@ -774,7 +776,11 @@ def build_svod_row_vtb(
     depo_rows: list[DepoDirectoryRow],
     codifier_rows: list[CodifierRow],
 ) -> list:
-    """Одна строка «СВОД_операций» из отчёта ВТБ СД F752 (*.xml) + НГРИ из приложения (appendix) ZIP."""
+    """Одна строка «СВОД_операций» из отчёта ВТБ СД F752 (*.xml) + одно НГРИ из строки приложения ZIP (.xls).
+
+    Для каждого непустого НГРИ в xls внутри архива — отдельная строка СВОД; остальные колонки одинаковы
+    для одного XML (одного набора полей поручения). Колонка B: «Счета депо» по счёту F, иначе АО «ВТБ СД».
+    """
     op_date = (
         parsed.stage_overlay_date.strip()
         or parsed.execution_date.strip()
@@ -815,11 +821,7 @@ def build_svod_row_vtb(
     )
     depository = (owner_row.depository if owner_row else "").strip()
     if not depository:
-        depository = (parsed.depository_name or "").strip()
-    if not depository:
-        depository = depository_fallback_from_source_path(parsed.path).strip()
-    if not depository:
-        depository = SVOD_DASH
+        depository = SVOD_DEPOSITORY_VTB_SD
     owner = (owner_row.owner if owner_row else "").strip() or SVOD_DASH
 
     basis_parts: list[str] = []
