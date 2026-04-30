@@ -12,7 +12,7 @@ _SRC = _ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from codifier_table import read_codifier_rows
+from codifier_table import read_codifier_rows, read_vtb_sd_codifier_rows
 from depo_directory import read_depo_directory_rows
 from gpb_d_msg import parse_d_msg_file
 from gpb_i_msg import (
@@ -52,7 +52,9 @@ from svod_excel import (
     write_svod_rows,
 )
 from vtb_f752_xml import (
+    find_vtb_xls_for_xml,
     find_vtb_zip_for_xml,
+    list_ngri_from_vtb_xls_path,
     list_ngri_from_vtb_zip,
     parse_vtb_f752_xml,
 )
@@ -388,7 +390,7 @@ def main() -> int:
         "--input-dir-vtb-zip",
         type=Path,
         default=_ROOT / "2026_01" / "VTBSD" / "REP" / "XML_приложения",
-        help="Каталог с ZIP-приложениями: для каждого *.xml ищется одноимённый *.zip; НГРИ читаются из .xls внутри архива",
+        help="Каталог приложений: одноимённый *.zip (НГРИ в .xls внутри) или одноимённый *.xls, если архива нет",
     )
     parser.add_argument(
         "--no-vtb-xml",
@@ -398,7 +400,7 @@ def main() -> int:
     parser.add_argument(
         "--no-vtb-zip",
         action="store_true",
-        help="Не читать ZIP для НГРИ (по одной строке СВОД на XML с пустым НГРИ)",
+        help="Не читать приложения для НГРИ (ни ZIP, ни одноимённый .xls из --input-dir-vtb-zip) — одна строка СВОД на XML с пустым НГРИ",
     )
     parser.add_argument(
         "--debug-vtb-ngri",
@@ -457,6 +459,7 @@ def main() -> int:
 
     depo_rows = read_depo_directory_rows(str(wb_path))
     cod_rows = read_codifier_rows(str(wb_path))
+    vtb_sd_cod_rows = read_vtb_sd_codifier_rows(str(wb_path))
     if not depo_rows:
         print(
             "Предупреждение: лист «Счета депо» пуст или отсутствует — колонки B, E могут быть пустыми.",
@@ -465,6 +468,11 @@ def main() -> int:
     if not cod_rows:
         print(
             "Предупреждение: лист «Коды» пуст или отсутствует — колонки D, N могут быть пустыми.",
+            file=sys.stderr,
+        )
+    if not vtb_sd_cod_rows:
+        print(
+            "Предупреждение: лист «Коды ВТБ СД» отсутствует или без данных — для ВТБ СД колонки C, D, N берутся из «Коды».",
             file=sys.stderr,
         )
 
@@ -657,7 +665,7 @@ def main() -> int:
                 dbg_z = args.debug_vtb_ngri
                 if dbg_z and not args.no_vtb_zip and not vtb_zip_dir.is_dir():
                     print(
-                        f"[VTB НГРИ] каталог ZIP-приложений не найден (--input-dir-vtb-zip): {vtb_zip_dir}",
+                        f"[VTB НГРИ] каталог приложений не найден (--input-dir-vtb-zip): {vtb_zip_dir}",
                         file=sys.stderr,
                     )
                 for xp in vtb_files:
@@ -682,22 +690,45 @@ def main() -> int:
                                 debug=dbg_z,
                                 context=xp.name,
                             )
-                            if dbg_z and ngri_list:
-                                print(
-                                    f"[VTB НГРИ] {xp.name}: итого НГРИ из архива: {len(ngri_list)}",
-                                    file=sys.stderr,
+                        else:
+                            xls_p = find_vtb_xls_for_xml(
+                                xp,
+                                vtb_zip_dir,
+                                debug=dbg_z,
+                                context=xp.name,
+                            )
+                            if xls_p is not None:
+                                ngri_list = list_ngri_from_vtb_xls_path(
+                                    xls_p,
+                                    debug=dbg_z,
+                                    context=xp.name,
                                 )
+                        if dbg_z and ngri_list:
+                            print(
+                                f"[VTB НГРИ] {xp.name}: итого НГРИ (ZIP или .xls): {len(ngri_list)}",
+                                file=sys.stderr,
+                            )
                     if not ngri_list:
                         ngri_list = [""]
+                    vtb_file_err: list | None = None
+                    vtb_svod_block: list[list] = []
                     for ng in ngri_list:
-                        rows_out.append(
-                            build_svod_row_vtb(
-                                pr_vtb,
-                                ng,
-                                depo_rows,
-                                cod_rows,
-                            ),
+                        sv, err = build_svod_row_vtb(
+                            pr_vtb,
+                            ng,
+                            depo_rows,
+                            cod_rows,
+                            vtb_sd_cod_rows,
                         )
+                        if err is not None:
+                            vtb_file_err = err
+                            break
+                        if sv is not None:
+                            vtb_svod_block.append(sv)
+                    if vtb_file_err is not None:
+                        error_rows.append(vtb_file_err)
+                    else:
+                        rows_out.extend(vtb_svod_block)
 
     if not args.no_d_msg:
         input_d = args.input_dir_d.resolve()

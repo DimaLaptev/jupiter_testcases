@@ -2,11 +2,33 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
+
+
+# Справочник «Счета депо»: отбор строк для поручений ВТБ СД по полю Basis (номер договора).
+VTB_SD_DEPOSITORY_NAME = 'АО "ВТБ СД"'
+VTB_CONTRACT_7830_OWNER = "ПАО ДОМ РФ"
+VTB_CONTRACT_OTHER_OWNER = 'ООО "ДОМ.РФ ИА"'
+CONTRACT_7830 = "7830"
+
+
+def _catalog_compare_normalize(value: str) -> str:
+    """Нормализация для сравнения ячеек справочника (пробелы, типографские кавычки)."""
+    t = (value or "").strip()
+    for a, b in (
+        ("\u201c", '"'),
+        ("\u201d", '"'),
+        ("\u00ab", '"'),
+        ("\u00bb", '"'),
+    ):
+        t = t.replace(a, b)
+    t = re.sub(r"\s+", " ", t)
+    return t.casefold()
 
 
 @dataclass
@@ -251,4 +273,28 @@ def lookup_depo(index: dict[str, DepoDirectoryRow], depo_num: str) -> DepoDirect
     raw = depo_num.strip()
     if raw in index:
         return index[raw]
+    return None
+
+
+def lookup_depo_row_vtb_account_owner_filter(
+    rows: list[DepoDirectoryRow],
+    account: str,
+    *,
+    expected_depository: str,
+    expected_owner: str,
+) -> DepoDirectoryRow | None:
+    """Строка «Счета депо»: номер счёта + депозитарий + владелец (после нормализации)."""
+    acc_key = normalize_account_key(account)
+    if not acc_key:
+        return None
+    dep_t = _catalog_compare_normalize(expected_depository)
+    own_t = _catalog_compare_normalize(expected_owner)
+    for row in rows:
+        if normalize_account_key(row.account_number) != acc_key:
+            continue
+        if _catalog_compare_normalize(row.depository) != dep_t:
+            continue
+        if _catalog_compare_normalize(row.owner) != own_t:
+            continue
+        return row
     return None

@@ -8,6 +8,16 @@ from typing import Any
 
 from openpyxl import load_workbook
 
+from depo_directory import normalize_account_key
+
+
+@dataclass
+class VtbSdCodifierRow:
+    op_code: str
+    op_type: str
+    content_vtb: str
+    instruction_type: str
+
 
 @dataclass
 class CodifierRow:
@@ -155,6 +165,164 @@ def read_codifier_rows(workbook_path: str, sheet_name: str = "Коды") -> list
         )
     wb.close()
     return out
+
+
+def _find_vtb_sd_header_row(ws, max_scan: int = 30) -> tuple[int, dict[str, int]]:
+    for r in range(1, min(max_scan, (ws.max_row or 1) + 15) + 1):
+        col_map: dict[str, int] = {}
+        for c in range(1, (ws.max_column or 10) + 1):
+            h = _norm_header(ws.cell(row=r, column=c))
+            if h:
+                col_map[h] = c
+        if "код операции" not in col_map:
+            continue
+        if "тип операции" not in col_map:
+            continue
+        if "тип поручения" not in col_map:
+            continue
+        has_vtb = any(
+            "содержание" in key and ("втб" in key or "втбсд" in key)
+            for key in col_map
+        )
+        if has_vtb:
+            return r, col_map
+    return 1, {}
+
+
+def _vtb_sd_content_col(col_map: dict[str, int]) -> int | None:
+    for key, idx in col_map.items():
+        if "содержание" in key and ("втб" in key or "втбсд" in key):
+            return idx
+    return None
+
+
+def read_vtb_sd_codifier_rows(
+    workbook_path: str,
+    sheet_name: str = "Коды ВТБ СД",
+) -> list[VtbSdCodifierRow]:
+    """Лист «Коды ВТБ СД»: колонки код операции, тип операции, содержание ВТБСД, тип поручения."""
+    wb = load_workbook(workbook_path, read_only=True, data_only=True)
+    if sheet_name not in wb.sheetnames:
+        wb.close()
+        return []
+    ws = wb[sheet_name]
+    hr, col_map = _find_vtb_sd_header_row(ws)
+    if not col_map:
+        wb.close()
+        return []
+    c_op = col_map.get("код операции")
+    c_ot = col_map.get("тип операции")
+    c_inst = col_map.get("тип поручения")
+    c_vtb = _vtb_sd_content_col(col_map)
+    if not c_op or not c_ot or not c_inst or not c_vtb:
+        wb.close()
+        return []
+
+    out: list[VtbSdCodifierRow] = []
+    for r in range(hr + 1, (ws.max_row or 0) + 1):
+        op = _cell(ws, r, c_op)
+        if _is_dash(op):
+            op = ""
+        ot = _cell(ws, r, c_ot)
+        inst = _cell(ws, r, c_inst)
+        cv = _cell(ws, r, c_vtb)
+        if _is_dash(cv):
+            cv = ""
+        if not cv and not op and not ot and not inst:
+            continue
+        out.append(
+            VtbSdCodifierRow(
+                op_code=op,
+                op_type=ot,
+                content_vtb=cv,
+                instruction_type=inst,
+            ),
+        )
+    wb.close()
+    return out
+
+
+def _vtb_sd_op_type_is_spisanie(op_type: str) -> bool:
+    t = (op_type or "").lower().replace("–", "-").replace("—", "-")
+    return " - списание" in t
+
+
+def _vtb_sd_op_type_is_zachislenie(op_type: str) -> bool:
+    t = (op_type or "").lower().replace("–", "-").replace("—", "-")
+    return " - зачисление" in t
+
+
+def lookup_codifier_vtb_sd_sheet(
+    rows: list[VtbSdCodifierRow],
+    stage_name: str,
+    f_account: str,
+    h_account: str,
+    j_account: str,
+) -> tuple[str, str, str]:
+    """
+    Маппинг StageName на лист «Коды ВТБ СД» (колонка «Содержание ВТБСД»).
+    Направление: счёт депо (F) = счёт списания (H) → строка «… - списание»;
+    F = зачисление (J) → «… - зачисление».
+    Возвращает (тип_поручения, тип_операции, код_операции).
+    """
+    if not rows:
+        return "", "", ""
+    lab = _norm_match_snippet(stage_name)
+    if not lab:
+        return "", "", ""
+
+    scored: list[tuple[int, VtbSdCodifierRow]] = []
+    for r in rows:
+        cv = _norm_match_snippet(r.content_vtb)
+        if not cv:
+            continue
+        score = 0
+        if cv in lab:
+            score = max(score, len(cv) * 5)
+        elif lab in cv and len(lab) >= 4:
+            score = max(score, min(len(lab), len(cv)) * 5)
+        if score > 0:
+            scored.append((score, r))
+
+    if not scored:
+        return "", "", ""
+
+    top_s = max(s for s, _ in scored)
+    candidates = [row for s, row in scored if s == top_s]
+
+    fk = normalize_account_key(f_account)
+    hk = normalize_account_key(h_account)
+    jk = normalize_account_key(j_account)
+    match_spis = bool(fk and hk and fk == hk)
+    match_zach = bool(fk and jk and fk == jk)
+
+    chosen: VtbSdCodifierRow | None = None
+    if match_spis:
+        for row in candidates:
+            if _vtb_sd_op_type_is_spisanie(row.op_type):
+                chosen = row
+                break
+    if chosen is None and match_zach:
+        for row in candidates:
+            if _vtb_sd_op_type_is_zachislenie(row.op_type):
+                chosen = row
+                break
+    if chosen is None and len(candidates) == 1:
+        chosen = candidates[0]
+
+    if chosen is None:
+        return "", "", ""
+
+    opc_raw = (chosen.op_code or "").strip()
+    if _is_dash(opc_raw):
+        opc_raw = ""
+    opc = _norm_op_code(opc_raw) if opc_raw else ""
+
+    return (
+        chosen.instruction_type.strip(),
+        chosen.op_type.strip(),
+        opc,
+    )
 
 
 def _norm_op_code(s: str) -> str:

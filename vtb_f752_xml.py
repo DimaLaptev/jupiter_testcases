@@ -390,6 +390,73 @@ def list_ngri_from_vtb_zip(
         zf.close()
 
 
+def find_vtb_xls_for_xml(
+    xml_path: Path,
+    xls_dir: Path,
+    *,
+    debug: bool = False,
+    context: str = "",
+) -> Path | None:
+    """Если одноимённого ZIP нет — тот же stem, расширение .xls в каталоге приложений."""
+    stem = xml_path.stem
+    for name in (f"{stem}.xls", f"{stem}.XLS", f"{stem}.Xls"):
+        p = (xls_dir / name).resolve()
+        if p.is_file():
+            _vtb_ngri_debug(
+                debug,
+                context,
+                f"найден одноимённый .xls (вместо ZIP): «{p.name}»",
+            )
+            return p
+    stem_l = stem.lower()
+    try:
+        for f in xls_dir.iterdir():
+            if not f.is_file():
+                continue
+            if f.suffix.lower() != ".xls":
+                continue
+            if f.stem.lower() == stem_l:
+                rp = f.resolve()
+                _vtb_ngri_debug(
+                    debug,
+                    context,
+                    f"найден одноимённый .xls (совпадение stem без учёта регистра): «{f.name}»",
+                )
+                return rp
+    except OSError:
+        pass
+    _vtb_ngri_debug(
+        debug,
+        context,
+        f"одноимённый .xls не найден в «{xls_dir}» (ожидалось: {stem}.xls)",
+    )
+    return None
+
+
+def list_ngri_from_vtb_xls_path(
+    xls_path: Path,
+    *,
+    debug: bool = False,
+    context: str = "",
+) -> list[str]:
+    """Список НГРИ из отдельного файла .xls на диске (тот же макет, что внутри ZIP)."""
+    ctx = context.strip()
+    p = Path(xls_path)
+    if not p.is_file():
+        _vtb_ngri_debug(debug, ctx, f".xls по пути не найден: {p}")
+        return []
+    try:
+        raw = p.read_bytes()
+    except OSError as e:
+        _vtb_ngri_debug(
+            debug,
+            ctx,
+            f"не удалось прочитать «{p.name}» ({type(e).__name__}: {e})",
+        )
+        return []
+    return _ngri_from_xls_bytes(raw, p.name, debug=debug, context=ctx)
+
+
 def find_vtb_zip_for_xml(
     xml_path: Path,
     zip_dir: Path,

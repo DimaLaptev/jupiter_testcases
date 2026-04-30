@@ -16,15 +16,21 @@ from codifier_table import (
     lookup_codifier_region,
     lookup_codifier_rsd,
     lookup_codifier_vtb,
+    lookup_codifier_vtb_sd_sheet,
     lookup_document_op_type_by_instruction,
 )
 from depo_directory import (
+    CONTRACT_7830,
     DepoDirectoryRow,
+    VTB_CONTRACT_7830_OWNER,
+    VTB_CONTRACT_OTHER_OWNER,
+    VTB_SD_DEPOSITORY_NAME,
     lookup_account_by_client_id,
     lookup_account_by_gpb_bank_code,
     lookup_account_by_gpb_dom_code,
     lookup_depo_row_by_account_number,
     lookup_depo_row_by_client_id,
+    lookup_depo_row_vtb_account_owner_filter,
     normalize_account_key,
 )
 from gpb_d_msg import DMsgDataRow, DMsgFile, instruction_type_df_dp
@@ -86,6 +92,37 @@ ERRORS_SHEET_HEADERS = [
 
 REGION_ERROR_FILENAME_PARSE = "region_filename_parse"
 REGION_ERROR_ACCOUNT_MISMATCH = "region_filename_account_mismatch"
+
+VTB_ERROR_BASIS_NO_CONTRACT = "vtb_basis_no_contract"
+VTB_ERROR_DEPO_NO_MATCH = "vtb_depo_no_match"
+
+_BASIS_DEPO_CONTRACT_RE = re.compile(r"№\s*(\d+)\s*/", re.UNICODE)
+
+
+def extract_vtb_basis_contract_number(basis: str) -> str | None:
+    """Номер договора счёта депо из текста Basis: между «№» и «/»."""
+    m = _BASIS_DEPO_CONTRACT_RE.search(basis or "")
+    if not m:
+        return None
+    return (m.group(1) or "").strip()
+
+
+def vtb_error_row_f752(
+    parsed: VtbF752ParseResult,
+    ngri: str,
+    *,
+    reason: str,
+    doc_detail: str,
+    op_date: str,
+) -> list:
+    return [
+        parsed.path.name,
+        "",
+        (ngri or "").strip(),
+        reason,
+        doc_detail.strip(),
+        op_date,
+    ]
 
 
 def svod_technical_key(
@@ -775,11 +812,14 @@ def build_svod_row_vtb(
     ngri: str,
     depo_rows: list[DepoDirectoryRow],
     codifier_rows: list[CodifierRow],
-) -> list:
-    """Одна строка «СВОД_операций» из отчёта ВТБ СД F752 (*.xml) + одно НГРИ из строки приложения ZIP (.xls).
+    vtb_sd_codifier_rows: list | None = None,
+) -> tuple[list | None, list | None]:
+    """СВОД из ВТБ СД F752 + НГРИ приложения.
 
-    Для каждого непустого НГРИ в xls внутри архива — отдельная строка СВОД; остальные колонки одинаковы
-    для одного XML (одного набора полей поручения). Колонка B: «Счета депо» по счёту F, иначе АО «ВТБ СД».
+    Колонки F, G, E: номер договора из поля Basis (между «№» и «/»), затем поиск в «Счета депо»
+    по DstAccountCode / SrcAccountCode при депозитарии АО «ВТБ СД» и владельце, зависящем от
+    договора (=7830 → ПАО ДОМ РФ, иначе ООО «ДОМ.РФ ИА»). При провале — строка «Ошибки».
+    Колонка B: АО «ВТБ СД». H–K: как в XML.
     """
     op_date = (
         parsed.stage_overlay_date.strip()
@@ -789,40 +829,100 @@ def build_svod_row_vtb(
     if not op_date:
         op_date = SVOD_DASH
 
-    src_blob = f"{parsed.src_section_name} {parsed.src_sp_section_code}".strip()
-    dst_blob = f"{parsed.dst_section_name} {parsed.dst_sp_section_code}".strip()
+    contract = extract_vtb_basis_contract_number(parsed.basis)
+    if not contract:
+        detail = (parsed.basis or "").strip() or "(Basis пуст)"
+        return None, vtb_error_row_f752(
+            parsed,
+            ngri,
+            reason=VTB_ERROR_BASIS_NO_CONTRACT,
+            doc_detail=f"нет номера договора №…/ в Basis: {detail[:500]}",
+            op_date=op_date,
+        )
 
-    inst_type, op_type, op_code = lookup_codifier_vtb(
-        codifier_rows,
-        parsed.stage_name,
-        src_sections_blob=src_blob,
-        dst_sections_blob=dst_blob,
+    if normalize_account_key(contract) == normalize_account_key(CONTRACT_7830):
+        expected_owner = VTB_CONTRACT_7830_OWNER
+    else:
+        expected_owner = VTB_CONTRACT_OTHER_OWNER
+
+    hit_dst = lookup_depo_row_vtb_account_owner_filter(
+        depo_rows,
+        parsed.dst_account,
+        expected_depository=VTB_SD_DEPOSITORY_NAME,
+        expected_owner=expected_owner,
     )
-    op_code_cell = op_code if op_code else SVOD_DASH
-    if not (op_type or "").strip():
-        op_type = SVOD_DASH
-    inst_cell = inst_type.strip() if (inst_type or "").strip() else SVOD_DASH
+    hit_src = lookup_depo_row_vtb_account_owner_filter(
+        depo_rows,
+        parsed.src_account,
+        expected_depository=VTB_SD_DEPOSITORY_NAME,
+        expected_owner=expected_owner,
+    )
 
     src_sec = vtb_combine_section(parsed.src_section_name, parsed.src_sp_section_code)
     dst_sec = vtb_combine_section(parsed.dst_section_name, parsed.dst_sp_section_code)
 
+    if hit_dst is not None:
+        side_acc = parsed.dst_account
+        side_sec = dst_sec
+    elif hit_src is not None:
+        side_acc = parsed.src_account
+        side_sec = src_sec
+    else:
+        detail = (
+            f"договор={contract}; filter_owner={expected_owner}; "
+            f"DstAccountCode={parsed.dst_account!r}; SrcAccountCode={parsed.src_account!r}"
+        )
+        return None, vtb_error_row_f752(
+            parsed,
+            ngri,
+            reason=VTB_ERROR_DEPO_NO_MATCH,
+            doc_detail=detail,
+            op_date=op_date,
+        )
+
+    f_raw = _format_depo_account_cell(side_acc) or (side_acc or "").strip() or SVOD_DASH
+    g_raw = _format_section_cell(side_sec) or side_sec or SVOD_DASH
+    if f_raw == SVOD_DASH:
+        return None, vtb_error_row_f752(
+            parsed,
+            ngri,
+            reason=VTB_ERROR_DEPO_NO_MATCH,
+            doc_detail="пустой счёт после сопоставления со справочником",
+            op_date=op_date,
+        )
+
+    depository = SVOD_DEPOSITORY_VTB_SD
+    owner = expected_owner
+
     h_acc = _format_depo_account_cell(parsed.src_account) or (parsed.src_account or "").strip()
-    i_sec = _format_section_cell(src_sec) or src_sec
+    i_sec_cell = _format_section_cell(src_sec) or src_sec
     j_acc = _format_depo_account_cell(parsed.dst_account) or (parsed.dst_account or "").strip()
     k_sec = _format_section_cell(dst_sec) or dst_sec
 
-    f_raw = (j_acc or h_acc).strip() or SVOD_DASH
-    g_raw = (k_sec or i_sec).strip() or SVOD_DASH
+    src_blob = f"{parsed.src_section_name} {parsed.src_sp_section_code}".strip()
+    dst_blob = f"{parsed.dst_section_name} {parsed.dst_sp_section_code}".strip()
 
-    owner_row = (
-        None
-        if f_raw == SVOD_DASH
-        else lookup_depo_row_by_account_number(depo_rows, f_raw)
-    )
-    depository = (owner_row.depository if owner_row else "").strip()
-    if not depository:
-        depository = SVOD_DEPOSITORY_VTB_SD
-    owner = (owner_row.owner if owner_row else "").strip() or SVOD_DASH
+    vtb_sd = vtb_sd_codifier_rows or []
+    inst_type, op_type, op_code = "", "", ""
+    if vtb_sd:
+        inst_type, op_type, op_code = lookup_codifier_vtb_sd_sheet(
+            vtb_sd,
+            parsed.stage_name,
+            f_raw,
+            h_acc,
+            j_acc,
+        )
+    if not (op_type or "").strip() and not (inst_type or "").strip() and not (op_code or "").strip():
+        inst_type, op_type, op_code = lookup_codifier_vtb(
+            codifier_rows,
+            parsed.stage_name,
+            src_sections_blob=src_blob,
+            dst_sections_blob=dst_blob,
+        )
+    op_code_cell = op_code if op_code else SVOD_DASH
+    if not (op_type or "").strip():
+        op_type = SVOD_DASH
+    inst_cell = inst_type.strip() if (inst_type or "").strip() else SVOD_DASH
 
     basis_parts: list[str] = []
     if parsed.order_number.strip():
@@ -849,7 +949,7 @@ def build_svod_row_vtb(
         f_raw,
         g_raw,
         h_acc or SVOD_DASH,
-        i_sec or SVOD_DASH,
+        i_sec_cell or SVOD_DASH,
         j_acc or SVOD_DASH,
         k_sec or SVOD_DASH,
         nrn_cell,
@@ -859,7 +959,7 @@ def build_svod_row_vtb(
         basis,
         tech,
         parsed.path.name,
-    ]
+    ], None
 
 
 def build_svod_row_region(
