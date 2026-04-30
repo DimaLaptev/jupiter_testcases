@@ -149,10 +149,20 @@ def _local_tag(tag: str) -> str:
     return tag
 
 
-def _text_direct_child(parent: ET.Element, local: str) -> str:
+def _text_direct_child(parent: ET.Element | None, local: str) -> str:
+    if parent is None:
+        return ""
     for child in parent:
         if _local_tag(child.tag) == local:
             return (child.text or "").strip()
+    return ""
+
+
+def _text_first_local_in_subtree(el: ET.Element, local: str) -> str:
+    """Первый узел с локальным именем ``local`` в поддереве (в т.ч. не прямой потомок)."""
+    for sub in el.iter():
+        if _local_tag(sub.tag) == local:
+            return (sub.text or "").strip()
     return ""
 
 
@@ -198,7 +208,13 @@ class VtbF752ParseResult:
 
 
 def parse_vtb_f752_xml(path: Path) -> VtbF752ParseResult | None:
-    """Разбор F752: блок ClientCashDataOrder, этап с непустым OverlayDepositaryDate."""
+    """Разбор F752: шапка у корня и/или в ``ClientCashDataOrder``; этапы — все ``ClientCashDataTable`` в документе.
+
+    Раньше требовался только блок ``ClientCashDataOrder`` и таблицы — только прямые дочерние узлы;
+    в выгрузках вроде ``EDO_ODKF752_1_F753_1`` шапка и ``ClientCashDataTable`` могут идти от корня,
+    а таблицы — быть вложены не на первом уровне — из‑за этого ``StageName`` оставался пустым.
+    Этап для ``stage_name``: последний по документу с непустым ``OverlayDepositaryDate``, иначе последняя таблица.
+    """
     try:
         tree = ET.parse(path)
     except (ET.ParseError, OSError):
@@ -210,21 +226,24 @@ def parse_vtb_f752_xml(path: Path) -> VtbF752ParseResult | None:
         if _local_tag(el.tag) == "ClientCashDataOrder":
             order_el = el
             break
-    if order_el is None:
-        return None
 
-    def ord_t(name: str) -> str:
-        return _text_direct_child(order_el, name)
+    def co_field(name: str) -> str:
+        """Поле заявки: сначала прямой потомок корня, затем — блока ``ClientCashDataOrder``."""
+        v = _text_direct_child(root, name)
+        return v if v else _text_direct_child(order_el, name)
 
     stages: list[VtbTableStageRow] = []
-    for el in order_el:
+    for el in root.iter():
         if _local_tag(el.tag) != "ClientCashDataTable":
             continue
         stages.append(
             VtbTableStageRow(
-                stage_name=_text_direct_child(el, "StageName"),
-                odk_date=_text_direct_child(el, "ODKDate"),
-                overlay_depositary_date=_text_direct_child(el, "OverlayDepositaryDate"),
+                stage_name=_text_first_local_in_subtree(el, "StageName"),
+                odk_date=_text_first_local_in_subtree(el, "ODKDate"),
+                overlay_depositary_date=_text_first_local_in_subtree(
+                    el,
+                    "OverlayDepositaryDate",
+                ),
             ),
         )
 
@@ -239,25 +258,21 @@ def parse_vtb_f752_xml(path: Path) -> VtbF752ParseResult | None:
     overlay_date = overlay_row.overlay_depositary_date.strip() if overlay_row else ""
     stage_nm = overlay_row.stage_name.strip() if overlay_row else ""
 
-    def root_t(name: str) -> str:
-        v = _text_direct_child(root, name)
-        return v if v else ord_t(name)
-
     return VtbF752ParseResult(
         path=path.resolve(),
-        order_number=root_t("OrderNumber"),
-        order_date=root_t("OrderDate"),
-        execution_date=root_t("ExecutionDate"),
-        basis=root_t("Basis"),
-        depository_name=root_t("DepositoryName"),
-        dop_info=ord_t("DopInfo"),
-        qty=(ord_t("Qty") or "1").strip() or "1",
-        src_account=ord_t("SrcAccountCode"),
-        src_section_name=ord_t("SrcSectionName"),
-        src_sp_section_code=ord_t("SrcSPSectionCode"),
-        dst_account=ord_t("DstAccountCode"),
-        dst_section_name=ord_t("DstSectionName"),
-        dst_sp_section_code=ord_t("DstSPSectionCode"),
+        order_number=co_field("OrderNumber"),
+        order_date=co_field("OrderDate"),
+        execution_date=co_field("ExecutionDate"),
+        basis=co_field("Basis"),
+        depository_name=co_field("DepositoryName"),
+        dop_info=co_field("DopInfo"),
+        qty=(co_field("Qty") or "1").strip() or "1",
+        src_account=co_field("SrcAccountCode"),
+        src_section_name=co_field("SrcSectionName"),
+        src_sp_section_code=co_field("SrcSPSectionCode"),
+        dst_account=co_field("DstAccountCode"),
+        dst_section_name=co_field("DstSectionName"),
+        dst_sp_section_code=co_field("DstSPSectionCode"),
         stage_overlay_date=overlay_date,
         stage_name=stage_nm,
         table_stages=stages,
