@@ -167,10 +167,41 @@ def read_codifier_rows(workbook_path: str, sheet_name: str = "Коды") -> list
     return out
 
 
+def _norm_sheet_title_for_vtb_match(name: str) -> str:
+    t = (name or "").replace("\u00a0", " ").strip().lower()
+    return t.replace("ё", "е")
+
+
+def _sheet_name_looks_like_vtb_codifier(name: str) -> bool:
+    """Лист вроде «Коды ВТБ СД» / «Коды ВТб СБ» (опечатки в имени)."""
+    k = _norm_sheet_title_for_vtb_match(name)
+    return "коды" in k and "втб" in k
+
+
+def _vtb_sd_codifier_sheet_candidates(wb) -> list[str]:
+    """
+    Порядок: точное «Коды ВТБ СД», затем остальные имена с «коды» и «втб».
+    Нужно, если в книге лист назван, например, «Коды ВТб СБ».
+    """
+    pref = "Коды ВТБ СД"
+    out: list[str] = []
+    seen: set[str] = set()
+    if pref in wb.sheetnames:
+        out.append(pref)
+        seen.add(pref)
+    for sn in wb.sheetnames:
+        if sn in seen:
+            continue
+        if _sheet_name_looks_like_vtb_codifier(sn):
+            out.append(sn)
+            seen.add(sn)
+    return out
+
+
 def _find_vtb_sd_header_row(ws, max_scan: int = 30) -> tuple[int, dict[str, int]]:
     for r in range(1, min(max_scan, (ws.max_row or 1) + 15) + 1):
         col_map: dict[str, int] = {}
-        for c in range(1, (ws.max_column or 10) + 1):
+        for c in range(1, max(ws.max_column or 0, 12) + 1):
             h = _norm_header(ws.cell(row=r, column=c))
             if h:
                 col_map[h] = c
@@ -196,26 +227,16 @@ def _vtb_sd_content_col(col_map: dict[str, int]) -> int | None:
     return None
 
 
-def read_vtb_sd_codifier_rows(
-    workbook_path: str,
-    sheet_name: str = "Коды ВТБ СД",
-) -> list[VtbSdCodifierRow]:
-    """Лист «Коды ВТБ СД»: колонки код операции, тип операции, содержание ВТБСД, тип поручения."""
-    wb = load_workbook(workbook_path, read_only=True, data_only=True)
-    if sheet_name not in wb.sheetnames:
-        wb.close()
-        return []
-    ws = wb[sheet_name]
+def _read_vtb_sd_codifier_rows_from_ws(ws) -> list[VtbSdCodifierRow]:
+    """Читает таблицу кодификатора ВТБ СД с одного листа (первая подходящая шапка)."""
     hr, col_map = _find_vtb_sd_header_row(ws)
     if not col_map:
-        wb.close()
         return []
     c_op = col_map.get("код операции")
     c_ot = col_map.get("тип операции")
     c_inst = col_map.get("тип поручения")
     c_vtb = _vtb_sd_content_col(col_map)
     if not c_op or not c_ot or not c_inst or not c_vtb:
-        wb.close()
         return []
 
     out: list[VtbSdCodifierRow] = []
@@ -238,8 +259,34 @@ def read_vtb_sd_codifier_rows(
                 instruction_type=inst,
             ),
         )
-    wb.close()
     return out
+
+
+def read_vtb_sd_codifier_rows(
+    workbook_path: str,
+    sheet_name: str | None = None,
+) -> list[VtbSdCodifierRow]:
+    """
+    Лист кодификатора ВТБ СД: колонки «Код операции», «Тип операции»,
+    «Содержание … ВТБСД», «Тип поручения».
+
+    Если ``sheet_name`` задан — только этот лист. Иначе: «Коды ВТБ СД»,
+    затем любой лист, в имени которого есть «коды» и «втб» (например «Коды ВТб СБ»);
+    берётся первый лист, с которого удалось прочитать хотя бы одну строку данных.
+    """
+    wb = load_workbook(workbook_path, read_only=True, data_only=True)
+    try:
+        if sheet_name:
+            if sheet_name not in wb.sheetnames:
+                return []
+            return _read_vtb_sd_codifier_rows_from_ws(wb[sheet_name])
+        for sn in _vtb_sd_codifier_sheet_candidates(wb):
+            rows = _read_vtb_sd_codifier_rows_from_ws(wb[sn])
+            if rows:
+                return rows
+        return []
+    finally:
+        wb.close()
 
 
 def _norm_match_snippet_vtb(s: str) -> str:

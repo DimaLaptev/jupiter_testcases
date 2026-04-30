@@ -95,6 +95,7 @@ REGION_ERROR_ACCOUNT_MISMATCH = "region_filename_account_mismatch"
 
 VTB_ERROR_BASIS_NO_CONTRACT = "vtb_basis_no_contract"
 VTB_ERROR_DEPO_NO_MATCH = "vtb_depo_no_match"
+VTB_ERROR_CODIFIER_INCOMPLETE = "vtb_codifier_incomplete"
 
 _BASIS_DEPO_CONTRACT_RE = re.compile(r"№\s*(\d+)\s*/", re.UNICODE)
 
@@ -105,6 +106,11 @@ def extract_vtb_basis_contract_number(basis: str) -> str | None:
     if not m:
         return None
     return (m.group(1) or "").strip()
+
+
+def _svod_vtb_codifier_cell_missing(cell: str) -> bool:
+    t = (cell or "").strip()
+    return not t or t == SVOD_DASH
 
 
 def vtb_error_row_f752(
@@ -940,7 +946,7 @@ def build_svod_row_vtb(
 
     comment = (parsed.stage_name or "").strip() or SVOD_DASH
 
-    return [
+    row = [
         op_date,
         depository,
         op_code_cell,
@@ -959,7 +965,26 @@ def build_svod_row_vtb(
         basis,
         tech,
         parsed.path.name,
-    ], None
+    ]
+    if (
+        _svod_vtb_codifier_cell_missing(op_code_cell)
+        or _svod_vtb_codifier_cell_missing(op_type)
+        or _svod_vtb_codifier_cell_missing(inst_cell)
+    ):
+        detail = (
+            "пустые или «-» в СВОД: «Код операции» / «Тип операции» / «Тип поручения» "
+            f"после листа ВТБ СД и «Коды»; StageName={comment!r}; "
+            f"код={op_code_cell!r}; тип_оп={op_type!r}; тип_пор={inst_cell!r}"
+        )
+        detail = detail[:800]
+        return row, vtb_error_row_f752(
+            parsed,
+            ngri,
+            reason=VTB_ERROR_CODIFIER_INCOMPLETE,
+            doc_detail=detail,
+            op_date=op_date,
+        )
+    return row, None
 
 
 def build_svod_row_region(

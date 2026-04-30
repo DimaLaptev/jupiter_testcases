@@ -472,7 +472,8 @@ def main() -> int:
         )
     if not vtb_sd_cod_rows:
         print(
-            "Предупреждение: лист «Коды ВТБ СД» отсутствует или без данных — для ВТБ СД колонки C, D, N берутся из «Коды».",
+            'Предупреждение: лист «Коды ВТБ СД» (или имя с «Коды» и «ВТБ») '
+            "отсутствует или без строк данных — для ВТБ СД колонки C, D, N берутся из «Коды».",
             file=sys.stderr,
         )
 
@@ -720,14 +721,15 @@ def main() -> int:
                             cod_rows,
                             vtb_sd_cod_rows,
                         )
-                        if err is not None:
+                        if err is not None and sv is None:
+                            error_rows.append(err)
                             vtb_file_err = err
                             break
+                        if err is not None:
+                            error_rows.append(err)
                         if sv is not None:
                             vtb_svod_block.append(sv)
-                    if vtb_file_err is not None:
-                        error_rows.append(vtb_file_err)
-                    else:
+                    if vtb_file_err is None:
                         rows_out.extend(vtb_svod_block)
 
     if not args.no_d_msg:
