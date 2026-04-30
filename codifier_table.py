@@ -242,6 +242,19 @@ def read_vtb_sd_codifier_rows(
     return out
 
 
+def _norm_match_snippet_vtb(s: str) -> str:
+    """
+    Нормализация для сравнения StageName (XML) с колонкой «Содержание ВТБСД» (Excel):
+    trim, lower (регистр), неразрывные пробелы → обычный пробел, «ё» → «е»,
+    подряд идущие пробелы в один. Далее проверка только подстрок (substring), без regex.
+    """
+    t = (s or "").replace("\u00a0", " ").replace("\u202f", " ")
+    t = t.strip().lower()
+    t = t.replace("ё", "е")
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
 def _vtb_sd_op_type_is_spisanie(op_type: str) -> bool:
     t = (op_type or "").lower().replace("–", "-").replace("—", "-")
     return " - списание" in t
@@ -261,25 +274,30 @@ def lookup_codifier_vtb_sd_sheet(
 ) -> tuple[str, str, str]:
     """
     Маппинг StageName на лист «Коды ВТБ СД» (колонка «Содержание ВТБСД»).
+    Сверка текста: после :func:`_norm_match_snippet_vtb` считается совпадение, если
+    нормализованное «Содержание ВТБСД» входит в нормализованный StageName **или**
+    нормализованный StageName входит в «Содержание ВТБСД» (для коротких фрагментов
+    порог длины StageName ≥ 2 символа).
+
     Направление: счёт депо (F) = счёт списания (H) → строка «… - списание»;
     F = зачисление (J) → «… - зачисление».
     Возвращает (тип_поручения, тип_операции, код_операции).
     """
     if not rows:
         return "", "", ""
-    lab = _norm_match_snippet(stage_name)
+    lab = _norm_match_snippet_vtb(stage_name)
     if not lab:
         return "", "", ""
 
     scored: list[tuple[int, VtbSdCodifierRow]] = []
     for r in rows:
-        cv = _norm_match_snippet(r.content_vtb)
+        cv = _norm_match_snippet_vtb(r.content_vtb)
         if not cv:
             continue
         score = 0
         if cv in lab:
             score = max(score, len(cv) * 5)
-        elif lab in cv and len(lab) >= 4:
+        elif lab in cv and len(lab) >= 2:
             score = max(score, min(len(lab), len(cv)) * 5)
         if score > 0:
             scored.append((score, r))
