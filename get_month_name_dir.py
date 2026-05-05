@@ -6,10 +6,21 @@ from typing import Optional, Set
 
 from openpyxl import load_workbook
 
-# Файл создаётся скриптом depo_validation/generate_russia_non_working_calendar_xlsx.py
-_CALENDAR_PATH = (
-    Path(__file__).resolve().parent / "depo_validation" / "russia_non_working_days_2026_2027.xlsx"
-)
+from config_ews import REPORS_DEPO_DIRECTORY
+
+
+def _depo_validation_dir() -> Path:
+    """Каталог depo_validation лежит внутри REPORS_DEPO_DIRECTORY (см. config_ews)."""
+    if not REPORS_DEPO_DIRECTORY:
+        raise ValueError(
+            "REPORS_DEPO_DIRECTORY не задан в окружении – укажите путь к корню отчётов в .env"
+        )
+    return Path(REPORS_DEPO_DIRECTORY) / "depo_validation"
+
+
+def _calendar_path() -> Path:
+    return _depo_validation_dir() / "russia_non_working_days_2026_2027.xlsx"
+
 
 _NON_WORKING_CACHE: Optional[Set[date]] = None
 
@@ -31,14 +42,16 @@ def _load_non_working_dates() -> Set[date]:
     if _NON_WORKING_CACHE is not None:
         return _NON_WORKING_CACHE
 
-    if not _CALENDAR_PATH.is_file():
+    cal = _calendar_path()
+
+    if not cal.is_file():
         raise FileNotFoundError(
-            f"Нет файла календаря (calendar file): {_CALENDAR_PATH}. "
-            "Сгенерируйте его: python dep_report/dep_report/depo_validation/"
-            "generate_russia_non_working_calendar_xlsx.py"
+            f"Нет файла календаря (calendar file): {cal}. "
+            "Сгенерируйте Excel (Excel) скриптом generate_russia_non_working_calendar_xlsx.py "
+            "и поместите файл в каталог depo_validation внутри REPORS_DEPO_DIRECTORY."
         )
 
-    wb = load_workbook(_CALENDAR_PATH, read_only=True, data_only=True)
+    wb = load_workbook(cal, read_only=True, data_only=True)
     try:
         ws = wb.worksheets[0]
         out: Set[date] = set()
@@ -52,7 +65,7 @@ def _load_non_working_dates() -> Set[date]:
         wb.close()
 
     if not out:
-        raise ValueError(f"В {_CALENDAR_PATH} нет ни одной даты в столбце date.")
+        raise ValueError(f"В {cal} нет ни одной даты в столбце date.")
 
     _NON_WORKING_CACHE = out
     return _NON_WORKING_CACHE
@@ -73,7 +86,7 @@ def _reference_date_for_reporting_month() -> date:
         steps += 1
         if steps > 800:
             raise RuntimeError(
-                f"Не удалось найти рабочий день: проверьте файл календаря {_CALENDAR_PATH}."
+                f"Не удалось найти рабочий день: проверьте файл календаря {_calendar_path()}."
             )
     return d
 
