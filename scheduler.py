@@ -12,6 +12,16 @@ logger = logging.getLogger(__name__)
 _TZ = "Europe/Moscow"
 
 
+def _run_region_edo_download() -> None:
+    """Выгрузка ЭДО Регион — ежедневно 6:30 — region_edo_download.py."""
+    try:
+        from region_edo_download import main as region_edo_main
+
+        region_edo_main()
+    except Exception:
+        logger.exception("region_edo_download: ошибка выполнения")
+
+
 def _run_create_folders() -> None:
     """1.1 — 2-й день месяца, 6:50 — create_folders.py."""
     try:
@@ -130,6 +140,13 @@ def run_scheduler() -> None:
     )
     scheduler = BlockingScheduler(timezone=_TZ)
 
+    scheduler.add_job(
+        _run_region_edo_download,
+        CronTrigger(hour=6, minute=30, timezone=_TZ),
+        id="region_edo_download_daily",
+        name="region_edo_download.py",
+        replace_existing=True,
+    )
     scheduler.add_job(
         _run_create_folders,
         CronTrigger(day=2, hour=6, minute=50, timezone=_TZ),
