@@ -1,5 +1,5 @@
 """
-Выгрузка вложений документов ЭДО СЭД Регион в <YYYY_MM>/REGION/EDO.
+Выгрузка вложений документов ЭДО СЭД Регион в REPORS_DEPO_DIRECTORY/<YYYY_MM>/REGION/EDO.
 
 Период: предыдущий календарный день по МСК или оба REGION_EDO_DOCUMENT_DATE_* в .env.
 Логины — REGION_LOGIN (через запятую); контрагенты из getContractors.
@@ -16,6 +16,7 @@ from typing import Tuple
 
 import pytz
 
+from config_ews import REPORS_DEPO_DIRECTORY
 from config_region import (
     REGION_LOGINS,
     REGION_PASSWORD,
@@ -24,10 +25,11 @@ from config_region import (
     REGION_EDO_DOCUMENT_DATE_TO,
     EDO_FOLDERS,
 )
+from get_month_name_dir import get_current_year_month
 from region_api import RegionApiClient
 
 # Неноль: после успешного getDocumentBody снова вызвать getDocumentById ради вложений.
-REGION_EDO_USE_GDBID_FOR_ATTACHMENTS = 1
+REGION_EDO_USE_GDBID_FOR_ATTACHMENTS = 0
 
 logging.basicConfig(
     level=logging.INFO,
@@ -97,10 +99,15 @@ def _log_skipped_attachment(att: dict, idx: int, doc_id: str) -> None:
 
 
 def _output_dir() -> str:
-    """Каталог <YYYY_MM>/REGION/EDO."""
-    moscow = pytz.timezone('Europe/Moscow')
-    month_folder = datetime.now(moscow).strftime('%Y_%m')
-    path = os.path.join(month_folder, 'REGION', 'EDO')
+    """Каталог REPORS_DEPO_DIRECTORY/<отчётный месяц>/REGION/EDO."""
+    path = os.path.normpath(
+        os.path.join(
+            REPORS_DEPO_DIRECTORY or "",
+            get_current_year_month(),
+            "REGION",
+            "EDO",
+        )
+    )
     os.makedirs(path, exist_ok=True)
     return path
 
