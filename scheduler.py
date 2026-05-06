@@ -12,6 +12,16 @@ logger = logging.getLogger(__name__)
 _TZ = "Europe/Moscow"
 
 
+def _run_region_file_cleaner() -> None:
+    """Очистка REGION/EDO — ежедневно 6:00 — region_file_cleaner.py."""
+    try:
+        from region_file_cleaner import run_region_file_cleaner
+
+        run_region_file_cleaner()
+    except Exception:
+        logger.exception("region_file_cleaner: ошибка выполнения")
+
+
 def _run_region_edo_download() -> None:
     """Выгрузка ЭДО Регион — ежедневно 6:30 — region_edo_download.py."""
     try:
@@ -140,6 +150,13 @@ def run_scheduler() -> None:
     )
     scheduler = BlockingScheduler(timezone=_TZ)
 
+    scheduler.add_job(
+        _run_region_file_cleaner,
+        CronTrigger(hour=6, minute=0, timezone=_TZ),
+        id="region_file_cleaner_daily",
+        name="region_file_cleaner.py",
+        replace_existing=True,
+    )
     scheduler.add_job(
         _run_region_edo_download,
         CronTrigger(hour=6, minute=30, timezone=_TZ),

@@ -1,6 +1,7 @@
 # 2.2
 
 import os
+import re
 
 from config_ews import REPORS_DEPO_DIRECTORY
 from file_handler import move_file_to_dir
@@ -11,6 +12,21 @@ def _region_month_paths(subdir_after_region: str) -> str:
     month = get_current_year_month()
     base = REPORS_DEPO_DIRECTORY or ""
     return os.path.normpath(os.path.join(base, month, "REGION", subdir_after_region))
+
+
+def region_edo_directory() -> str:
+    """Абсолютный путь к REPORS_DEPO_DIRECTORY/<месяц>/REGION/EDO."""
+    return _region_month_paths("EDO")
+
+
+# Как при сохранении дубля в region_edo_download: f"{name_part}_{ts}{ext}", ts = %Y%m%d_%H%M%S
+_IS_XLS_DUP_TS_SUFFIX = re.compile(r"_\d{8}_\d{6}$")
+
+
+def _is_is_xls_duplicate_suffixed(filename: str) -> bool:
+    """True, если имя уже с суффиксом даты/времени дубля (не переносим из EDO)."""
+    stem, _ = os.path.splitext(filename)
+    return bool(_IS_XLS_DUP_TS_SUFFIX.search(stem))
 
 
 def move_IS_xls_files() -> None:
@@ -29,6 +45,8 @@ def move_IS_xls_files() -> None:
         file_extension = filename[-4:]
         if file_extension.lower() == ".xls":
             if filename[:2] == "IS":
+                if _is_is_xls_duplicate_suffixed(filename):
+                    continue
                 try:
                     move_file_to_dir(filename, dir_region, destination_dir)
                 except Exception as e:
@@ -69,6 +87,17 @@ def _matches_spr_patterns(filename: str) -> bool:
         return True
     if "интех" in lower:
         return True
+    return False
+
+
+def should_preserve_in_region_edo(filename: str) -> bool:
+    """Не удалять cleanером: материал для SPR или IS*.xls без суффикса дубля (ждут переноса в REP)."""
+    if _matches_spr_patterns(filename):
+        return True
+    if len(filename) < 4:
+        return False
+    if filename[-4:].lower() == ".xls" and filename[:2] == "IS":
+        return not _is_is_xls_duplicate_suffixed(filename)
     return False
 
 
