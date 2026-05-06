@@ -1,13 +1,32 @@
-# -*- coding: utf-8 -*-
-"""Per-series тренеры (trainers) и `SERIES_CONFIGS` для скриптов: выдержка из `education_cell.py` / ноутбука."""
+"""Per-series тренеры (trainers) и реестр конфигураций ``SERIES_CONFIGS``.
+
+Модуль предоставляет production-набор тренеров per ``operation_id``
+для прогноза количества операций. Используется через
+``predict_operation_count_v2``.
+
+Семейства моделей (model families):
+
+- ``ets`` — Exponential Smoothing (statsmodels)
+- ``theta`` — Theta-model (statsmodels)
+- ``sarimax`` — SARIMAX (statsmodels)
+- ``auto_arima`` — AutoARIMA (опционально, optional dependency: ``pmdarima``)
+- ``statsforecast`` / ``statsforecast_intermittent`` — StatsForecast (опционально)
+- ``ucm`` — Unobserved Components Model (statsmodels)
+- ``neuralforecast`` — NHITS/NBEATS (опционально, ``neuralforecast``)
+- ``local_supervised`` — sklearn-регрессоры на лагах (lag features)
+- ``glm_count`` — GLM Poisson/NegBin
+- ``window_median`` — медиана окна (window median, baseline)
+"""
 
 from __future__ import annotations
 
+import logging
 import warnings
 from pandas.errors import PerformanceWarning
 
 warnings.filterwarnings("ignore", category=PerformanceWarning)
 
+import gc
 import numpy as np
 import pandas as pd
 
@@ -15,49 +34,27 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.forecasting.theta import ThetaModel
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
+logger = logging.getLogger(__name__)
+
 HAS_PMDARIMA = True
 try:
-    import pmdarima  # noqa: F401
+    import pmdarima
 except ImportError:
     HAS_PMDARIMA = False
 
 HAS_STATSFORECAST = False
 try:
-    import statsforecast  # noqa: F401
+    import statsforecast
 
     HAS_STATSFORECAST = True
 except Exception:
     pass
 
-HAS_PROPHET = False
-try:
-    import prophet  # noqa: F401
-
-    HAS_PROPHET = True
-except Exception:
-    pass
-
-HAS_TBATS = False
-try:
-    import tbats  # noqa: F401
-
-    HAS_TBATS = True
-except Exception:
-    pass
-
 HAS_NEURALFORECAST = False
 try:
-    import neuralforecast  # noqa: F401
+    import neuralforecast
 
     HAS_NEURALFORECAST = True
-except Exception:
-    pass
-
-HAS_GREYKITE = False
-try:
-    import greykite  # noqa: F401
-
-    HAS_GREYKITE = True
 except Exception:
     pass
 
@@ -151,6 +148,17 @@ def append_warning_rows(
                 "statsmodels_module": _statsmodels_module_tag(w),
             }
         )
+
+
+def cleanup_memory() -> None:
+    """Очистка памяти после обучения модели для предотвращения утечек."""
+    gc.collect()
+    try:
+        import torch
+        if hasattr(torch, "cuda") and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except (ImportError, RuntimeError, AttributeError):
+        pass  # torch недоступен или cpu-only — безопасно
 
 
 def train_ets_per_series(
@@ -675,84 +683,6 @@ def train_statsforecast_intermittent_per_series(
     return preds.values
 
 
-def train_prophet_per_series(
-    df_full,
-    mask_train,
-    mask_test,
-    resist_id,
-    series_config_name,
-    warning_rows,
-    *,
-    prophet_params=None,
-):
-    from prophet import Prophet
-
-    test_idx = df_full.loc[mask_test].index
-    preds = pd.Series(0.0, index=test_idx)
-    p_base = {} if not prophet_params else dict(prophet_params)
-    for op_id, grp in df_full.groupby("operation_id"):
-        train_part = grp[mask_train.reindex(grp.index, fill_value=False)].sort_values("date")
-        test_part = grp[mask_test.reindex(grp.index, fill_value=False)].sort_values("date")
-        if test_part.empty:
-            continue
-        y_hist = train_part["fact_value"].values.astype(float)
-        n_fc = len(test_part)
-        n_tr = len(y_hist)
-        try:
-            if n_tr < 4:
-                raise ValueError("too short")
-            p_kw = dict(p_base)
-            df_p = pd.DataFrame(
-                {"ds": pd.to_datetime(train_part["date"]), "y": y_hist}
-            )
-            use_cap_floor = bool(p_kw.pop("use_train_cap_floor", False))
-            cap_v = floor_v = None
-            if use_cap_floor or p_kw.get("growth") == "logistic":
-                if p_kw.get("growth") != "logistic":
-                    p_kw["growth"] = "logistic"
-                ymax, ymin = float(np.max(y_hist)), float(np.min(y_hist))
-                cap_v = ymax * 1.05 if ymax > 0 else 1.0
-                floor_v = max(0.0, ymin * 0.95)
-                if cap_v <= floor_v:
-                    cap_v = floor_v + 1.0
-                df_p = df_p.assign(cap=cap_v, floor=floor_v)
-            m = Prophet(**p_kw)
-            with warnings.catch_warnings(record=True) as w_fit:
-                warnings.simplefilter("always")
-                m.fit(df_p)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="fit",
-                n_train_points=n_tr,
-                caught=w_fit,
-            )
-            future = pd.DataFrame({"ds": pd.to_datetime(test_part["date"])})
-            if cap_v is not None:
-                future = future.assign(cap=cap_v, floor=floor_v)
-            with warnings.catch_warnings(record=True) as w_pred:
-                warnings.simplefilter("always")
-                fcst = m.predict(future)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="predict",
-                n_train_points=n_tr,
-                caught=w_pred,
-            )
-            fc = fcst["yhat"].values.astype(float)
-        except Exception:
-            fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
-    return preds.values
-
-
 def train_ucm_per_series(
     df_full,
     mask_train,
@@ -802,72 +732,6 @@ def train_ucm_per_series(
             with warnings.catch_warnings(record=True) as w_fc:
                 warnings.simplefilter("always")
                 fc = res.forecast(n_fc)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="forecast",
-                n_train_points=n_tr,
-                caught=w_fc,
-            )
-            fc = np.asarray(fc, dtype=float).ravel()
-        except Exception:
-            fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
-    return preds.values
-
-
-def train_tbats_per_series(
-    df_full,
-    mask_train,
-    mask_test,
-    resist_id,
-    series_config_name,
-    warning_rows,
-    *,
-    tbats_use_box_cox=None,
-    tbats_use_arma_errors=None,
-    tbats_seasonal_periods=None,
-):
-    from tbats import TBATS
-
-    test_idx = df_full.loc[mask_test].index
-    preds = pd.Series(0.0, index=test_idx)
-    for op_id, grp in df_full.groupby("operation_id"):
-        train_part = grp[mask_train.reindex(grp.index, fill_value=False)].sort_values("date")
-        test_part = grp[mask_test.reindex(grp.index, fill_value=False)].sort_values("date")
-        if test_part.empty:
-            continue
-        y_hist = train_part["fact_value"].values.astype(float)
-        n_fc = len(test_part)
-        n_tr = len(y_hist)
-        try:
-            if n_tr < 2 * MONTHLY_SEASON_LENGTH:
-                raise ValueError("too short for TBATS")
-            tb_kw = {"seasonal_periods": list(tbats_seasonal_periods) if tbats_seasonal_periods is not None else [MONTHLY_SEASON_LENGTH]}
-            if tbats_use_box_cox is not None:
-                tb_kw["use_box_cox"] = tbats_use_box_cox
-            if tbats_use_arma_errors is not None:
-                tb_kw["use_arma_errors"] = tbats_use_arma_errors
-            with warnings.catch_warnings(record=True) as w_fit:
-                warnings.simplefilter("always")
-                estimator = TBATS(**tb_kw)
-                fitted = estimator.fit(y_hist)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="fit",
-                n_train_points=n_tr,
-                caught=w_fit,
-            )
-            with warnings.catch_warnings(record=True) as w_fc:
-                warnings.simplefilter("always")
-                fc = fitted.forecast(steps=n_fc)
             append_warning_rows(
                 warning_rows,
                 resist_id=resist_id,
@@ -964,8 +828,12 @@ def train_neuralforecast_per_series(
             fc = _sf_forecast_column(fc_df)
             if fc.shape[0] != n_fc:
                 fc = fc[:n_fc] if fc.shape[0] > n_fc else np.resize(fc, n_fc)
+            # Очистка памяти после neuralforecast (NHITS/NBEATS) — предотвращает утечки
+            cleanup_memory()
+            del nf, model, fc_df
         except Exception:
             fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
+            cleanup_memory()
         preds.loc[test_part.index] = np.maximum(fc, 0)
     return preds.values
 
@@ -1183,87 +1051,6 @@ def train_glm_count_per_series(
     return preds.values
 
 
-def train_zip_per_series(
-    df_full,
-    mask_train,
-    mask_test,
-    resist_id,
-    series_config_name,
-    warning_rows,
-    *,
-    zip_fit_kwargs=None,
-    zip_model_kind="zip",
-    zip_exog_infl_mode="same",
-):
-    from statsmodels.discrete.count_model import (
-        ZeroInflatedPoisson,
-        ZeroInflatedNegativeBinomialP,
-        ZeroInflatedGeneralizedPoisson,
-    )
-
-    test_idx = df_full.loc[mask_test].index
-    preds = pd.Series(0.0, index=test_idx)
-    for op_id, grp in df_full.groupby("operation_id"):
-        train_part = grp[mask_train.reindex(grp.index, fill_value=False)].sort_values("date")
-        test_part = grp[mask_test.reindex(grp.index, fill_value=False)].sort_values("date")
-        if test_part.empty:
-            continue
-        y_hist = train_part["fact_value"].values.astype(float)
-        n_fc = len(test_part)
-        n_tr = len(y_hist)
-        try:
-            if n_tr < 6:
-                raise ValueError("too short for zip")
-            y_int = np.maximum(np.round(y_hist), 0).astype(int)
-            exog_rows = []
-            endog_tr = []
-            for t in range(1, len(y_int)):
-                exog_rows.append([1.0, float(y_int[t - 1])])
-                endog_tr.append(float(y_int[t]))
-            exog_tr = np.array(exog_rows, dtype=float)
-            endog_tr = np.array(endog_tr, dtype=float)
-            if exog_tr.shape[0] < 4:
-                raise ValueError("too few zip rows")
-            with warnings.catch_warnings(record=True) as w_fit:
-                warnings.simplefilter("always")
-                exog_infl_tr = exog_tr if zip_exog_infl_mode == "same" else np.ones((exog_tr.shape[0], 1))
-                if zip_model_kind == "zinb":
-                    ModelCls = ZeroInflatedNegativeBinomialP
-                elif zip_model_kind == "zigp":
-                    ModelCls = ZeroInflatedGeneralizedPoisson
-                else:
-                    ModelCls = ZeroInflatedPoisson
-                z = ModelCls(endog_tr, exog_tr, exog_infl=exog_infl_tr)
-                _zkw = {"disp": False, "maxiter": 200}
-                if zip_fit_kwargs:
-                    _zkw.update(zip_fit_kwargs)
-                zres = z.fit(**_zkw)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="fit",
-                n_train_points=n_tr,
-                caught=w_fit,
-            )
-            history = list(y_int.astype(float))
-            fc = []
-            for _ in range(n_fc):
-                x1 = np.array([[1.0, history[-1]]])
-                infl1 = x1 if zip_exog_infl_mode == "same" else np.array([[1.0]])
-                mu = float(np.squeeze(zres.predict(exog=x1, exog_infl=infl1)))
-                pred = max(0.0, mu)
-                fc.append(pred)
-                history.append(float(max(0, round(pred))))
-            fc = np.array(fc, dtype=float)
-        except Exception:
-            fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
-    return preds.values
-
-
 def train_window_median_per_series(
     df_full,
     mask_train,
@@ -1297,99 +1084,7 @@ def train_window_median_per_series(
     return preds.values
 
 
-def train_greykite_per_series(
-    df_full,
-    mask_train,
-    mask_test,
-    resist_id,
-    series_config_name,
-    warning_rows,
-    *,
-    greykite_coverage=0.95,
-    greykite_model_template=None,
-    greykite_mcp_dict=None,
-    greykite_extra_pred_col=False,
-    greykite_forecast_one_by_one=None,
-):
-    from greykite.framework.templates.forecaster import Forecaster
-    from greykite.framework.templates.autogen.forecast_config import (
-        ForecastConfig,
-        MetadataParam,
-        ModelComponentsParam,
-    )
-    from greykite.framework.templates.model_templates import ModelTemplateEnum
-
-    test_idx = df_full.loc[mask_test].index
-    preds = pd.Series(0.0, index=test_idx)
-    for op_id, grp in df_full.groupby("operation_id"):
-        train_part = grp[mask_train.reindex(grp.index, fill_value=False)].sort_values("date")
-        test_part = grp[mask_test.reindex(grp.index, fill_value=False)].sort_values("date")
-        if test_part.empty:
-            continue
-        y_hist = train_part["fact_value"].values.astype(float)
-        n_fc = len(test_part)
-        n_tr = len(y_hist)
-        try:
-            if n_tr < 8:
-                raise ValueError("too short for greykite")
-            df_gk = pd.DataFrame({
-                "ts": pd.to_datetime(train_part["date"]),
-                "y": train_part["fact_value"].astype(float).values,
-            })
-            forecaster = Forecaster()
-            try:
-                tpl = ModelTemplateEnum.SILVERKITE.name
-            except Exception:
-                tpl = ModelTemplateEnum.AUTO.name
-            metadata = MetadataParam(
-                time_col="ts",
-                value_col="y",
-                freq=STATSFORECAST_FREQ,
-            )
-            with warnings.catch_warnings(record=True) as w_fit:
-                warnings.simplefilter("always")
-                result = forecaster.run_forecast_config(
-                    df=df_gk,
-                    config=ForecastConfig(
-                        model_template=tpl,
-                        forecast_horizon=int(n_fc),
-                        coverage=0.95,
-                        metadata_param=metadata,
-                    ),
-                )
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="fit",
-                n_train_points=n_tr,
-                caught=w_fit,
-            )
-            fdf = result.forecast.df
-            fc_col = None
-            for cand in ("forecast", "fcst", "yhat", "y"):
-                if cand in fdf.columns:
-                    fc_col = cand
-                    break
-            if fc_col is None:
-                num_cols = [c for c in fdf.select_dtypes(include=[np.number]).columns]
-                fc_col = num_cols[0] if num_cols else None
-            if fc_col is None:
-                raise ValueError("greykite: no forecast column")
-            fc = fdf[fc_col].values.astype(float).ravel()[:n_fc]
-            if fc.shape[0] < n_fc:
-                fc = np.resize(fc, n_fc)
-        except Exception:
-            fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
-    return preds.values
-
-
-
-# Расширенный набор per-series: время прогона (runtime) и число warnings существенно растут.
-# Расширенный набор per-series: время прогона (runtime) и число warnings существенно растут.
+# Базовые per-series configs — основной production-набор.
 SERIES_CONFIGS = {
     "ETS-add": {"fn": "ets", "trend": "add", "damped_trend": False, "seasonal": None, "seasonal_periods": None},
     "ETS-damped": {"fn": "ets", "trend": "add", "damped_trend": True, "seasonal": None, "seasonal_periods": None},
@@ -1430,8 +1125,6 @@ SERIES_CONFIGS = {
         "seasonal_periods": 12,
     },
     "Theta-default": {"fn": "theta"},
-    "Theta-no-deseason": {"fn": "theta", "theta_deseasonalize": False},
-    "Theta-mult-method": {"fn": "theta", "theta_method": "multiplicative"},
     "SARIMAX-default": {"fn": "sarimax"},
     "SARIMAX-airline": {"fn": "sarimax", "sarimax_preset": "airline"},
 }
@@ -1456,7 +1149,6 @@ if HAS_STATSFORECAST:
             "SF-AutoARIMA": {"fn": "statsforecast", "sf_model": "AutoARIMA", "season_len": _sl},
             "SF-Naive": {"fn": "statsforecast", "sf_model": "Naive", "season_len": _sl},
             "SF-SeasonalNaive": {"fn": "statsforecast", "sf_model": "SeasonalNaive", "season_len": _sl},
-            "SF-HistoricAverage": {"fn": "statsforecast", "sf_model": "HistoricAverage", "season_len": _sl},
             "SF-RandomWalkWithDrift": {"fn": "statsforecast", "sf_model": "RandomWalkWithDrift", "season_len": _sl},
             "SF-OptimizedTheta": {"fn": "statsforecast", "sf_model": "OptimizedTheta", "season_len": _sl},
             "SF-DynamicOptimizedTheta": {"fn": "statsforecast", "sf_model": "DynamicOptimizedTheta", "season_len": _sl},
@@ -1476,35 +1168,10 @@ if HAS_STATSFORECAST:
         }
     )
 
-if HAS_PROPHET:
-    SERIES_CONFIGS["Prophet-default"] = {"fn": "prophet", "prophet_params": {}}
-    SERIES_CONFIGS["Prophet-yearly"] = {
-        "fn": "prophet",
-        "prophet_params": {
-            "yearly_seasonality": True,
-            "weekly_seasonality": False,
-            "daily_seasonality": False,
-        },
-    }
-    SERIES_CONFIGS["Prophet-tuned"] = {
-        "fn": "prophet",
-        "prophet_params": {
-            "seasonality_mode": "multiplicative",
-            "changepoint_prior_scale": 0.05,
-            "n_changepoints": 5,
-        },
-    }
-
-SERIES_CONFIGS["UCM-local-linear-seasonal"] = {"fn": "ucm"}
 SERIES_CONFIGS["UCM-local-level-seasonal"] = {
     "fn": "ucm",
     "ucm_level": "local level",
 }
-
-if HAS_TBATS:
-    SERIES_CONFIGS["TBATS"] = {"fn": "tbats"}
-    SERIES_CONFIGS["TBATS-no-boxcox"] = {"fn": "tbats", "tbats_use_box_cox": False}
-    SERIES_CONFIGS["TBATS-no-arma"] = {"fn": "tbats", "tbats_use_arma_errors": False}
 
 if HAS_NEURALFORECAST:
     SERIES_CONFIGS["NF-NHITS"] = {"fn": "neuralforecast", "nf_model": "NHITS"}
@@ -1531,8 +1198,6 @@ SERIES_CONFIGS.update(
         "Local-KNN": {"fn": "local_supervised", "sk_model": "knn"},
         "Local-RandomForest": {"fn": "local_supervised", "sk_model": "rf"},
         "GLM-Poisson": {"fn": "glm_count", "family": "poisson"},
-        "GLM-NegativeBinomial": {"fn": "glm_count", "family": "negbin"},
-        "ZIP": {"fn": "zip"},
         "WindowMedian-3": {"fn": "window_median", "window_size": 3},
         "WindowMedian-6": {"fn": "window_median", "window_size": 6},
     }
@@ -1552,20 +1217,18 @@ if HAS_STATSFORECAST:
         "sf_window_size": 6,
     }
 
-if HAS_GREYKITE:
-    SERIES_CONFIGS["Greykite-Silverkite"] = {"fn": "greykite"}
 
-
-# -*- coding: utf-8 -*-
-"""Дополнительные конфигурации по семействам fn для ноутбука 25.
-
-Каждый ключ SERIES_CONFIGS — уникальное человекочитаемое имя (для Excel и метрик).
-"""
+# Расширенный набор per-series: ключ ``SERIES_CONFIGS`` — уникальное имя для метрик; регистрация дополнительных конфигов выполняется в
+# ``_register_fn_family_extras`` ниже.
 
 def _register_fn_family_extras(sc: dict, ctx: dict) -> None:
-    """ctx: MONTHLY_SEASON_LENGTH, HAS_PMDARIMA, HAS_STATSFORECAST, … из ячейки ноутбука."""
+    """Register extra per-family configs into ``sc`` (mutates the dict).
+
+    ctx keys: ``MONTHLY_SEASON_LENGTH``, ``HAS_PMDARIMA``, ``HAS_STATSFORECAST``,
+    ``HAS_NEURALFORECAST`` — feature flags для condition-регистрации
+    (conditional registration) опциональных семейств.
+    """
     sl = ctx["MONTHLY_SEASON_LENGTH"]
-    # База как у ETS-add в ноутбуке 24; частичные пресеты (только ets_fit_kwargs) мержатся поверх.
     _ets_base = {
         "fn": "ets",
         "trend": "add",
@@ -1577,16 +1240,6 @@ def _register_fn_family_extras(sc: dict, ctx: dict) -> None:
         ("ETS-add-brute-search", {"ets_fit_kwargs": {"use_brute": True}}),
         ("ETS-add-optimizer-lbfgs", {"ets_fit_kwargs": {"method": "lbfgs"}}),
         ("ETS-add-remove-bias", {"ets_fit_kwargs": {"remove_bias": True}}),
-        (
-            "ETS-damped-add-no-season-no-brute",
-            {
-                "trend": "add",
-                "damped_trend": True,
-                "seasonal": None,
-                "seasonal_periods": None,
-                "ets_fit_kwargs": {"use_brute": False},
-            },
-        ),
         ("ETS-no-trend-no-season", {"trend": None, "damped_trend": False, "seasonal": None, "seasonal_periods": None}),
         ("ETS-add-seasonal-period-6", {"trend": "add", "damped_trend": False, "seasonal": "add", "seasonal_periods": 6}),
         ("ETS-add-seasonal-period-4", {"trend": "add", "damped_trend": False, "seasonal": "add", "seasonal_periods": 4}),
@@ -1600,16 +1253,6 @@ def _register_fn_family_extras(sc: dict, ctx: dict) -> None:
                 "ets_fit_kwargs": {"use_brute": True},
             },
         ),
-        (
-            "ETS-add-tight-fit-tol",
-            {
-                "trend": "add",
-                "damped_trend": False,
-                "seasonal": None,
-                "seasonal_periods": None,
-                "ets_fit_kwargs": {"atol": 1e-8, "rtol": 1e-6},
-            },
-        ),
     ]:
         sc[name] = {**_ets_base, **cfg}
 
@@ -1617,13 +1260,8 @@ def _register_fn_family_extras(sc: dict, ctx: dict) -> None:
         ("Theta-period-6-deseason-auto", {"theta_period": 6}),
         ("Theta-period-4-deseason-auto", {"theta_period": 4}),
         ("Theta-period-3-deseason-auto", {"theta_period": 3}),
-        ("Theta-method-additive-deseason", {"theta_method": "additive"}),
         ("Theta-additive-no-deseason", {"theta_deseasonalize": False, "theta_method": "additive"}),
-        ("Theta-period-12-additive-deseason", {"theta_period": 12, "theta_method": "additive"}),
-        ("Theta-period-12-no-deseason", {"theta_period": 12, "theta_deseasonalize": False}),
-        ("Theta-period-6-multiplicative-deseason", {"theta_period": 6, "theta_method": "multiplicative"}),
         ("Theta-period-8-deseason-auto", {"theta_period": 8}),
-        ("Theta-period-24-deseason-auto", {"theta_period": 24}),
     ]:
         base = {"fn": "theta", "theta_deseasonalize": True, "theta_method": "auto", "theta_period": 12}
         base.update(cfg)
@@ -1642,8 +1280,6 @@ def _register_fn_family_extras(sc: dict, ctx: dict) -> None:
             "SARIMAX-order-210-nonseasonal",
             {"sarimax_order": (2, 1, 0), "sarimax_seasonal_order": (0, 0, 0, 0)},
         ),
-        ("SARIMAX-default-fit-lbfgs", {"sarimax_fit_kwargs": {"method": "lbfgs"}}),
-        ("SARIMAX-default-robust-cov", {"sarimax_fit_kwargs": {"cov_type": "robust"}}),
         (
             "SARIMAX-order-110-season-110-m12",
             {"sarimax_order": (1, 1, 0), "sarimax_seasonal_order": (1, 1, 0, 12)},
@@ -1733,58 +1369,12 @@ def _register_fn_family_extras(sc: dict, ctx: dict) -> None:
                 "sf_tsb_kwargs": {"alpha_d": ad, "alpha_p": ap},
             }
 
-    if ctx["HAS_PROPHET"]:
-        for name, pp in [
-            ("Prophet-seasonality-prior-low", {"seasonality_prior_scale": 0.01}),
-            ("Prophet-seasonality-prior-high", {"seasonality_prior_scale": 10.0}),
-            ("Prophet-changepoint-prior-tight", {"changepoint_prior_scale": 0.001}),
-            ("Prophet-changepoint-prior-loose", {"changepoint_prior_scale": 0.5}),
-            ("Prophet-holidays-prior-low", {"holidays_prior_scale": 0.01}),
-            (
-                "Prophet-logistic-train-cap-floor",
-                {"growth": "logistic", "use_train_cap_floor": True},
-            ),
-            ("Prophet-changepoints-25", {"n_changepoints": 25}),
-            ("Prophet-seasonality-additive-mode", {"seasonality_mode": "additive"}),
-            ("Prophet-yearly-fourier-order-20", {"yearly_seasonality": 20}),
-            ("Prophet-mcmc-samples-zero", {"mcmc_samples": 0}),
-        ]:
-            sc[name] = {"fn": "prophet", "prophet_params": pp}
-
     for name, cfg in [
-        ("UCM-stochastic-level", {"ucm_stochastic_level": True}),
-        ("UCM-stochastic-seasonal", {"ucm_stochastic_seasonal": True}),
-        ("UCM-stochastic-level-and-seasonal", {"ucm_stochastic_level": True, "ucm_stochastic_seasonal": True}),
-        ("UCM-spec-local-linear-trend", {"ucm_level": "local linear trend"}),
-        ("UCM-spec-local-level", {"ucm_level": "local level"}),
         ("UCM-spec-random-walk", {"ucm_level": "random walk"}),
         ("UCM-deterministic-level", {"ucm_stochastic_level": False}),
         ("UCM-spec-fixed-intercept", {"ucm_level": "fixed intercept"}),
-        (
-            "UCM-local-linear-trend-stochastic-level",
-            {"ucm_level": "local linear trend", "ucm_stochastic_level": True},
-        ),
-        (
-            "UCM-local-level-stochastic-seasonal",
-            {"ucm_level": "local level", "ucm_stochastic_seasonal": True},
-        ),
     ]:
         sc[name] = {"fn": "ucm", **cfg}
-
-    if ctx["HAS_TBATS"]:
-        for name, cfg in [
-            ("TBATS-seasons-6-12", {"tbats_seasonal_periods": [6, 12]}),
-            ("TBATS-seasons-12-only", {"tbats_seasonal_periods": [12]}),
-            ("TBATS-boxcox-and-arma-errors", {"tbats_use_box_cox": True, "tbats_use_arma_errors": True}),
-            ("TBATS-arma-errors-no-boxcox", {"tbats_use_box_cox": False, "tbats_use_arma_errors": True}),
-            ("TBATS-seasons-3-12", {"tbats_seasonal_periods": [3, 12]}),
-            ("TBATS-seasons-4-12", {"tbats_seasonal_periods": [4, 12]}),
-            ("TBATS-no-arma-errors", {"tbats_use_arma_errors": False}),
-            ("TBATS-boxcox-only-default-arma", {"tbats_use_box_cox": True}),
-            ("TBATS-seasons-12-24", {"tbats_seasonal_periods": [12, 24]}),
-            ("TBATS-seasons-2-12", {"tbats_seasonal_periods": [2, 12]}),
-        ]:
-            sc[name] = {"fn": "tbats", **cfg}
 
     if ctx["HAS_NEURALFORECAST"]:
         for name, cfg in [
@@ -1819,8 +1409,6 @@ def _register_fn_family_extras(sc: dict, ctx: dict) -> None:
         sc[name] = {"fn": "local_supervised", **cfg}
 
     for name, cfg in [
-        ("GLM-Poisson-maxiter-100", {"family": "poisson", "glm_fit_kwargs": {"maxiter": 100}}),
-        ("GLM-Poisson-atol-1e-10", {"family": "poisson", "glm_fit_kwargs": {"atol": 1e-10}}),
         ("GLM-NegBin-maxiter-150", {"family": "negbin", "glm_fit_kwargs": {"maxiter": 150}}),
         (
             "GLM-Poisson-ridge-alpha-005",
@@ -1834,56 +1422,9 @@ def _register_fn_family_extras(sc: dict, ctx: dict) -> None:
             "GLM-NegBin-ridge-alpha-01",
             {"family": "negbin", "glm_use_regularized": True, "glm_reg_alpha": 0.1, "glm_reg_l1_wt": 0.0},
         ),
-        ("GLM-Poisson-tol-criterion-deviance", {"family": "poisson", "glm_fit_kwargs": {"tol_criterion": "deviance"}}),
-        ("GLM-Poisson-wls-pinv", {"family": "poisson", "glm_fit_kwargs": {"wls_method": "pinv"}}),
         ("GLM-NegBin-atol-1e-9", {"family": "negbin", "glm_fit_kwargs": {"atol": 1e-9}}),
-        ("GLM-Poisson-maxiter-300", {"family": "poisson", "glm_fit_kwargs": {"maxiter": 300}}),
     ]:
         sc[name] = {"fn": "glm_count", **cfg}
-
-    for name, cfg in [
-        (
-            "ZIP-Poisson-exog-same",
-            {"zip_model_kind": "zip", "zip_exog_infl_mode": "same", "zip_fit_kwargs": {"maxiter": 200}},
-        ),
-        (
-            "ZIP-Poisson-infl-intercept",
-            {"zip_model_kind": "zip", "zip_exog_infl_mode": "intercept", "zip_fit_kwargs": {"maxiter": 200}},
-        ),
-        (
-            "ZIP-ZINB-exog-same",
-            {"zip_model_kind": "zinb", "zip_exog_infl_mode": "same", "zip_fit_kwargs": {"maxiter": 300}},
-        ),
-        (
-            "ZIP-ZINB-infl-intercept",
-            {"zip_model_kind": "zinb", "zip_exog_infl_mode": "intercept", "zip_fit_kwargs": {"maxiter": 300}},
-        ),
-        (
-            "ZIP-ZIGP-exog-same",
-            {"zip_model_kind": "zigp", "zip_exog_infl_mode": "same", "zip_fit_kwargs": {"maxiter": 300}},
-        ),
-        (
-            "ZIP-ZIGP-infl-intercept",
-            {"zip_model_kind": "zigp", "zip_exog_infl_mode": "intercept", "zip_fit_kwargs": {"maxiter": 300}},
-        ),
-        (
-            "ZIP-Poisson-bfgs",
-            {"zip_model_kind": "zip", "zip_exog_infl_mode": "same", "zip_fit_kwargs": {"method": "bfgs", "maxiter": 200}},
-        ),
-        (
-            "ZIP-ZINB-newton",
-            {"zip_model_kind": "zinb", "zip_exog_infl_mode": "same", "zip_fit_kwargs": {"method": "newton", "maxiter": 200}},
-        ),
-        (
-            "ZIP-ZIGP-bfgs",
-            {"zip_model_kind": "zigp", "zip_exog_infl_mode": "intercept", "zip_fit_kwargs": {"method": "bfgs", "maxiter": 250}},
-        ),
-        (
-            "ZIP-Poisson-high-maxiter",
-            {"zip_model_kind": "zip", "zip_exog_infl_mode": "same", "zip_fit_kwargs": {"maxiter": 500}},
-        ),
-    ]:
-        sc[name] = {"fn": "zip", **cfg}
 
     for name, ws in [
         ("WindowMedian-2", 2),
@@ -1899,24 +1440,6 @@ def _register_fn_family_extras(sc: dict, ctx: dict) -> None:
     ]:
         sc[name] = {"fn": "window_median", "window_size": ws}
 
-    if ctx["HAS_GREYKITE"]:
-
-        def _gk_mcp(fit_algorithm: str):
-            return {"custom": {"fit_algorithm_dict": {"fit_algorithm": fit_algorithm}}}
-
-        for name, cfg in [
-            ("Greykite-template-auto", {"greykite_model_template": "AUTO"}),
-            ("Greykite-template-prophet", {"greykite_model_template": "PROPHET"}),
-            ("Greykite-silverkite-lasso", {"greykite_mcp_dict": _gk_mcp("lasso")}),
-            ("Greykite-silverkite-ridge", {"greykite_mcp_dict": _gk_mcp("ridge")}),
-            ("Greykite-silverkite-elastic_net", {"greykite_mcp_dict": _gk_mcp("elastic_net")}),
-            ("Greykite-silverkite-gb", {"greykite_mcp_dict": _gk_mcp("gradient_boosting")}),
-            ("Greykite-silverkite-linear", {"greykite_mcp_dict": _gk_mcp("linear")}),
-            ("Greykite-silverkite-sgd", {"greykite_mcp_dict": _gk_mcp("sgd")}),
-            ("Greykite-extra-pred-col-gk-t", {"greykite_extra_pred_col": True}),
-            ("Greykite-forecast-one-by-one", {"greykite_forecast_one_by_one": 1}),
-        ]:
-            sc[name] = {"fn": "greykite", "greykite_coverage": 0.95, **cfg}
 
 _register_fn_family_extras(
     SERIES_CONFIGS,
@@ -1924,9 +1447,6 @@ _register_fn_family_extras(
         "MONTHLY_SEASON_LENGTH": MONTHLY_SEASON_LENGTH,
         "HAS_PMDARIMA": HAS_PMDARIMA,
         "HAS_STATSFORECAST": HAS_STATSFORECAST,
-        "HAS_PROPHET": HAS_PROPHET,
-        "HAS_TBATS": HAS_TBATS,
         "HAS_NEURALFORECAST": HAS_NEURALFORECAST,
-        "HAS_GREYKITE": HAS_GREYKITE,
     },
 )
