@@ -32,6 +32,17 @@ def _run_region_edo_download() -> None:
         logger.exception("region_edo_download: ошибка выполнения")
 
 
+def _run_file_handler_4() -> None:
+    """Перенос IS*.xls и PDF/ZIP из REGION/EDO — ежедневно 6:55 — file_handler_4.py."""
+    try:
+        from file_handler_4 import move_IS_xls_files, move_pdf_zip_files
+
+        move_IS_xls_files()
+        move_pdf_zip_files()
+    except Exception:
+        logger.exception("file_handler_4: ошибка выполнения")
+
+
 def _run_create_folders() -> None:
     """1.1 — 2-й день месяца, 6:50 — create_folders.py."""
     try:
@@ -162,6 +173,13 @@ def run_scheduler() -> None:
         CronTrigger(hour=6, minute=30, timezone=_TZ),
         id="region_edo_download_daily",
         name="region_edo_download.py",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_file_handler_4,
+        CronTrigger(hour=6, minute=55, timezone=_TZ),
+        id="file_handler_4_daily",
+        name="file_handler_4.py",
         replace_existing=True,
     )
     scheduler.add_job(
