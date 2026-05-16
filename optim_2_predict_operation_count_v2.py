@@ -25,7 +25,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
@@ -76,10 +78,78 @@ MODEL_KEY: str = "model"
 DATE_FMT: str = "%Y-%m-%d"
 HISTORY_START_DATE: datetime = datetime(2022, 12, 31)
 
+# Параллелизм (parallelism): турнир конфигов — env PREDICT_OP_N_WORKERS или по умолчанию
+# min(4, cpu) (см. план); значение 1 отключает пул. Параллель по operation_id — отдельно (n_workers_ops / env
+# PREDICT_OP_N_WORKERS_OPS), по умолчанию 1.
+_DEFAULT_TOURNAMENT_WORKERS: int = max(1, min(4, (os.cpu_count() or 1)))
+_ENV_N_WORKERS: str = "PREDICT_OP_N_WORKERS"
+_ENV_EXECUTOR: str = "PREDICT_OP_EXECUTOR"
+_ENV_N_WORKERS_OPS: str = "PREDICT_OP_N_WORKERS_OPS"
+
+# Ключи kwargs трейнеров, в которых живёт «вложенный» (nested) параллелизм. При
+# работе через пул мы насильно прижимаем nested-параллелизм к 1, чтобы избежать
+# oversubscription без правки SERIES_CONFIGS.
+_NESTED_NJOBS_PATCHES: Dict[str, Tuple[str, ...]] = {
+    "auto_arima": ("auto_arima_kwargs",),
+    "local_supervised": ("local_sk_params",),
+}
+
+
+def _resolve_n_workers(value: Optional[int], env_key: str, default: int) -> int:
+    """Приоритет: явный параметр > env > default. Возвращает целое >= 1."""
+    if value is not None:
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return default
+    raw = os.environ.get(env_key)
+    if raw is not None:
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            return default
+    return default
+
+
+def _resolve_executor_kind(value: Optional[str]) -> str:
+    """``thread`` (default) или ``process`` через явный параметр / env."""
+    if value is not None:
+        v = str(value).strip().lower()
+        if v in ("thread", "process"):
+            return v
+    env = os.environ.get(_ENV_EXECUTOR)
+    if env is not None:
+        v = str(env).strip().lower()
+        if v in ("thread", "process"):
+            return v
+    return "thread"
+
 
 def allowed_configs() -> Dict[str, dict]:
     """Все production-конфиги (production configs) из ``SERIES_CONFIGS``."""
     return dict(SERIES_CONFIGS)
+
+
+def _patch_cfg_for_nested_njobs(cfg: dict) -> dict:
+    """Возвращает копию ``cfg`` с ``n_jobs=1`` в nested-параметрах (auto_arima, sklearn).
+
+    Не модифицирует исходный словарь и не правит ``SERIES_CONFIGS``.
+    """
+    fn = cfg.get("fn")
+    keys = _NESTED_NJOBS_PATCHES.get(fn)
+    if not keys:
+        return cfg
+    patched = dict(cfg)
+    for k in keys:
+        existing = patched.get(k)
+        if isinstance(existing, dict):
+            merged = dict(existing)
+        else:
+            merged = {}
+        # Форсируем (force) n_jobs=1, даже если в конфиге задано -1 (nested parallelism).
+        merged["n_jobs"] = 1
+        patched[k] = merged
+    return patched
 
 
 # ---------------------------------------------------------------------------
@@ -100,35 +170,38 @@ def _format_date_key(value: Any) -> str:
 
 
 def _calc_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Tuple[float, float, float]:
-    """Точность/Стабильность/Качество."""
-    y_true = np.asarray(y_true, dtype=float).ravel()
-    y_pred = np.asarray(y_pred, dtype=float).ravel()
-    if len(y_true) != len(y_pred) or len(y_true) == 0:
+    """Точность/Стабильность/Качество.
+
+    numpy-only реализация (numpy-only impl); численно идентична версии на ``DataFrame``:
+    те же формулы, те же округления (``round(..., 2)``).
+    """
+    yt = np.asarray(y_true, dtype=float).ravel()
+    yp = np.asarray(y_pred, dtype=float).ravel()
+    if yt.shape[0] != yp.shape[0] or yt.shape[0] == 0:
         return 0.0, 0.0, 0.0
 
-    df = pd.DataFrame({"fact_value": y_true, "fact_predict": y_pred})
-    for col in ("fact_value", "fact_predict"):
-        df[col] = (
-            pd.to_numeric(df[col], errors="coerce")
-            .replace([np.inf, -np.inf], np.nan)
-            .fillna(0)
-        )
-    df["abs_error"] = (df["fact_value"] - df["fact_predict"]).abs()
-    acc = np.where(
-        df["fact_value"] == 0,
-        np.where(df["fact_predict"] == 0, 100.0, 0.0),
-        np.clip(100.0 - df["abs_error"] / df["fact_value"] * 100.0, 0, 100),
-    )
-    df["accuracy_pct"] = np.round(acc, 2)
+    yt = np.where(np.isfinite(yt), yt, 0.0)
+    yp = np.where(np.isfinite(yp), yp, 0.0)
+    abs_err = np.abs(yt - yp)
 
-    tochnost = round(float(df["accuracy_pct"].mean()), 2)
-    if tochnost == 0 or pd.isna(tochnost):
+    zero_true = yt == 0.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = 100.0 - abs_err / np.where(zero_true, 1.0, yt) * 100.0
+    acc = np.where(
+        zero_true,
+        np.where(yp == 0.0, 100.0, 0.0),
+        np.clip(ratio, 0.0, 100.0),
+    )
+    accuracy_pct = np.round(acc, 2)
+
+    mean_acc = float(accuracy_pct.mean())
+    tochnost = round(mean_acc, 2)
+    if tochnost == 0 or not np.isfinite(tochnost):
         stab = 0.0
     else:
-        mean_acc = float(df["accuracy_pct"].mean())
-        std_acc = float(df["accuracy_pct"].std(ddof=0))
+        std_acc = float(accuracy_pct.std(ddof=0))
         cv = std_acc / mean_acc if mean_acc != 0 else 0.0
-        stab = round(max(0.0, (1 - cv)) * 100, 2)
+        stab = round(max(0.0, (1.0 - cv)) * 100.0, 2)
 
     kachestvo = 0.0
     if tochnost + stab != 0:
@@ -136,27 +209,69 @@ def _calc_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Tuple[float, float,
     return tochnost, stab, kachestvo
 
 
+_HALF_YEAR_LAG_COLS: Tuple[str, ...] = tuple(f"lag_{i}" for i in range(1, 7))
+_FEATURE_NUM_COLS: Tuple[str, ...] = (
+    "op_code",
+    "lag_1", "lag_2", "lag_3", "lag_4", "lag_5", "lag_6",
+    "lag_12",
+    "rolling_mean_3",
+)
+# Явный список для финального fillna(0) без select_dtypes (как у number-колонок из cleaner DF).
+_FILLNA_NUMERIC_COLS: Tuple[str, ...] = (
+    "resist_id",
+    "operation_id",
+    "year",
+    "month",
+    "fact_value",
+) + _FEATURE_NUM_COLS
+
+
 def _add_nb37_features(df: pd.DataFrame, mask_train_scope: pd.Series) -> pd.DataFrame:
-    """Лаги и rolling_mean_3; медиан-fill по train."""
+    """Лаги и rolling_mean_3; медиан-fill по train.
+
+    Содержит fast path (быстрый путь) для случая single-op: пропускает ``groupby``
+    и считает лаги/``rolling_mean_3`` напрямую через ``shift``/``rolling``.
+    Возвращает DataFrame с тем же индексом, что и вход.
+    """
     out = df.copy()
     out["op_code"] = out["operation_id"].astype("category").cat.codes
-    group = out.groupby("operation_id")
-    out["lag_1"] = group["fact_value"].shift(1)
-    for k in range(2, 7):
-        out[f"lag_{k}"] = group["fact_value"].shift(k)
-    out["lag_12"] = group["fact_value"].shift(12)
-    out["rolling_mean_3"] = group["fact_value"].transform(
-        lambda s: s.shift(1).rolling(window=3, min_periods=1).mean()
-    )
-    half_year_lag_cols = [f"lag_{i}" for i in range(1, 7)]
-    train_med = out.loc[mask_train_scope].groupby("operation_id")["fact_value"].median()
-    for col in half_year_lag_cols:
-        out[col] = out[col].fillna(out["operation_id"].map(train_med)).fillna(0.0)
-    num_cols = out.select_dtypes(include=["number"]).columns
-    out[num_cols] = out[num_cols].fillna(0)
-    out = out.infer_objects()
-    if out.isnull().any().any():
-        out = out.fillna(0)
+
+    op_values = out["operation_id"].to_numpy()
+    is_single_op = op_values.size > 0 and pd.unique(op_values).size == 1
+
+    if is_single_op:
+        fv = out["fact_value"]
+        out["lag_1"] = fv.shift(1)
+        for k in range(2, 7):
+            out[f"lag_{k}"] = fv.shift(k)
+        out["lag_12"] = fv.shift(12)
+        out["rolling_mean_3"] = fv.shift(1).rolling(window=3, min_periods=1).mean()
+
+        train_slice = fv.loc[mask_train_scope]
+        median_val = float(train_slice.median()) if not train_slice.empty else 0.0
+        if not np.isfinite(median_val):
+            median_val = 0.0
+        for col in _HALF_YEAR_LAG_COLS:
+            out[col] = out[col].fillna(median_val).fillna(0.0)
+    else:
+        group = out.groupby("operation_id")
+        out["lag_1"] = group["fact_value"].shift(1)
+        for k in range(2, 7):
+            out[f"lag_{k}"] = group["fact_value"].shift(k)
+        out["lag_12"] = group["fact_value"].shift(12)
+        out["rolling_mean_3"] = group["fact_value"].transform(
+            lambda s: s.shift(1).rolling(window=3, min_periods=1).mean()
+        )
+        train_med = out.loc[mask_train_scope].groupby("operation_id")["fact_value"].median()
+        for col in _HALF_YEAR_LAG_COLS:
+            out[col] = out[col].fillna(out["operation_id"].map(train_med)).fillna(0.0)
+
+    fill_cols = [
+        c for c in _FILLNA_NUMERIC_COLS
+        if c in out.columns and pd.api.types.is_numeric_dtype(out[c])
+    ]
+    if fill_cols:
+        out[fill_cols] = out[fill_cols].fillna(0)
     return out
 
 
@@ -286,18 +401,25 @@ class OperationHistoryCleaner:
         query_history_params: Iterable[Mapping[str, Any]],
     ) -> Dict[Any, Dict[Any, float]]:
         """Заполняет ``oper_data[op][period] = fact_value`` из истории.
+
+        Вместо квадратичного обхода ``rows × operations`` строим обратный индекс
+        ``str(op) -> op``: один раз — затем для каждой строки итерируем только
+        реально присутствующие ключи в ``operation_parameter``.
         """
         oper_data: Dict[Any, Dict[Any, float]] = {op: {} for op in operations}
+        ops_index: Dict[str, Any] = {str(op): op for op in operations}
         for row in query_history_params:
             period = row.get("period")
             param = row.get("operation_parameter") or {}
             if period is None or not isinstance(param, dict):
                 continue
-            for oper in oper_data.keys():
-                payload = param.get(str(oper))
+            for key, payload in param.items():
                 if not payload:
                     continue
-                oper_data[oper][period] = payload.get("fact_value")
+                op = ops_index.get(key)
+                if op is None:
+                    continue
+                oper_data[op][period] = payload.get("fact_value") if isinstance(payload, dict) else None
         return oper_data
 
     @staticmethod
@@ -369,6 +491,8 @@ class WalkForwardSelector:
         holdout_size: int = HOLDOUT_SIZE,
         min_len_for_tournament: int = MIN_LEN_FOR_TOURNAMENT,
         min_len_for_window_median: int = MIN_LEN_FOR_WINDOW_MEDIAN,
+        n_workers: Optional[int] = None,
+        executor_kind: Optional[str] = None,
     ) -> None:
         self._dispatcher = dispatcher
         self._configs = dict(configs) if configs is not None else allowed_configs()
@@ -376,6 +500,33 @@ class WalkForwardSelector:
         self._holdout = int(holdout_size)
         self._min_tour = int(min_len_for_tournament)
         self._min_wm = int(min_len_for_window_median)
+        self._n_workers = _resolve_n_workers(
+            n_workers, _ENV_N_WORKERS, _DEFAULT_TOURNAMENT_WORKERS,
+        )
+        self._executor_kind = _resolve_executor_kind(executor_kind)
+
+    def _run_cfg(
+        self,
+        df_feat: pd.DataFrame,
+        mask_train: pd.Series,
+        mask_test: pd.Series,
+        resist_id: int,
+        cfg_name: str,
+        cfg: dict,
+    ) -> Optional[np.ndarray]:
+        """Безопасный (safe) запуск одного конфига; ``None`` — конфиг отвалился."""
+        try:
+            y_hat = self._dispatcher.dispatch(
+                df_feat, mask_train, mask_test, int(resist_id),
+                cfg_name, cfg, warning_rows=[],
+            )
+        except Exception as exc:
+            logger.debug(
+                "selector: пропуск config=%s rid=%s: %s",
+                cfg_name, resist_id, exc,
+            )
+            return None
+        return np.asarray(y_hat, dtype=float)
 
     def select(self, df_op: pd.DataFrame, resist_id: int) -> str:
         """Возвращает имя конфигурации для прогноза по операции.
@@ -392,7 +543,10 @@ class WalkForwardSelector:
         if n < self._min_tour:
             return FALLBACK_WINDOW_MEDIAN_3_LABEL
 
-        df_sorted = df_op.sort_values("date").reset_index(drop=True)
+        if df_op["date"].is_monotonic_increasing:
+            df_sorted = df_op.reset_index(drop=True)
+        else:
+            df_sorted = df_op.sort_values("date").reset_index(drop=True)
         cutoff_idx = n - self._holdout
         mask_train = pd.Series(False, index=df_sorted.index)
         mask_train.iloc[:cutoff_idx] = True
@@ -404,32 +558,58 @@ class WalkForwardSelector:
         df_feat = _add_nb37_features(df_sorted, mask_train)
         y_true = df_sorted.loc[mask_test, "fact_value"].astype(float).values
 
-        best_q: float = -1.0
-        best_name: Optional[str] = None
-        for cfg_name in self._cfg_order:
-            cfg = self._configs[cfg_name]
-            try:
-                y_hat = self._dispatcher.dispatch(
-                    df_feat, mask_train, mask_test, int(resist_id),
-                    cfg_name, cfg, warning_rows=[],
-                )
-            except Exception as exc:
-                logger.debug(
-                    "selector: пропуск config=%s op=%s rid=%s: %s",
-                    cfg_name, df_sorted["operation_id"].iloc[0], resist_id, exc,
-                )
-                continue
-            _, _, kachestvo = _calc_metrics(y_true, np.asarray(y_hat, dtype=float))
-            if kachestvo > best_q or (
-                abs(kachestvo - best_q) < 1e-9 and (best_name is None or cfg_name < best_name)
-            ):
-                best_q = kachestvo
-                best_name = cfg_name
-            cleanup_memory()
+        scored: List[Tuple[float, str]] = []
 
-        if best_name is None:
+        if self._n_workers <= 1:
+            for cfg_name in self._cfg_order:
+                cfg = self._configs[cfg_name]
+                y_hat = self._run_cfg(
+                    df_feat, mask_train, mask_test, resist_id, cfg_name, cfg,
+                )
+                if y_hat is None:
+                    continue
+                _, _, kachestvo = _calc_metrics(y_true, y_hat)
+                scored.append((kachestvo, cfg_name))
+        else:
+            executor_cls = (
+                ProcessPoolExecutor if self._executor_kind == "process" else ThreadPoolExecutor
+            )
+            patched = {
+                name: _patch_cfg_for_nested_njobs(self._configs[name])
+                for name in self._cfg_order
+            }
+            with executor_cls(max_workers=self._n_workers) as ex:
+                futures = [
+                    ex.submit(
+                        self._run_cfg,
+                        df_feat, mask_train, mask_test, resist_id, name, patched[name],
+                    )
+                    for name in self._cfg_order
+                ]
+                fut_to_name = {fut: self._cfg_order[i] for i, fut in enumerate(futures)}
+                for fut in as_completed(futures):
+                    name = fut_to_name[fut]
+                    try:
+                        y_hat = fut.result()
+                    except Exception as exc:
+                        logger.debug(
+                            "selector: future error config=%s rid=%s: %s",
+                            name, resist_id, exc,
+                        )
+                        continue
+                    if y_hat is None:
+                        continue
+                    _, _, kachestvo = _calc_metrics(y_true, y_hat)
+                    scored.append((kachestvo, name))
+
+        cleanup_memory()
+
+        if not scored:
             return FALLBACK_WINDOW_MEDIAN_3_LABEL
-        return best_name
+        # Tie-break: max по kachestvo, при равенстве — алфавитный min по имени конфига.
+        # Сравнение независимо от порядка завершения futures.
+        scored.sort(key=lambda t: (-t[0], t[1]))
+        return scored[0][1]
 
 
 class ProductionForecaster:
@@ -454,7 +634,10 @@ class ProductionForecaster:
         """Возвращает словарь ``{date_str: forecast_value}`` длиной ``horizon``."""
         if df_op.empty:
             return {}
-        df_sorted = df_op.sort_values("date").reset_index(drop=True)
+        if df_op["date"].is_monotonic_increasing:
+            df_sorted = df_op.reset_index(drop=True)
+        else:
+            df_sorted = df_op.sort_values("date").reset_index(drop=True)
         last_date = df_sorted["date"].iloc[-1]
         future_dates = pd.date_range(
             start=_normalize_month(last_date) + pd.DateOffset(months=1),
@@ -568,6 +751,7 @@ class PredictOparationCountV2:
         dispatcher: Optional[ConfigDispatcher] = None,
         selector: Optional[WalkForwardSelector] = None,
         forecaster: Optional[ProductionForecaster] = None,
+        n_workers_ops: Optional[int] = None,
     ) -> None:
         self._repository = repository or HistoryRepository()
         self._cleaner = cleaner or OperationHistoryCleaner()
@@ -579,6 +763,38 @@ class PredictOparationCountV2:
         self._forecaster = forecaster or ProductionForecaster(
             self._dispatcher, configs=self._configs,
         )
+        # По умолчанию параллелизм по operations выключен (= 1), чтобы не
+        # вкладывать пулы поверх параллелизма турнира конфигов.
+        self._n_workers_ops = _resolve_n_workers(n_workers_ops, _ENV_N_WORKERS_OPS, 1)
+
+    def _process_one(
+        self,
+        op_id: Any,
+        history: Mapping[Any, float],
+        rid: int,
+    ) -> Optional[Tuple[Any, Dict[str, Any]]]:
+        if not history:
+            return None
+        df_op = self._cleaner.to_dataframe(history, op_id, rid)
+        if df_op.empty:
+            return None
+        try:
+            winner = self._selector.select(df_op, rid)
+        except Exception as exc:
+            logger.exception(
+                "predict: ошибка selector op=%s rid=%s: %s; fallback WM-3",
+                op_id, rid, exc,
+            )
+            winner = FALLBACK_WINDOW_MEDIAN_3_LABEL
+        try:
+            forecast_map = self._forecaster.forecast(df_op, rid, winner)
+        except Exception as exc:
+            logger.exception(
+                "predict: ошибка forecaster op=%s rid=%s winner=%s: %s",
+                op_id, rid, winner, exc,
+            )
+            forecast_map = {}
+        return op_id, self._merge_history_and_forecast(history, forecast_map, winner)
 
     def predict(self, operations: List[Any], resist: str) -> Dict[Any, Dict[str, Any]]:
         """Прогноз количества операций.
@@ -600,31 +816,28 @@ class PredictOparationCountV2:
             rid = int(resist)
         except (TypeError, ValueError):
             rid = 0
-        for op_id, history in oper_data_valid.items():
-            if not history:
-                continue
-            df_op = self._cleaner.to_dataframe(history, op_id, rid)
-            if df_op.empty:
-                continue
 
-            try:
-                winner = self._selector.select(df_op, rid)
-            except Exception as exc:
-                logger.exception(
-                    "predict: ошибка selector op=%s rid=%s: %s; fallback WM-3",
-                    op_id, rid, exc,
-                )
-                winner = FALLBACK_WINDOW_MEDIAN_3_LABEL
-            try:
-                forecast_map = self._forecaster.forecast(df_op, rid, winner)
-            except Exception as exc:
-                logger.exception(
-                    "predict: ошибка forecaster op=%s rid=%s winner=%s: %s",
-                    op_id, rid, winner, exc,
-                )
-                forecast_map = {}
-
-            result[op_id] = self._merge_history_and_forecast(history, forecast_map, winner)
+        if self._n_workers_ops <= 1:
+            for op_id, history in oper_data_valid.items():
+                processed = self._process_one(op_id, history, rid)
+                if processed is None:
+                    continue
+                result[processed[0]] = processed[1]
+        else:
+            with ThreadPoolExecutor(max_workers=self._n_workers_ops) as ex:
+                futures = [
+                    ex.submit(self._process_one, op_id, history, rid)
+                    for op_id, history in oper_data_valid.items()
+                ]
+                for fut in futures:
+                    try:
+                        processed = fut.result()
+                    except Exception as exc:
+                        logger.exception("predict: ошибка ops-future rid=%s: %s", rid, exc)
+                        continue
+                    if processed is None:
+                        continue
+                    result[processed[0]] = processed[1]
         return result
 
     @staticmethod

@@ -32,22 +32,86 @@ import pandas as pd
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.forecasting.theta import ThetaModel
 from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.tsa.statespace.structural import UnobservedComponents as _UnobservedComponents
+from statsmodels.genmod.generalized_linear_model import GLM as _GLM
+from statsmodels.genmod import families as _glm_families
 
 logger = logging.getLogger(__name__)
 
 HAS_PMDARIMA = True
 try:
     import pmdarima
+    from pmdarima import auto_arima as _pmdarima_auto_arima
 except ImportError:
     HAS_PMDARIMA = False
+    _pmdarima_auto_arima = None
 
 HAS_STATSFORECAST = False
+_StatsForecast = None
+_SF_MODELS: dict = {}
 try:
     import statsforecast
-
+    from statsforecast import StatsForecast as _StatsForecast
+    from statsforecast.models import (
+        ADIDA as _SFM_ADIDA,
+        AutoARIMA as _SFM_AutoARIMA,
+        AutoCES as _SFM_AutoCES,
+        AutoETS as _SFM_AutoETS,
+        AutoTheta as _SFM_AutoTheta,
+        CrostonSBA as _SFM_CrostonSBA,
+        CrostonClassic as _SFM_CrostonClassic,
+        DynamicOptimizedTheta as _SFM_DynamicOptimizedTheta,
+        HistoricAverage as _SFM_HistoricAverage,
+        Holt as _SFM_Holt,
+        HoltWinters as _SFM_HoltWinters,
+        IMAPA as _SFM_IMAPA,
+        MSTL as _SFM_MSTL,
+        Naive as _SFM_Naive,
+        OptimizedTheta as _SFM_OptimizedTheta,
+        RandomWalkWithDrift as _SFM_RandomWalkWithDrift,
+        SeasonalNaive as _SFM_SeasonalNaive,
+        SimpleExponentialSmoothingOptimized as _SFM_SES_Optimized,
+        TSB as _SFM_TSB,
+        WindowAverage as _SFM_WindowAverage,
+    )
+    _SF_MODELS = {
+        "AutoETS": _SFM_AutoETS,
+        "AutoTheta": _SFM_AutoTheta,
+        "AutoCES": _SFM_AutoCES,
+        "AutoARIMA": _SFM_AutoARIMA,
+        "Naive": _SFM_Naive,
+        "SeasonalNaive": _SFM_SeasonalNaive,
+        "HistoricAverage": _SFM_HistoricAverage,
+        "RandomWalkWithDrift": _SFM_RandomWalkWithDrift,
+        "OptimizedTheta": _SFM_OptimizedTheta,
+        "DynamicOptimizedTheta": _SFM_DynamicOptimizedTheta,
+        "MSTL": _SFM_MSTL,
+        "Holt": _SFM_Holt,
+        "HoltWinters": _SFM_HoltWinters,
+        "SimpleExponentialSmoothingOptimized": _SFM_SES_Optimized,
+        "CrostonSBA": _SFM_CrostonSBA,
+        "CrostonClassic": _SFM_CrostonClassic,
+        "TSB": _SFM_TSB,
+        "ADIDA": _SFM_ADIDA,
+        "IMAPA": _SFM_IMAPA,
+        "WindowAverage": _SFM_WindowAverage,
+    }
     HAS_STATSFORECAST = True
 except Exception:
     pass
+
+HAS_SKLEARN = False
+try:
+    from sklearn.linear_model import Ridge as _SK_Ridge, Lasso as _SK_Lasso, ElasticNet as _SK_ElasticNet
+    from sklearn.svm import SVR as _SK_SVR
+    from sklearn.neighbors import KNeighborsRegressor as _SK_KNN
+    from sklearn.ensemble import RandomForestRegressor as _SK_RF
+    from sklearn.preprocessing import StandardScaler as _SK_StandardScaler
+    HAS_SKLEARN = True
+except ImportError:
+    _SK_Ridge = _SK_Lasso = _SK_ElasticNet = None
+    _SK_SVR = _SK_KNN = _SK_RF = None
+    _SK_StandardScaler = None
 
 STATSFORECAST_FREQ = "MS"
 MONTHLY_SEASON_LENGTH = 12
@@ -145,6 +209,128 @@ def cleanup_memory() -> None:
     gc.collect()
 
 
+def _is_single_op(df_full: pd.DataFrame) -> bool:
+    """Fast-path predicate: ровно один ``operation_id`` в ``df_full``."""
+    op_col = df_full["operation_id"].to_numpy()
+    if op_col.size == 0:
+        return False
+    return pd.unique(op_col).size == 1
+
+
+def _single_op_inputs(
+    df_full: pd.DataFrame,
+    mask_train: pd.Series,
+    mask_test: pd.Series,
+):
+    """Подготовка single-op данных.
+
+    Возвращает кортеж ``(op_id, y_hist, n_fc, n_tr)``. Сортирует по ``date`` только
+    если ряд (series) ещё не отсортирован — production-вызов уже передаёт
+    sorted-данные.
+    """
+    if df_full["date"].is_monotonic_increasing:
+        df = df_full
+        mt = mask_train
+        mts = mask_test
+    else:
+        df = df_full.sort_values("date")
+        mt = mask_train.reindex(df.index, fill_value=False)
+        mts = mask_test.reindex(df.index, fill_value=False)
+    op_id = df["operation_id"].iat[0]
+    y_hist = df.loc[mt, "fact_value"].astype(float).to_numpy()
+    n_fc = int(np.asarray(mts, dtype=bool).sum())
+    n_tr = int(y_hist.shape[0])
+    return op_id, y_hist, n_fc, n_tr
+
+
+def _empty_test_arr(mask_test: pd.Series) -> np.ndarray:
+    """Возврат для случая ``n_fc == 0``: длина = ``mask_test.sum()`` (обычно 0)."""
+    return np.zeros(int(np.asarray(mask_test, dtype=bool).sum()), dtype=float)
+
+
+def _run_per_series_dispatch(
+    df_full: pd.DataFrame,
+    mask_train: pd.Series,
+    mask_test: pd.Series,
+    fit_predict,
+) -> np.ndarray:
+    """Универсальная диспетчеризация (universal dispatch) single-op vs multi-op.
+
+    ``fit_predict`` принимает ``(y_hist, n_fc, op_id, n_tr)`` и возвращает массив
+    прогноза длиной ``n_fc``. Исключения внутри ``fit_predict`` падают в fallback
+    «среднее по истории» — поведение совместимо со старой реализацией.
+    """
+    if _is_single_op(df_full):
+        op_id, y_hist, n_fc, n_tr = _single_op_inputs(df_full, mask_train, mask_test)
+        if n_fc == 0:
+            return _empty_test_arr(mask_test)
+        try:
+            fc = fit_predict(y_hist, n_fc, op_id, n_tr)
+        except Exception:
+            fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
+        return np.maximum(np.asarray(fc, dtype=float).ravel(), 0)
+
+    test_idx = df_full.loc[mask_test].index
+    preds = np.zeros(len(test_idx), dtype=float)
+    if len(test_idx) == 0:
+        return preds
+    pos_map = {idx: i for i, idx in enumerate(test_idx)}
+    for op_id, grp in df_full.groupby("operation_id", sort=False):
+        train_part = grp[mask_train.reindex(grp.index, fill_value=False)].sort_values("date")
+        test_part = grp[mask_test.reindex(grp.index, fill_value=False)].sort_values("date")
+        if test_part.empty:
+            continue
+        y_hist = train_part["fact_value"].astype(float).to_numpy()
+        n_fc = len(test_part)
+        n_tr = len(y_hist)
+        try:
+            fc = fit_predict(y_hist, n_fc, op_id, n_tr)
+        except Exception:
+            fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
+        fc_clamped = np.maximum(np.asarray(fc, dtype=float).ravel(), 0)
+        for i, idx in enumerate(test_part.index):
+            preds[pos_map[idx]] = fc_clamped[i]
+    return preds
+
+
+def _append_split_warnings(
+    warning_rows,
+    *,
+    resist_id,
+    operation_id,
+    series_config_name,
+    n_tr,
+    wlog,
+    n_first,
+    phase_first: str,
+    phase_second: str,
+) -> None:
+    """Разделяет один общий ``catch_warnings`` лог на две фазы."""
+    if n_first > 0:
+        append_warning_rows(
+            warning_rows,
+            resist_id=resist_id,
+            operation_id=operation_id,
+            model_kind="per_series",
+            model_label=series_config_name,
+            phase=phase_first,
+            n_train_points=n_tr,
+            caught=wlog[:n_first],
+        )
+    rest = wlog[n_first:]
+    if rest:
+        append_warning_rows(
+            warning_rows,
+            resist_id=resist_id,
+            operation_id=operation_id,
+            model_kind="per_series",
+            model_label=series_config_name,
+            phase=phase_second,
+            n_train_points=n_tr,
+            caught=rest,
+        )
+
+
 def train_ets_per_series(
     df_full,
     mask_train,
@@ -158,67 +344,46 @@ def train_ets_per_series(
     seasonal_periods=None,
     ets_fit_kwargs=None,
 ):
-    test_idx = df_full.loc[mask_test].index
-    preds = pd.Series(0.0, index=test_idx)
-    for op_id, grp in df_full.groupby("operation_id"):
-        train_part = grp[mask_train.reindex(grp.index, fill_value=False)].sort_values("date")
-        test_part = grp[mask_test.reindex(grp.index, fill_value=False)].sort_values("date")
-        if test_part.empty:
-            continue
-        y_hist = train_part["fact_value"].values.astype(float)
-        n_fc = len(test_part)
-        n_tr = len(y_hist)
-        try:
-            if seasonal is not None and seasonal_periods is not None:
-                min_hist = max(4, 2 * int(seasonal_periods))
-                if len(y_hist) < min_hist:
-                    raise ValueError("too short for seasonal")
-            elif len(y_hist) < 4:
-                raise ValueError("too short")
-            if trend == "mul" and np.any(y_hist <= 0):
-                raise ValueError("mul trend requires positive series")
-            if seasonal == "mul" and np.any(y_hist <= 0):
-                raise ValueError("mul seasonal requires positive series")
-            model = ExponentialSmoothing(
-                y_hist,
-                trend=trend,
-                damped_trend=damped_trend,
-                seasonal=seasonal,
-                seasonal_periods=seasonal_periods if seasonal is not None else None,
-            )
-            _fit_kw = {"optimized": True, "use_brute": False}
-            if ets_fit_kwargs:
-                _fit_kw.update(ets_fit_kwargs)
-            with warnings.catch_warnings(record=True) as w_fit:
-                warnings.simplefilter("always")
-                fit = model.fit(**_fit_kw)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="fit",
-                n_train_points=n_tr,
-                caught=w_fit,
-            )
-            with warnings.catch_warnings(record=True) as w_fc:
-                warnings.simplefilter("always")
-                fc = fit.forecast(n_fc)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="forecast",
-                n_train_points=n_tr,
-                caught=w_fc,
-            )
-        except Exception:
-            fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
-    return preds.values
+    def _fit_predict(y_hist, n_fc, op_id, n_tr):
+        if seasonal is not None and seasonal_periods is not None:
+            min_hist = max(4, 2 * int(seasonal_periods))
+            if len(y_hist) < min_hist:
+                raise ValueError("too short for seasonal")
+        elif len(y_hist) < 4:
+            raise ValueError("too short")
+        if trend == "mul" and np.any(y_hist <= 0):
+            raise ValueError("mul trend requires positive series")
+        if seasonal == "mul" and np.any(y_hist <= 0):
+            raise ValueError("mul seasonal requires positive series")
+        model = ExponentialSmoothing(
+            y_hist,
+            trend=trend,
+            damped_trend=damped_trend,
+            seasonal=seasonal,
+            seasonal_periods=seasonal_periods if seasonal is not None else None,
+        )
+        _fit_kw = {"optimized": True, "use_brute": False}
+        if ets_fit_kwargs:
+            _fit_kw.update(ets_fit_kwargs)
+        with warnings.catch_warnings(record=True) as wlog:
+            warnings.simplefilter("always")
+            fit = model.fit(**_fit_kw)
+            n_fit = len(wlog)
+            fc = fit.forecast(n_fc)
+        _append_split_warnings(
+            warning_rows,
+            resist_id=resist_id,
+            operation_id=op_id,
+            series_config_name=series_config_name,
+            n_tr=n_tr,
+            wlog=wlog,
+            n_first=n_fit,
+            phase_first="fit",
+            phase_second="forecast",
+        )
+        return np.asarray(fc, dtype=float).ravel()
+
+    return _run_per_series_dispatch(df_full, mask_train, mask_test, _fit_predict)
 
 
 def train_theta_per_series(
@@ -233,58 +398,36 @@ def train_theta_per_series(
     theta_method="auto",
     theta_period=12,
 ):
-    test_idx = df_full.loc[mask_test].index
-    preds = pd.Series(0.0, index=test_idx)
-    for op_id, grp in df_full.groupby("operation_id"):
-        train_part = grp[mask_train.reindex(grp.index, fill_value=False)].sort_values("date")
-        test_part = grp[mask_test.reindex(grp.index, fill_value=False)].sort_values("date")
-        if test_part.empty:
-            continue
-        y_hist = train_part["fact_value"].values.astype(float)
-        n_fc = len(test_part)
-        n_tr = len(y_hist)
-        try:
-            if len(y_hist) < 4:
-                raise ValueError("too short")
-            if theta_method == "multiplicative" and np.any(y_hist <= 0):
-                raise ValueError("theta multiplicative requires positive series")
-            tm = ThetaModel(
-                y_hist,
-                period=int(theta_period),
-                deseasonalize=theta_deseasonalize,
-                method=theta_method,
-            )
-            with warnings.catch_warnings(record=True) as w_fit:
-                warnings.simplefilter("always")
-                res = tm.fit()
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="fit",
-                n_train_points=n_tr,
-                caught=w_fit,
-            )
-            with warnings.catch_warnings(record=True) as w_fc:
-                warnings.simplefilter("always")
-                fc = res.forecast(n_fc)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="forecast",
-                n_train_points=n_tr,
-                caught=w_fc,
-            )
-            fc = np.asarray(fc, dtype=float).ravel()
-        except Exception:
-            fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
-    return preds.values
+    def _fit_predict(y_hist, n_fc, op_id, n_tr):
+        if len(y_hist) < 4:
+            raise ValueError("too short")
+        if theta_method == "multiplicative" and np.any(y_hist <= 0):
+            raise ValueError("theta multiplicative requires positive series")
+        tm = ThetaModel(
+            y_hist,
+            period=int(theta_period),
+            deseasonalize=theta_deseasonalize,
+            method=theta_method,
+        )
+        with warnings.catch_warnings(record=True) as wlog:
+            warnings.simplefilter("always")
+            res = tm.fit()
+            n_fit = len(wlog)
+            fc = res.forecast(n_fc)
+        _append_split_warnings(
+            warning_rows,
+            resist_id=resist_id,
+            operation_id=op_id,
+            series_config_name=series_config_name,
+            n_tr=n_tr,
+            wlog=wlog,
+            n_first=n_fit,
+            phase_first="fit",
+            phase_second="forecast",
+        )
+        return np.asarray(fc, dtype=float).ravel()
+
+    return _run_per_series_dispatch(df_full, mask_train, mask_test, _fit_predict)
 
 
 def train_sarimax_per_series(
@@ -300,73 +443,51 @@ def train_sarimax_per_series(
     sarimax_seasonal_order=None,
     sarimax_fit_kwargs=None,
 ):
-    test_idx = df_full.loc[mask_test].index
-    preds = pd.Series(0.0, index=test_idx)
-    for op_id, grp in df_full.groupby("operation_id"):
-        train_part = grp[mask_train.reindex(grp.index, fill_value=False)].sort_values("date")
-        test_part = grp[mask_test.reindex(grp.index, fill_value=False)].sort_values("date")
-        if test_part.empty:
-            continue
-        y_hist = train_part["fact_value"].values.astype(float)
-        n_fc = len(test_part)
-        n_tr = len(y_hist)
-        try:
-            if len(y_hist) < 8:
-                raise ValueError("too short")
-            if sarimax_order is not None and sarimax_seasonal_order is not None:
-                order = tuple(sarimax_order)
-                seasonal_order = tuple(sarimax_seasonal_order)
-            elif len(y_hist) >= 24:
-                if sarimax_preset == "airline":
-                    order = (0, 1, 1)
-                    seasonal_order = (0, 1, 1, 12)
-                else:
-                    order = (1, 1, 1)
-                    seasonal_order = (1, 1, 1, 12)
+    def _fit_predict(y_hist, n_fc, op_id, n_tr):
+        if len(y_hist) < 8:
+            raise ValueError("too short")
+        if sarimax_order is not None and sarimax_seasonal_order is not None:
+            order = tuple(sarimax_order)
+            seasonal_order = tuple(sarimax_seasonal_order)
+        elif len(y_hist) >= 24:
+            if sarimax_preset == "airline":
+                order = (0, 1, 1)
+                seasonal_order = (0, 1, 1, 12)
             else:
                 order = (1, 1, 1)
-                seasonal_order = (0, 0, 0, 0)
-            model = SARIMAX(
-                y_hist,
-                order=order,
-                seasonal_order=seasonal_order,
-                enforce_stationarity=False,
-                enforce_invertibility=False,
-            )
-            _sfk = {"disp": False}
-            if sarimax_fit_kwargs:
-                _sfk.update(sarimax_fit_kwargs)
-            with warnings.catch_warnings(record=True) as w_fit:
-                warnings.simplefilter("always")
-                fit = model.fit(**_sfk)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="fit",
-                n_train_points=n_tr,
-                caught=w_fit,
-            )
-            with warnings.catch_warnings(record=True) as w_fc:
-                warnings.simplefilter("always")
-                fc = fit.forecast(n_fc)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="forecast",
-                n_train_points=n_tr,
-                caught=w_fc,
-            )
-            fc = np.asarray(fc, dtype=float).ravel()
-        except Exception:
-            fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
-    return preds.values
+                seasonal_order = (1, 1, 1, 12)
+        else:
+            order = (1, 1, 1)
+            seasonal_order = (0, 0, 0, 0)
+        model = SARIMAX(
+            y_hist,
+            order=order,
+            seasonal_order=seasonal_order,
+            enforce_stationarity=False,
+            enforce_invertibility=False,
+        )
+        _sfk = {"disp": False}
+        if sarimax_fit_kwargs:
+            _sfk.update(sarimax_fit_kwargs)
+        with warnings.catch_warnings(record=True) as wlog:
+            warnings.simplefilter("always")
+            fit = model.fit(**_sfk)
+            n_fit = len(wlog)
+            fc = fit.forecast(n_fc)
+        _append_split_warnings(
+            warning_rows,
+            resist_id=resist_id,
+            operation_id=op_id,
+            series_config_name=series_config_name,
+            n_tr=n_tr,
+            wlog=wlog,
+            n_first=n_fit,
+            phase_first="fit",
+            phase_second="forecast",
+        )
+        return np.asarray(fc, dtype=float).ravel()
+
+    return _run_per_series_dispatch(df_full, mask_train, mask_test, _fit_predict)
 
 
 def train_auto_arima_per_series(
@@ -379,10 +500,8 @@ def train_auto_arima_per_series(
     *,
     auto_arima_kwargs=None,
 ):
-    from pmdarima import auto_arima
-
-    test_idx = df_full.loc[mask_test].index
-    preds = pd.Series(0.0, index=test_idx)
+    if _pmdarima_auto_arima is None:
+        raise ImportError("pmdarima не установлен")
     base_kw = dict(
         seasonal=True,
         m=12,
@@ -396,48 +515,29 @@ def train_auto_arima_per_series(
     )
     if auto_arima_kwargs:
         base_kw.update(auto_arima_kwargs)
-    for op_id, grp in df_full.groupby("operation_id"):
-        train_part = grp[mask_train.reindex(grp.index, fill_value=False)].sort_values("date")
-        test_part = grp[mask_test.reindex(grp.index, fill_value=False)].sort_values("date")
-        if test_part.empty:
-            continue
-        y_hist = train_part["fact_value"].values.astype(float)
-        n_fc = len(test_part)
-        n_tr = len(y_hist)
-        try:
-            if len(y_hist) < 8:
-                raise ValueError("too short")
-            with warnings.catch_warnings(record=True) as w_fit:
-                warnings.simplefilter("always")
-                aa = auto_arima(y_hist, **base_kw)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="fit",
-                n_train_points=n_tr,
-                caught=w_fit,
-            )
-            with warnings.catch_warnings(record=True) as w_pred:
-                warnings.simplefilter("always")
-                fc = aa.predict(n_periods=n_fc)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="predict",
-                n_train_points=n_tr,
-                caught=w_pred,
-            )
-            fc = np.asarray(fc, dtype=float).ravel()
-        except Exception:
-            fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
-    return preds.values
+
+    def _fit_predict(y_hist, n_fc, op_id, n_tr):
+        if len(y_hist) < 8:
+            raise ValueError("too short")
+        with warnings.catch_warnings(record=True) as wlog:
+            warnings.simplefilter("always")
+            aa = _pmdarima_auto_arima(y_hist, **base_kw)
+            n_fit = len(wlog)
+            fc = aa.predict(n_periods=n_fc)
+        _append_split_warnings(
+            warning_rows,
+            resist_id=resist_id,
+            operation_id=op_id,
+            series_config_name=series_config_name,
+            n_tr=n_tr,
+            wlog=wlog,
+            n_first=n_fit,
+            phase_first="fit",
+            phase_second="predict",
+        )
+        return np.asarray(fc, dtype=float).ravel()
+
+    return _run_per_series_dispatch(df_full, mask_train, mask_test, _fit_predict)
 
 
 def _sf_train_df(train_part: pd.DataFrame) -> pd.DataFrame:
@@ -458,77 +558,45 @@ def _sf_forecast_column(fc_df: pd.DataFrame) -> np.ndarray:
     return fc_df[num_cols[0]].values.astype(float)
 
 
-def _sf_build_model_list(sf_model_name: str, season_len: int, sf_window_size=None, tsb_kwargs=None):
-    from statsforecast.models import (
-        ADIDA,
-        AutoARIMA,
-        AutoCES,
-        AutoETS,
-        AutoTheta,
-        CrostonSBA,
-        CrostonClassic,
-        DynamicOptimizedTheta,
-        HistoricAverage,
-        Holt,
-        HoltWinters,
-        IMAPA,
-        MSTL,
-        Naive,
-        OptimizedTheta,
-        RandomWalkWithDrift,
-        SeasonalNaive,
-        SimpleExponentialSmoothingOptimized,
-        TSB,
-        WindowAverage,
-    )
+_SF_NO_SEASON = {
+    "Naive", "HistoricAverage", "RandomWalkWithDrift", "Holt",
+    "SimpleExponentialSmoothingOptimized", "CrostonSBA", "CrostonClassic",
+    "ADIDA", "IMAPA",
+}
 
-    m = sf_model_name
-    if m == "AutoETS":
-        return [AutoETS(season_length=season_len)]
-    if m == "AutoTheta":
-        return [AutoTheta(season_length=season_len)]
-    if m == "AutoCES":
-        return [AutoCES(season_length=season_len)]
-    if m == "AutoARIMA":
-        return [AutoARIMA(season_length=season_len)]
-    if m == "Naive":
-        return [Naive()]
-    if m == "SeasonalNaive":
-        return [SeasonalNaive(season_length=season_len)]
-    if m == "HistoricAverage":
-        return [HistoricAverage()]
-    if m == "RandomWalkWithDrift":
-        return [RandomWalkWithDrift()]
-    if m == "OptimizedTheta":
-        return [OptimizedTheta(season_length=season_len)]
-    if m == "DynamicOptimizedTheta":
-        return [DynamicOptimizedTheta(season_length=season_len)]
-    if m == "MSTL":
-        return [MSTL(season_length=season_len)]
-    if m == "Holt":
-        return [Holt()]
-    if m == "HoltWinters":
-        return [HoltWinters(season_length=season_len)]
-    if m == "SimpleExponentialSmoothingOptimized":
-        return [SimpleExponentialSmoothingOptimized()]
-    if m == "CrostonSBA":
-        return [CrostonSBA()]
-    if m == "CrostonClassic":
-        return [CrostonClassic()]
-    if m == "TSB":
+
+def _sf_build_model_list(sf_model_name: str, season_len: int, sf_window_size=None, tsb_kwargs=None):
+    """Конструктор моделей StatsForecast.
+
+    Импорты подняты в module-scope; ошибка `ImportError` при отсутствии
+    ``statsforecast`` поднимается отдельно во внешних трейнерах.
+    """
+    cls = _SF_MODELS.get(sf_model_name)
+    if cls is None:
+        raise ValueError(f"Неизвестная модель StatsForecast: {sf_model_name}")
+    if sf_model_name == "TSB":
         kw = {"alpha_d": 0.3, "alpha_p": 0.3}
         if tsb_kwargs:
             kw.update(tsb_kwargs)
-        return [TSB(**kw)]
-    if m == "ADIDA":
-        return [ADIDA()]
-    if m == "IMAPA":
-        return [IMAPA()]
-    if m == "WindowAverage":
+        return [cls(**kw)]
+    if sf_model_name == "WindowAverage":
         ws = int(sf_window_size) if sf_window_size is not None else 3
         ws = max(1, ws)
-        return [WindowAverage(window_size=ws)]
-    raise ValueError(f"Неизвестная модель StatsForecast: {sf_model_name}")
+        return [cls(window_size=ws)]
+    if sf_model_name in _SF_NO_SEASON:
+        return [cls()]
+    return [cls(season_length=season_len)]
+
+
+def _sf_train_df_from_arrays(y_hist: np.ndarray, dates_ms) -> pd.DataFrame:
+    """Сборка DataFrame под `StatsForecast.fit` из numpy/Index без копирования."""
+    return pd.DataFrame(
+        {
+            "unique_id": "s0",
+            "ds": pd.to_datetime(dates_ms),
+            "y": y_hist.astype(float, copy=False),
+        }
+    )
 
 
 def train_statsforecast_per_series(
@@ -544,57 +612,73 @@ def train_statsforecast_per_series(
     sf_window_size=None,
     sf_tsb_kwargs=None,
 ):
-    from statsforecast import StatsForecast
+    if _StatsForecast is None:
+        raise ImportError("statsforecast не установлен")
+
+    def _fit_predict_with_dates(y_hist, n_fc, op_id, n_tr, dates_ms):
+        if n_tr < 2:
+            raise ValueError("too short")
+        sf_df = _sf_train_df_from_arrays(y_hist, dates_ms)
+        models = _sf_build_model_list(sf_model_name, season_len, sf_window_size, tsb_kwargs=sf_tsb_kwargs)
+        with warnings.catch_warnings(record=True) as wlog:
+            warnings.simplefilter("always")
+            sf = _StatsForecast(models=models, freq=STATSFORECAST_FREQ, n_jobs=1)
+            sf.fit(sf_df)
+            n_fit = len(wlog)
+            fc_df = sf.predict(h=n_fc)
+        _append_split_warnings(
+            warning_rows,
+            resist_id=resist_id,
+            operation_id=op_id,
+            series_config_name=series_config_name,
+            n_tr=n_tr,
+            wlog=wlog,
+            n_first=n_fit,
+            phase_first="fit",
+            phase_second="predict",
+        )
+        fc = _sf_forecast_column(fc_df)
+        if fc.shape[0] != n_fc:
+            fc = fc[:n_fc] if fc.shape[0] > n_fc else np.resize(fc, n_fc)
+        return fc
+
+    if _is_single_op(df_full):
+        op_id, y_hist, n_fc, n_tr = _single_op_inputs(df_full, mask_train, mask_test)
+        if n_fc == 0:
+            return _empty_test_arr(mask_test)
+        if df_full["date"].is_monotonic_increasing:
+            dates = df_full.loc[mask_train, "date"].to_numpy()
+        else:
+            df_sorted = df_full.sort_values("date")
+            mt = mask_train.reindex(df_sorted.index, fill_value=False)
+            dates = df_sorted.loc[mt, "date"].to_numpy()
+        try:
+            fc = _fit_predict_with_dates(y_hist, n_fc, op_id, n_tr, dates)
+        except Exception:
+            fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
+        return np.maximum(np.asarray(fc, dtype=float).ravel(), 0)
 
     test_idx = df_full.loc[mask_test].index
-    preds = pd.Series(0.0, index=test_idx)
-    for op_id, grp in df_full.groupby("operation_id"):
+    preds = np.zeros(len(test_idx), dtype=float)
+    if len(test_idx) == 0:
+        return preds
+    pos_map = {idx: i for i, idx in enumerate(test_idx)}
+    for op_id, grp in df_full.groupby("operation_id", sort=False):
         train_part = grp[mask_train.reindex(grp.index, fill_value=False)].sort_values("date")
         test_part = grp[mask_test.reindex(grp.index, fill_value=False)].sort_values("date")
         if test_part.empty:
             continue
-        y_hist = train_part["fact_value"].values.astype(float)
+        y_hist = train_part["fact_value"].astype(float).to_numpy()
         n_fc = len(test_part)
         n_tr = len(y_hist)
         try:
-            if n_tr < 2:
-                raise ValueError("too short")
-            sf_df = _sf_train_df(train_part)
-            models = _sf_build_model_list(sf_model_name, season_len, sf_window_size, tsb_kwargs=sf_tsb_kwargs)
-            with warnings.catch_warnings(record=True) as w_fit:
-                warnings.simplefilter("always")
-                sf = StatsForecast(models=models, freq=STATSFORECAST_FREQ, n_jobs=1)
-                sf.fit(sf_df)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="fit",
-                n_train_points=n_tr,
-                caught=w_fit,
-            )
-            with warnings.catch_warnings(record=True) as w_pred:
-                warnings.simplefilter("always")
-                fc_df = sf.predict(h=n_fc)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="predict",
-                n_train_points=n_tr,
-                caught=w_pred,
-            )
-            fc = _sf_forecast_column(fc_df)
-            if fc.shape[0] != n_fc:
-                fc = fc[:n_fc] if fc.shape[0] > n_fc else np.resize(fc, n_fc)
+            fc = _fit_predict_with_dates(y_hist, n_fc, op_id, n_tr, train_part["date"].to_numpy())
         except Exception:
             fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
-    return preds.values
+        fc_clamped = np.maximum(np.asarray(fc, dtype=float).ravel(), 0)
+        for i, idx in enumerate(test_part.index):
+            preds[pos_map[idx]] = fc_clamped[i]
+    return preds
 
 
 def train_statsforecast_intermittent_per_series(
@@ -609,62 +693,78 @@ def train_statsforecast_intermittent_per_series(
     season_len: int,
     sf_tsb_kwargs=None,
 ):
-    from statsforecast import StatsForecast
+    if _StatsForecast is None:
+        raise ImportError("statsforecast не установлен")
+
+    def _fit_predict_with_dates(y_hist, n_fc, op_id, n_tr, dates_ms):
+        if n_tr < 2:
+            raise ValueError("too short")
+        zero_frac = float(np.mean(y_hist == 0)) if n_tr else 0.0
+        use_intermittent = zero_frac >= INTERMITTENT_ZERO_MIN_FRACTION
+        sf_df = _sf_train_df_from_arrays(y_hist, dates_ms)
+        if use_intermittent:
+            models = _sf_build_model_list(sf_model_name, season_len, None, tsb_kwargs=sf_tsb_kwargs)
+        else:
+            models = _sf_build_model_list("HistoricAverage", season_len, None)
+        with warnings.catch_warnings(record=True) as wlog:
+            warnings.simplefilter("always")
+            sf = _StatsForecast(models=models, freq=STATSFORECAST_FREQ, n_jobs=1)
+            sf.fit(sf_df)
+            n_fit = len(wlog)
+            fc_df = sf.predict(h=n_fc)
+        _append_split_warnings(
+            warning_rows,
+            resist_id=resist_id,
+            operation_id=op_id,
+            series_config_name=series_config_name,
+            n_tr=n_tr,
+            wlog=wlog,
+            n_first=n_fit,
+            phase_first="fit",
+            phase_second="predict",
+        )
+        fc = _sf_forecast_column(fc_df)
+        if fc.shape[0] != n_fc:
+            fc = fc[:n_fc] if fc.shape[0] > n_fc else np.resize(fc, n_fc)
+        return fc
+
+    if _is_single_op(df_full):
+        op_id, y_hist, n_fc, n_tr = _single_op_inputs(df_full, mask_train, mask_test)
+        if n_fc == 0:
+            return _empty_test_arr(mask_test)
+        if df_full["date"].is_monotonic_increasing:
+            dates = df_full.loc[mask_train, "date"].to_numpy()
+        else:
+            df_sorted = df_full.sort_values("date")
+            mt = mask_train.reindex(df_sorted.index, fill_value=False)
+            dates = df_sorted.loc[mt, "date"].to_numpy()
+        try:
+            fc = _fit_predict_with_dates(y_hist, n_fc, op_id, n_tr, dates)
+        except Exception:
+            fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
+        return np.maximum(np.asarray(fc, dtype=float).ravel(), 0)
 
     test_idx = df_full.loc[mask_test].index
-    preds = pd.Series(0.0, index=test_idx)
-    for op_id, grp in df_full.groupby("operation_id"):
+    preds = np.zeros(len(test_idx), dtype=float)
+    if len(test_idx) == 0:
+        return preds
+    pos_map = {idx: i for i, idx in enumerate(test_idx)}
+    for op_id, grp in df_full.groupby("operation_id", sort=False):
         train_part = grp[mask_train.reindex(grp.index, fill_value=False)].sort_values("date")
         test_part = grp[mask_test.reindex(grp.index, fill_value=False)].sort_values("date")
         if test_part.empty:
             continue
-        y_hist = train_part["fact_value"].values.astype(float)
+        y_hist = train_part["fact_value"].astype(float).to_numpy()
         n_fc = len(test_part)
         n_tr = len(y_hist)
-        zero_frac = float(np.mean(y_hist == 0)) if n_tr else 0.0
-        use_intermittent = zero_frac >= INTERMITTENT_ZERO_MIN_FRACTION
         try:
-            if n_tr < 2:
-                raise ValueError("too short")
-            sf_df = _sf_train_df(train_part)
-            if use_intermittent:
-                models = _sf_build_model_list(sf_model_name, season_len, None, tsb_kwargs=sf_tsb_kwargs)
-            else:
-                models = _sf_build_model_list("HistoricAverage", season_len, None)
-            with warnings.catch_warnings(record=True) as w_fit:
-                warnings.simplefilter("always")
-                sf = StatsForecast(models=models, freq=STATSFORECAST_FREQ, n_jobs=1)
-                sf.fit(sf_df)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="fit",
-                n_train_points=n_tr,
-                caught=w_fit,
-            )
-            with warnings.catch_warnings(record=True) as w_pred:
-                warnings.simplefilter("always")
-                fc_df = sf.predict(h=n_fc)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="predict",
-                n_train_points=n_tr,
-                caught=w_pred,
-            )
-            fc = _sf_forecast_column(fc_df)
-            if fc.shape[0] != n_fc:
-                fc = fc[:n_fc] if fc.shape[0] > n_fc else np.resize(fc, n_fc)
+            fc = _fit_predict_with_dates(y_hist, n_fc, op_id, n_tr, train_part["date"].to_numpy())
         except Exception:
             fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
-    return preds.values
+        fc_clamped = np.maximum(np.asarray(fc, dtype=float).ravel(), 0)
+        for i, idx in enumerate(test_part.index):
+            preds[pos_map[idx]] = fc_clamped[i]
+    return preds
 
 
 def train_ucm_per_series(
@@ -679,58 +779,34 @@ def train_ucm_per_series(
     ucm_stochastic_level=None,
     ucm_stochastic_seasonal=None,
 ):
-    from statsmodels.tsa.statespace.structural import UnobservedComponents
+    def _fit_predict(y_hist, n_fc, op_id, n_tr):
+        if n_tr < 2 * MONTHLY_SEASON_LENGTH:
+            raise ValueError("too short for seasonal UCM")
+        _uk = {"level": ucm_level, "seasonal": MONTHLY_SEASON_LENGTH}
+        if ucm_stochastic_level is not None:
+            _uk["stochastic_level"] = ucm_stochastic_level
+        if ucm_stochastic_seasonal is not None:
+            _uk["stochastic_seasonal"] = ucm_stochastic_seasonal
+        mod = _UnobservedComponents(y_hist, **_uk)
+        with warnings.catch_warnings(record=True) as wlog:
+            warnings.simplefilter("always")
+            res = mod.fit(disp=False)
+            n_fit = len(wlog)
+            fc = res.forecast(n_fc)
+        _append_split_warnings(
+            warning_rows,
+            resist_id=resist_id,
+            operation_id=op_id,
+            series_config_name=series_config_name,
+            n_tr=n_tr,
+            wlog=wlog,
+            n_first=n_fit,
+            phase_first="fit",
+            phase_second="forecast",
+        )
+        return np.asarray(fc, dtype=float).ravel()
 
-    test_idx = df_full.loc[mask_test].index
-    preds = pd.Series(0.0, index=test_idx)
-    for op_id, grp in df_full.groupby("operation_id"):
-        train_part = grp[mask_train.reindex(grp.index, fill_value=False)].sort_values("date")
-        test_part = grp[mask_test.reindex(grp.index, fill_value=False)].sort_values("date")
-        if test_part.empty:
-            continue
-        y_hist = train_part["fact_value"].values.astype(float)
-        n_fc = len(test_part)
-        n_tr = len(y_hist)
-        try:
-            if n_tr < 2 * MONTHLY_SEASON_LENGTH:
-                raise ValueError("too short for seasonal UCM")
-            _uk = {"level": ucm_level, "seasonal": MONTHLY_SEASON_LENGTH}
-            if ucm_stochastic_level is not None:
-                _uk["stochastic_level"] = ucm_stochastic_level
-            if ucm_stochastic_seasonal is not None:
-                _uk["stochastic_seasonal"] = ucm_stochastic_seasonal
-            mod = UnobservedComponents(y_hist, **_uk)
-            with warnings.catch_warnings(record=True) as w_fit:
-                warnings.simplefilter("always")
-                res = mod.fit(disp=False)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="fit",
-                n_train_points=n_tr,
-                caught=w_fit,
-            )
-            with warnings.catch_warnings(record=True) as w_fc:
-                warnings.simplefilter("always")
-                fc = res.forecast(n_fc)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="forecast",
-                n_train_points=n_tr,
-                caught=w_fc,
-            )
-            fc = np.asarray(fc, dtype=float).ravel()
-        except Exception:
-            fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
-    return preds.values
+    return _run_per_series_dispatch(df_full, mask_train, mask_test, _fit_predict)
 
 
 def _local_effective_max_lag(n_train: int, max_lag: int) -> int:
@@ -777,89 +853,74 @@ def train_local_supervised_per_series(
     max_lag: int = None,
     local_sk_params=None,
 ):
-    from sklearn.linear_model import Ridge, Lasso, ElasticNet
-    from sklearn.svm import SVR
-    from sklearn.neighbors import KNeighborsRegressor
-    from sklearn.ensemble import RandomForestRegressor
-    from sklearn.preprocessing import StandardScaler
-
+    if not HAS_SKLEARN:
+        raise ImportError("sklearn не установлен")
     if max_lag is None:
         max_lag = LOCAL_MAX_LAG
-    test_idx = df_full.loc[mask_test].index
-    preds = pd.Series(0.0, index=test_idx)
-    for op_id, grp in df_full.groupby("operation_id"):
-        train_part = grp[mask_train.reindex(grp.index, fill_value=False)].sort_values("date")
-        test_part = grp[mask_test.reindex(grp.index, fill_value=False)].sort_values("date")
-        if test_part.empty:
-            continue
-        y_hist = train_part["fact_value"].values.astype(float)
-        n_fc = len(test_part)
-        n_tr = len(y_hist)
+
+    def _fit_predict(y_hist, n_fc, op_id, n_tr):
         L = _local_effective_max_lag(n_tr, max_lag)
         use_scaler = sk_model in ("svr", "knn")
-        try:
-            X, y_tgt = _local_build_xy(y_hist, L)
-            if X.shape[0] < 2:
-                raise ValueError("too few supervised rows")
-            scaler = StandardScaler() if use_scaler else None
-            X_fit = scaler.fit_transform(X) if use_scaler else X
-            _p = dict(local_sk_params or {})
-            if sk_model == "ridge":
-                model = Ridge(alpha=float(_p.get("alpha", 1.0)))
-            elif sk_model == "lasso":
-                model = Lasso(
-                    alpha=float(_p.get("alpha", 0.15)),
-                    random_state=int(_p.get("random_state", 42)),
-                    max_iter=int(_p.get("max_iter", 8000)),
-                )
-            elif sk_model == "elasticnet":
-                model = ElasticNet(
-                    alpha=float(_p.get("alpha", 0.15)),
-                    l1_ratio=float(_p.get("l1_ratio", 0.5)),
-                    random_state=int(_p.get("random_state", 42)),
-                    max_iter=int(_p.get("max_iter", 8000)),
-                )
-            elif sk_model == "svr":
-                model = SVR(
-                    kernel=_p.get("kernel", "rbf"),
-                    C=float(_p.get("C", 1.0)),
-                    epsilon=float(_p.get("epsilon", 0.1)),
-                    gamma=_p.get("gamma", "scale"),
-                )
-            elif sk_model == "knn":
-                nn = int(_p.get("n_neighbors", max(1, min(5, max(1, X_fit.shape[0] // 3)))))
-                model = KNeighborsRegressor(
-                    n_neighbors=max(1, nn),
-                    weights=_p.get("weights", "distance"),
-                )
-            elif sk_model == "rf":
-                model = RandomForestRegressor(
-                    n_estimators=int(_p.get("n_estimators", min(200, max(50, n_tr * 5)))),
-                    max_depth=int(_p.get("max_depth", min(6, max(2, max(1, n_tr // 3))))),
-                    min_samples_leaf=int(_p.get("min_samples_leaf", max(1, min(3, max(1, n_tr // 5))))),
-                    random_state=int(_p.get("random_state", 42)),
-                    n_jobs=int(_p.get("n_jobs", -1)),
-                )
-            else:
-                raise ValueError(sk_model)
-            with warnings.catch_warnings(record=True) as w_fit:
-                warnings.simplefilter("always")
-                model.fit(X_fit, y_tgt)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="fit",
-                n_train_points=n_tr,
-                caught=w_fit,
+        X, y_tgt = _local_build_xy(y_hist, L)
+        if X.shape[0] < 2:
+            raise ValueError("too few supervised rows")
+        scaler = _SK_StandardScaler() if use_scaler else None
+        X_fit = scaler.fit_transform(X) if use_scaler else X
+        _p = dict(local_sk_params or {})
+        if sk_model == "ridge":
+            model = _SK_Ridge(alpha=float(_p.get("alpha", 1.0)))
+        elif sk_model == "lasso":
+            model = _SK_Lasso(
+                alpha=float(_p.get("alpha", 0.15)),
+                random_state=int(_p.get("random_state", 42)),
+                max_iter=int(_p.get("max_iter", 8000)),
             )
-            fc = _local_recursive_forecast(model, scaler, y_hist, n_fc, L, use_scaler)
-        except Exception:
-            fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
-    return preds.values
+        elif sk_model == "elasticnet":
+            model = _SK_ElasticNet(
+                alpha=float(_p.get("alpha", 0.15)),
+                l1_ratio=float(_p.get("l1_ratio", 0.5)),
+                random_state=int(_p.get("random_state", 42)),
+                max_iter=int(_p.get("max_iter", 8000)),
+            )
+        elif sk_model == "svr":
+            model = _SK_SVR(
+                kernel=_p.get("kernel", "rbf"),
+                C=float(_p.get("C", 1.0)),
+                epsilon=float(_p.get("epsilon", 0.1)),
+                gamma=_p.get("gamma", "scale"),
+            )
+        elif sk_model == "knn":
+            nn = int(_p.get("n_neighbors", max(1, min(5, max(1, X_fit.shape[0] // 3)))))
+            model = _SK_KNN(
+                n_neighbors=max(1, nn),
+                weights=_p.get("weights", "distance"),
+            )
+        elif sk_model == "rf":
+            model = _SK_RF(
+                n_estimators=int(_p.get("n_estimators", min(200, max(50, n_tr * 5)))),
+                max_depth=int(_p.get("max_depth", min(6, max(2, max(1, n_tr // 3))))),
+                min_samples_leaf=int(_p.get("min_samples_leaf", max(1, min(3, max(1, n_tr // 5))))),
+                random_state=int(_p.get("random_state", 42)),
+                n_jobs=int(_p.get("n_jobs", -1)),
+            )
+        else:
+            raise ValueError(sk_model)
+        with warnings.catch_warnings(record=True) as wlog:
+            warnings.simplefilter("always")
+            model.fit(X_fit, y_tgt)
+        append_warning_rows(
+            warning_rows,
+            resist_id=resist_id,
+            operation_id=op_id,
+            model_kind="per_series",
+            model_label=series_config_name,
+            phase="fit",
+            n_train_points=n_tr,
+            caught=wlog,
+        )
+        return _local_recursive_forecast(model, scaler, y_hist, n_fc, L, use_scaler)
+
+    return _run_per_series_dispatch(df_full, mask_train, mask_test, _fit_predict)
 
 
 def _glm_build_xy_count(y_arr: np.ndarray):
@@ -886,63 +947,49 @@ def train_glm_count_per_series(
     glm_reg_alpha: float = 0.1,
     glm_reg_l1_wt: float = 0.0,
 ):
-    from statsmodels.genmod.generalized_linear_model import GLM
-    from statsmodels.genmod import families
+    fam = _glm_families.Poisson() if family_name == "poisson" else _glm_families.NegativeBinomial()
 
-    test_idx = df_full.loc[mask_test].index
-    preds = pd.Series(0.0, index=test_idx)
-    fam = families.Poisson() if family_name == "poisson" else families.NegativeBinomial()
-    for op_id, grp in df_full.groupby("operation_id"):
-        train_part = grp[mask_train.reindex(grp.index, fill_value=False)].sort_values("date")
-        test_part = grp[mask_test.reindex(grp.index, fill_value=False)].sort_values("date")
-        if test_part.empty:
-            continue
-        y_hist = train_part["fact_value"].values.astype(float)
-        n_fc = len(test_part)
-        n_tr = len(y_hist)
-        try:
-            if n_tr < 4:
-                raise ValueError("too short")
-            exog_tr, endog_tr = _glm_build_xy_count(y_hist)
-            if exog_tr.shape[0] < 3:
-                raise ValueError("too few glm rows")
-            with warnings.catch_warnings(record=True) as w_fit:
-                warnings.simplefilter("always")
-                glm = GLM(endog_tr, exog_tr, family=fam)
-                if glm_use_regularized:
-                    res = glm.fit_regularized(
-                        alpha=float(glm_reg_alpha),
-                        L1_wt=float(glm_reg_l1_wt),
-                        maxiter=int((glm_fit_kwargs or {}).get("maxiter", 100)),
-                    )
-                else:
-                    _gkw = {}
-                    if glm_fit_kwargs:
-                        _gkw.update(glm_fit_kwargs)
-                    res = glm.fit(**_gkw)
-            append_warning_rows(
-                warning_rows,
-                resist_id=resist_id,
-                operation_id=op_id,
-                model_kind="per_series",
-                model_label=series_config_name,
-                phase="fit",
-                n_train_points=n_tr,
-                caught=w_fit,
-            )
-            history = list(np.maximum(np.round(y_hist), 0).astype(float))
-            fc = []
-            for _ in range(n_fc):
-                x1 = np.array([[1.0, history[-1]]])
-                mu = float(np.squeeze(res.predict(x1)))
-                pred = max(0.0, mu)
-                fc.append(pred)
-                history.append(float(max(0, round(pred))))
-            fc = np.array(fc, dtype=float)
-        except Exception:
-            fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
-    return preds.values
+    def _fit_predict(y_hist, n_fc, op_id, n_tr):
+        if n_tr < 4:
+            raise ValueError("too short")
+        exog_tr, endog_tr = _glm_build_xy_count(y_hist)
+        if exog_tr.shape[0] < 3:
+            raise ValueError("too few glm rows")
+        with warnings.catch_warnings(record=True) as wlog:
+            warnings.simplefilter("always")
+            glm = _GLM(endog_tr, exog_tr, family=fam)
+            if glm_use_regularized:
+                res = glm.fit_regularized(
+                    alpha=float(glm_reg_alpha),
+                    L1_wt=float(glm_reg_l1_wt),
+                    maxiter=int((glm_fit_kwargs or {}).get("maxiter", 100)),
+                )
+            else:
+                _gkw = {}
+                if glm_fit_kwargs:
+                    _gkw.update(glm_fit_kwargs)
+                res = glm.fit(**_gkw)
+        append_warning_rows(
+            warning_rows,
+            resist_id=resist_id,
+            operation_id=op_id,
+            model_kind="per_series",
+            model_label=series_config_name,
+            phase="fit",
+            n_train_points=n_tr,
+            caught=wlog,
+        )
+        history = list(np.maximum(np.round(y_hist), 0).astype(float))
+        fc = []
+        for _ in range(n_fc):
+            x1 = np.array([[1.0, history[-1]]])
+            mu = float(np.squeeze(res.predict(x1)))
+            pred = max(0.0, mu)
+            fc.append(pred)
+            history.append(float(max(0, round(pred))))
+        return np.array(fc, dtype=float)
+
+    return _run_per_series_dispatch(df_full, mask_train, mask_test, _fit_predict)
 
 
 def train_window_median_per_series(
@@ -955,15 +1002,7 @@ def train_window_median_per_series(
     *,
     window_size: int,
 ):
-    test_idx = df_full.loc[mask_test].index
-    preds = pd.Series(0.0, index=test_idx)
-    for op_id, grp in df_full.groupby("operation_id"):
-        train_part = grp[mask_train.reindex(grp.index, fill_value=False)].sort_values("date")
-        test_part = grp[mask_test.reindex(grp.index, fill_value=False)].sort_values("date")
-        if test_part.empty:
-            continue
-        y_hist = train_part["fact_value"].values.astype(float)
-        n_fc = len(test_part)
+    def _fit_predict(y_hist, n_fc, op_id, n_tr):
         history = list(y_hist)
         fc = []
         for _ in range(n_fc):
@@ -973,9 +1012,9 @@ def train_window_median_per_series(
             else:
                 fc.append(float(np.median(tail)))
             history.append(fc[-1])
-        fc = np.array(fc, dtype=float)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
-    return preds.values
+        return np.array(fc, dtype=float)
+
+    return _run_per_series_dispatch(df_full, mask_train, mask_test, _fit_predict)
 
 
 # Базовые per-series configs — основной production-набор.
