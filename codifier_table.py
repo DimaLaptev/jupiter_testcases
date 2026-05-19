@@ -8,6 +8,16 @@ from typing import Any
 
 from openpyxl import load_workbook
 
+from depo_directory import normalize_account_key
+
+
+@dataclass
+class VtbSdCodifierRow:
+    op_code: str
+    op_type: str
+    content_vtb: str
+    instruction_type: str
+
 
 @dataclass
 class CodifierRow:
@@ -157,6 +167,224 @@ def read_codifier_rows(workbook_path: str, sheet_name: str = "Коды") -> list
     return out
 
 
+def _norm_sheet_title_for_vtb_match(name: str) -> str:
+    t = (name or "").replace("\u00a0", " ").strip().lower()
+    return t.replace("ё", "е")
+
+
+def _sheet_name_looks_like_vtb_codifier(name: str) -> bool:
+    """Лист вроде «Коды ВТБ СД» / «Коды ВТб СБ» (опечатки в имени)."""
+    k = _norm_sheet_title_for_vtb_match(name)
+    return "коды" in k and "втб" in k
+
+
+def _vtb_sd_codifier_sheet_candidates(wb) -> list[str]:
+    """
+    Порядок: точное «Коды ВТБ СД», затем остальные имена с «коды» и «втб».
+    Нужно, если в книге лист назван, например, «Коды ВТб СБ».
+    """
+    pref = "Коды ВТБ СД"
+    out: list[str] = []
+    seen: set[str] = set()
+    if pref in wb.sheetnames:
+        out.append(pref)
+        seen.add(pref)
+    for sn in wb.sheetnames:
+        if sn in seen:
+            continue
+        if _sheet_name_looks_like_vtb_codifier(sn):
+            out.append(sn)
+            seen.add(sn)
+    return out
+
+
+def _find_vtb_sd_header_row(ws, max_scan: int = 30) -> tuple[int, dict[str, int]]:
+    for r in range(1, min(max_scan, (ws.max_row or 1) + 15) + 1):
+        col_map: dict[str, int] = {}
+        for c in range(1, max(ws.max_column or 0, 12) + 1):
+            h = _norm_header(ws.cell(row=r, column=c))
+            if h:
+                col_map[h] = c
+        if "код операции" not in col_map:
+            continue
+        if "тип операции" not in col_map:
+            continue
+        if "тип поручения" not in col_map:
+            continue
+        has_vtb = any(
+            "содержание" in key and ("втб" in key or "втбсд" in key)
+            for key in col_map
+        )
+        if has_vtb:
+            return r, col_map
+    return 1, {}
+
+
+def _vtb_sd_content_col(col_map: dict[str, int]) -> int | None:
+    for key, idx in col_map.items():
+        if "содержание" in key and ("втб" in key or "втбсд" in key):
+            return idx
+    return None
+
+
+def _read_vtb_sd_codifier_rows_from_ws(ws) -> list[VtbSdCodifierRow]:
+    """Читает таблицу кодификатора ВТБ СД с одного листа (первая подходящая шапка)."""
+    hr, col_map = _find_vtb_sd_header_row(ws)
+    if not col_map:
+        return []
+    c_op = col_map.get("код операции")
+    c_ot = col_map.get("тип операции")
+    c_inst = col_map.get("тип поручения")
+    c_vtb = _vtb_sd_content_col(col_map)
+    if not c_op or not c_ot or not c_inst or not c_vtb:
+        return []
+
+    out: list[VtbSdCodifierRow] = []
+    for r in range(hr + 1, (ws.max_row or 0) + 1):
+        op = _cell(ws, r, c_op)
+        if _is_dash(op):
+            op = ""
+        ot = _cell(ws, r, c_ot)
+        inst = _cell(ws, r, c_inst)
+        cv = _cell(ws, r, c_vtb)
+        if _is_dash(cv):
+            cv = ""
+        if not cv and not op and not ot and not inst:
+            continue
+        out.append(
+            VtbSdCodifierRow(
+                op_code=op,
+                op_type=ot,
+                content_vtb=cv,
+                instruction_type=inst,
+            ),
+        )
+    return out
+
+
+def read_vtb_sd_codifier_rows(
+    workbook_path: str,
+    sheet_name: str | None = None,
+) -> list[VtbSdCodifierRow]:
+    """
+    Лист кодификатора ВТБ СД: колонки «Код операции», «Тип операции»,
+    «Содержание … ВТБСД», «Тип поручения».
+
+    Если ``sheet_name`` задан — только этот лист. Иначе: «Коды ВТБ СД»,
+    затем любой лист, в имени которого есть «коды» и «втб» (например «Коды ВТб СБ»);
+    берётся первый лист, с которого удалось прочитать хотя бы одну строку данных.
+    """
+    wb = load_workbook(workbook_path, read_only=True, data_only=True)
+    try:
+        if sheet_name:
+            if sheet_name not in wb.sheetnames:
+                return []
+            return _read_vtb_sd_codifier_rows_from_ws(wb[sheet_name])
+        for sn in _vtb_sd_codifier_sheet_candidates(wb):
+            rows = _read_vtb_sd_codifier_rows_from_ws(wb[sn])
+            if rows:
+                return rows
+        return []
+    finally:
+        wb.close()
+
+
+def _norm_match_snippet_vtb(s: str) -> str:
+    """
+    Нормализация для сравнения StageName (XML) с колонкой «Содержание ВТБСД» (Excel):
+    trim, lower (регистр), неразрывные пробелы → обычный пробел, «ё» → «е»,
+    подряд идущие пробелы в один. Далее проверка только подстрок (substring), без regex.
+    """
+    t = (s or "").replace("\u00a0", " ").replace("\u202f", " ")
+    t = t.strip().lower()
+    t = t.replace("ё", "е")
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
+def _vtb_sd_op_type_is_spisanie(op_type: str) -> bool:
+    t = (op_type or "").lower().replace("–", "-").replace("—", "-")
+    return " - списание" in t
+
+
+def _vtb_sd_op_type_is_zachislenie(op_type: str) -> bool:
+    t = (op_type or "").lower().replace("–", "-").replace("—", "-")
+    return " - зачисление" in t
+
+
+def lookup_codifier_vtb_sd_sheet(
+    rows: list[VtbSdCodifierRow],
+    stage_name: str,
+    f_account: str,
+    h_account: str,
+    j_account: str,
+) -> tuple[str, str, str]:
+    """
+    Маппинг StageName на лист «Коды ВТБ СД» (колонка «Содержание ВТБСД»).
+    Сверка текста: после :func:`_norm_match_snippet_vtb` — полное совпадение сильнее;
+    допускается вложение **короткого** «Содержание ВТБСД» в StageName (``cv in lab``).
+    Вложение метки в **более длинную** ячейку без полного равенства не считается.
+
+    Направление: счёт депо (F) = счёт списания (H) → строка «… - списание»;
+    F = зачисление (J) → «… - зачисление».
+    Возвращает (тип_поручения, тип_операции, код_операции).
+    """
+    if not rows:
+        return "", "", ""
+    lab = _norm_match_snippet_vtb(stage_name)
+    if not lab:
+        return "", "", ""
+
+    scored: list[tuple[int, VtbSdCodifierRow]] = []
+    for r in rows:
+        cv = _norm_match_snippet_vtb(r.content_vtb)
+        if not cv:
+            continue
+        score = _codifier_label_token_score(lab, cv, 5)
+        if score > 0:
+            scored.append((score, r))
+
+    if not scored:
+        return "", "", ""
+
+    top_s = max(s for s, _ in scored)
+    candidates = [row for s, row in scored if s == top_s]
+
+    fk = normalize_account_key(f_account)
+    hk = normalize_account_key(h_account)
+    jk = normalize_account_key(j_account)
+    match_spis = bool(fk and hk and fk == hk)
+    match_zach = bool(fk and jk and fk == jk)
+
+    chosen: VtbSdCodifierRow | None = None
+    if match_spis:
+        for row in candidates:
+            if _vtb_sd_op_type_is_spisanie(row.op_type):
+                chosen = row
+                break
+    if chosen is None and match_zach:
+        for row in candidates:
+            if _vtb_sd_op_type_is_zachislenie(row.op_type):
+                chosen = row
+                break
+    if chosen is None and len(candidates) == 1:
+        chosen = candidates[0]
+
+    if chosen is None:
+        return "", "", ""
+
+    opc_raw = (chosen.op_code or "").strip()
+    if _is_dash(opc_raw):
+        opc_raw = ""
+    opc = _norm_op_code(opc_raw) if opc_raw else ""
+
+    return (
+        chosen.instruction_type.strip(),
+        chosen.op_type.strip(),
+        opc,
+    )
+
+
 def _norm_op_code(s: str) -> str:
     try:
         return str(int(float(str(s).strip())))
@@ -182,11 +410,15 @@ def lookup_codifier(
     f_acc: str,
     h_acc: str,
     j_acc: str,
+    *,
+    flow_hint: str | None = None,
 ) -> tuple[str, str]:
     """
     Возвращает (тип_поручения, тип_операции).
     Операция: код из MSG + вспомогательное поле; при нескольких строках в кодификаторе —
-    различение по коду исполнения (если задан в таблице) или по зачисление/списание и F vs H/J.
+    различение по коду исполнения (если задан в таблице), затем по **flow_hint** (направление
+    по колонке «Тип операции»: подстроки **зачисление** / **списание**), затем по совпадению
+    **f_acc** со счётом списания **H** или зачисления **J** (как в ГПБ I*.MSG).
     """
     op = _norm_op_code(op_code_raw)
     if not op:
@@ -198,11 +430,11 @@ def lookup_codifier(
 
     aux = aux_code_raw.strip()
 
-    def try_exec_match() -> CodifierRow | None:
+    def try_exec_match(pool: list[CodifierRow]) -> CodifierRow | None:
         if not aux:
             return None
         a_norm = _norm_exec(aux)
-        for r in candidates:
+        for r in pool:
             if not r.exec_code.strip():
                 continue
             ex = _norm_exec(r.exec_code)
@@ -210,13 +442,33 @@ def lookup_codifier(
                 return r
         return None
 
-    m = try_exec_match()
+    m = try_exec_match(candidates)
     if m:
         return m.instruction_type, m.op_type
 
     if len(candidates) == 1:
         r = candidates[0]
         return r.instruction_type, r.op_type
+
+    def matches_flow_label(r: CodifierRow) -> bool:
+        ot = (r.op_type or "").lower()
+        if flow_hint == "debit":
+            return bool(re.search(r"списание", ot))
+        if flow_hint == "credit":
+            return bool(re.search(r"зачисление", ot))
+        return True
+
+    if flow_hint in ("debit", "credit"):
+        flow_pool = [r for r in candidates if matches_flow_label(r)]
+        if len(flow_pool) == 1:
+            r = flow_pool[0]
+            return r.instruction_type, r.op_type
+        if len(flow_pool) > 1:
+            m2 = try_exec_match(flow_pool)
+            if m2:
+                return m2.instruction_type, m2.op_type
+            r0 = flow_pool[0]
+            return r0.instruction_type, r0.op_type
 
     def nf(x: str) -> str:
         try:
@@ -241,6 +493,29 @@ def _norm_match_snippet(s: str) -> str:
     t = (s or "").strip().lower()
     t = re.sub(r"\s+", " ", t)
     return t
+
+
+# Запас от неполных совпадений: «метка (label) входит в начало ячейки кодификатора», но строки не равны
+# (напр. «Снятие ЦБ» vs «Снятие ЦБ – перевод») — такие пары не считаем совпадением.
+_CODIFIER_EXACT_MATCH_BONUS = 1_000_000
+
+
+def _codifier_label_token_score(lab: str, token: str, weight: int) -> int:
+    """
+    Очки за сопоставление нормализованной метки ``lab`` с нормализованной ячейкой кодификатора ``token``.
+
+    - Полное совпадение (exact match): ``token == lab`` — с бонусом, всегда выше неполного вложения.
+    - Неполное: только если **каталог короче или равен** и входит в метку: ``token in lab`` (и ``token != lab`` даёт строго меньший балл).
+
+    Вложение «метка в более длинный текст каталога» без равенства не считается («лишние символы в каталоге»).
+    """
+    if not lab or not token or weight <= 0:
+        return 0
+    if token == lab:
+        return _CODIFIER_EXACT_MATCH_BONUS + len(token) * weight
+    if token in lab:
+        return len(token) * weight
+    return 0
 
 
 def lookup_codifier_rsd(
@@ -317,6 +592,7 @@ def lookup_codifier_r01_operation_type(
     """
     Маппинг текста «Тип операции» из R-01 xlsx на строку кодификатора.
     Возвращает (тип_поручения, тип_операции, код_операции).
+    Полное совпадение ячейки с меткой важнее вложения метки в более длинный текст каталога.
     """
     if not (label or "").strip():
         return "", "", ""
@@ -337,10 +613,9 @@ def lookup_codifier_r01_operation_type(
         for token, weight in ((cr, 3), (ot, 2), (cg, 1)):
             if not token:
                 continue
-            if token in lab:
-                score = max(score, len(token) * weight)
-            elif lab in token and len(lab) >= 4:
-                score = max(score, min(len(lab), len(token)) * weight)
+            s = _codifier_label_token_score(lab, token, weight)
+            if s:
+                score = max(score, s)
 
         if score > best_score:
             best_score = score
@@ -368,6 +643,7 @@ def lookup_codifier_region(
     Маппинг текста «Тип операции» из отчёта REGION IS*.xls на строку кодификатора.
     Возвращает (тип_поручения, тип_операции, код_операции).
     Приоритет: «Содержание РЕГИОН», затем «Содержание РСД», «Тип операции», «Содержание ГПБ».
+    Полное совпадение ячейки с меткой важнее вложения метки в более длинный текст в кодификаторе.
     """
     if not (operation_type_label or "").strip():
         return "", "", ""
@@ -389,10 +665,9 @@ def lookup_codifier_region(
         for token, weight in ((creg, 4), (cr, 3), (ot, 2), (cg, 1)):
             if not token:
                 continue
-            if token in lab:
-                score = max(score, len(token) * weight)
-            elif lab in token and len(lab) >= 4:
-                score = max(score, min(len(lab), len(token)) * weight)
+            s = _codifier_label_token_score(lab, token, weight)
+            if s:
+                score = max(score, s)
 
         if score > best_score:
             best_score = score
@@ -452,6 +727,7 @@ def lookup_codifier_vtb(
     Маппинг этапа исполнения ВТБ СД (F752 XML) на строку кодификатора.
     Возвращает (тип_поручения, тип_операции, код_операции).
     Приоритет: «Содержание ВТБСД», затем РСД, тип операции, РЕГИОН, ГПБ.
+    Полное совпадение ячейки с меткой важнее вложения метки в более длинный текст каталога.
     Для 12002 — уточнение по «Временное изъятие» в текстах разделов src/dst.
     """
     if not (stage_name or "").strip():
@@ -474,10 +750,9 @@ def lookup_codifier_vtb(
         for token, weight in ((cv, 5), (cr, 3), (ot, 2), (creg, 2), (cg, 1)):
             if not token:
                 continue
-            if token in lab:
-                score = max(score, len(token) * weight)
-            elif lab in token and len(lab) >= 4:
-                score = max(score, min(len(lab), len(token)) * weight)
+            s = _codifier_label_token_score(lab, token, weight)
+            if s:
+                score = max(score, s)
 
         if score > 0:
             scored.append((score, r))
