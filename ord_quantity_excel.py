@@ -1,8 +1,9 @@
-"""Лист «Количество поручений»: заголовки (headers) и агрегация (aggregation) из «СВОД_операций»."""
+"""Лист «Количество поручений»: заголовки (headers), агрегация (aggregation) из «СВОД_операций» и T/Y из «REPs»."""
 
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -14,6 +15,11 @@ from openpyxl.utils import get_column_letter
 
 ORD_QUANTITY_SHEET = "Количество поручений"
 SVOD_SHEET = "СВОД_операций"
+REPS_SHEET = "REPs"
+
+# REPs: колонка «Тип сделки или иного основания» → bucket T/Y (после нормализации регистра)
+REPS_DEAL_TYPE_FOR_T = "прием цб на учет"
+REPS_DEAL_TYPE_FOR_Y = "внесение изменений"
 
 
 @dataclass
@@ -67,20 +73,26 @@ def _build_group_layouts(data: dict[str, Any]) -> list[_GroupLayout]:
     return out
 
 
+def _normalize_reps_deal_type(raw: str) -> str:
+    t = (raw or "").strip().lower().replace("ё", "е")
+    return re.sub(r"\s+", " ", t)
+
+
+def _reps_deal_type_bucket(deal_type_raw: str) -> str | None:
+    n = _normalize_reps_deal_type(deal_type_raw)
+    if n == REPS_DEAL_TYPE_FOR_T:
+        return "T"
+    if n == REPS_DEAL_TYPE_FOR_Y:
+        return "Y"
+    return None
+
+
 def _instruction_to_bucket(
     inst_raw: str,
-    op_type: str,
     type_to_bucket: dict[str, str],
 ) -> str | None:
     inst = (inst_raw or "").strip().upper()
     if not inst or inst == "-":
-        return None
-    if inst == "E":
-        low = (op_type or "").lower()
-        if "зачисление" in low and "списание" not in low:
-            return "T"
-        if "списание" in low and "зачисление" not in low:
-            return "Y"
         return None
     return type_to_bucket.get(inst)
 
@@ -175,6 +187,125 @@ def _read_svod_rows(
     return rows_out
 
 
+def _find_reps_header_row(ws, max_scan: int = 10) -> int:
+    from reps_excel import REPS_HEADERS
+
+    marker = REPS_HEADERS[0]
+    for r in range(1, max_scan + 1):
+        v = ws.cell(row=r, column=1).value
+        if v is not None and str(v).strip() == marker:
+            return r
+    return 1
+
+
+def _read_reps_rows(
+    ws,
+    year: int,
+    month: int,
+    depo_rows: list | None = None,
+) -> list[dict[str, Any]]:
+    """Строки REPs для агрегации T/Y (ГПБ): фильтр по месяцу и типу сделки."""
+    from depo_directory import lookup_depo_row_by_account_number
+
+    header_row = _find_reps_header_row(ws)
+    hdr = _header_map(ws, header_row)
+    need = [
+        "Номер операции",
+        "Дата операции",
+        "Тип сделки или иного основания",
+        "счет депо",
+        "Tab1_Счета.владелец",
+        "НГРИ",
+    ]
+    for k in need:
+        if k not in hdr:
+            raise ValueError(f"В листе «{REPS_SHEET}» нет колонки «{k}»")
+
+    rows_out: list[dict[str, Any]] = []
+    for r in range(header_row + 1, (ws.max_row or header_row) + 1):
+
+        def cell(name: str) -> str:
+            v = ws.cell(row=r, column=hdr[name]).value
+            if v is None:
+                return ""
+            return str(v).strip()
+
+        deal = cell("Тип сделки или иного основания")
+        bucket = _reps_deal_type_bucket(deal)
+        if bucket is None:
+            continue
+
+        d_raw = cell("Дата операции")
+        dt = _parse_svod_date(d_raw)
+        if dt is None or not _in_month(dt, year, month):
+            continue
+
+        acc = cell("счет депо")
+        if not acc or acc == "-":
+            continue
+
+        owner = cell("Tab1_Счета.владелец")
+        depository = ""
+        if depo_rows:
+            depo_row = lookup_depo_row_by_account_number(depo_rows, acc)
+            if depo_row:
+                depository = (depo_row.depository or "").strip()
+                if not owner:
+                    owner = (depo_row.owner or "").strip()
+
+        op_num = cell("Номер операции")
+        ngri = cell("НГРИ")
+        tech = f"{op_num}_{d_raw}_{acc}_{ngri}".strip("_")
+
+        rows_out.append(
+            {
+                "bucket": bucket,
+                "Депозитарий": depository,
+                "Владелец": owner,
+                "Счет депо": acc,
+                "por_key": tech or f"{acc}_{bucket}_{d_raw}",
+            },
+        )
+    return rows_out
+
+
+def aggregate_reps_to_matrix(
+    reps_rows: list[dict[str, Any]],
+    layout: dict[str, Any] | None = None,
+) -> tuple[dict[tuple[str, str, str], dict[str, _BucketAcc]], list[_GroupLayout]]:
+    data = layout or load_headers_layout()
+    groups = _build_group_layouts(data)
+
+    matrix: dict[tuple[str, str, str], dict[str, _BucketAcc]] = defaultdict(
+        lambda: defaultdict(_BucketAcc),
+    )
+
+    for row in reps_rows:
+        dep = (row["Депозитарий"] or "").strip() or "-"
+        owner = (row["Владелец"] or "").strip() or "-"
+        acc = row["Счет депо"].strip()
+        bucket = row["bucket"]
+        cell_key = (dep, owner, acc)
+        accm = matrix[cell_key][bucket]
+        accm.por_keys.add(row["por_key"])
+        accm.zakl_sum += 1
+
+    return matrix, groups
+
+
+def _merge_bucket_matrices(
+    primary: dict[tuple[str, str, str], dict[str, _BucketAcc]],
+    extra: dict[tuple[str, str, str], dict[str, _BucketAcc]],
+) -> dict[tuple[str, str, str], dict[str, _BucketAcc]]:
+    for cell_key, buckets in extra.items():
+        for bucket, accm in buckets.items():
+            dst = primary[cell_key][bucket]
+            dst.por_keys |= accm.por_keys
+            dst.zakl_sum += accm.zakl_sum
+            dst.list_rows += accm.list_rows
+    return primary
+
+
 def _type_to_bucket_map(groups: list[_GroupLayout]) -> dict[str, str]:
     m: dict[str, str] = {}
     for g in groups:
@@ -209,12 +340,11 @@ def aggregate_svod_to_matrix(
         owner = (row["Владелец"] or "").strip() or "-"
         acc = row["Счет депо"].strip()
         inst = row["Тип поручения"]
-        op_type = row["Тип операции"]
         tech = (row["ОдноТипОперТипРазд"] or "").strip()
         if not tech:
             tech = f"{acc}_{inst}_{row['Дата операции']}"
 
-        bucket = _instruction_to_bucket(inst, op_type, tmap)
+        bucket = _instruction_to_bucket(inst, tmap)
         if bucket is None:
             continue
 
@@ -326,6 +456,8 @@ def fill_ord_quantity_from_workbook(
     month: int,
     layout_path: Path | None = None,
 ) -> int:
+    from depo_directory import read_depo_directory_rows
+
     layout = (
         json.load(layout_path.open(encoding="utf-8"))
         if layout_path
@@ -337,6 +469,13 @@ def fill_ord_quantity_from_workbook(
 
     svod_rows = _read_svod_rows(wb[SVOD_SHEET], year, month)
     matrix, groups = aggregate_svod_to_matrix(svod_rows, layout)
+
+    if REPS_SHEET in wb.sheetnames:
+        depo_rows = read_depo_directory_rows(str(workbook_path))
+        reps_rows = _read_reps_rows(wb[REPS_SHEET], year, month, depo_rows)
+        reps_matrix, _ = aggregate_reps_to_matrix(reps_rows, layout)
+        matrix = _merge_bucket_matrices(matrix, reps_matrix)
+
     write_ord_quantity_matrix(workbook_path, matrix, groups, layout)
     return len(matrix)
 
