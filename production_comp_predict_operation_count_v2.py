@@ -4,16 +4,15 @@
 История из БД через ``ResistParameterCalculateHistory`` (как в ``optim_2_predict_operation_count_v2``).
 Тренеры и реестр ``SERIES_CONFIGS``: ``production_comparison_tsa_per_series_nb37_trainers``.
 
-Константы:
+Точка входа (entry point): singleton ``predict_count_operation``.
 
-- ``COMPARISON``: флаг режима деплоя (`True` — вызывается турнир/обновление JSON; ``False`` — типичный режим сервиса прогноза).
-  Оба API экспортируются всегда: ``run_winner_comparison`` и ``predict_count_operation``.
-- ``WINNER_CONFIG_JSON`` — путь к merge-JSON ``\"<rid>_<op>\": \"<config_name>\"`` (по умолчанию
-  текущая директория процесса: ``./comparison_winner_configs.json``).
+- ``predict_count_operation.predict(operations, resist, comparison=False)`` — прогноз (forecast)
+  по JSON победителей; формат выхода как у ``optim_2_predict_operation_count_v2``.
+- ``predict_count_operation.predict(operations, resist, comparison=True)`` — турнир конфигов
+  и merge-запись в JSON победителей.
 
-Фасад для совместимости с ``history_data`` / SLA: singleton ``predict_count_operation`` типа
-``PredictOparationCountCombo`` — формат выхода ``predict(operations, resist)`` как у
-``optim_2_predict_operation_count_v2.PredictOparationCountV2``.
+``WINNER_CONFIG_JSON`` — путь к merge-JSON ``\"<rid>_<op>\": \"<config_name>\"`` (по умолчанию
+текущая директория процесса: ``./comparison_winner_configs.json``).
 """
 
 from __future__ import annotations
@@ -35,7 +34,6 @@ if str(_ROOT) not in sys.path:
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-COMPARISON: bool = False
 WINNER_CONFIG_FILENAME: str = "comparison_winner_configs.json"
 WINNER_CONFIG_DIR: Path = Path(".")
 WINNER_CONFIG_JSON: Path = WINNER_CONFIG_DIR / WINNER_CONFIG_FILENAME
@@ -652,32 +650,66 @@ class JsonConfigSelector:
 
 
 class PredictOparationCountCombo:
-    """Прогноз без inline-турнира (tournament): конфиг из JSON-словаря."""
+    """Прогноз или турнир конфигов: режим задаётся аргументом ``comparison`` в ``predict``."""
 
     def __init__(
         self,
         *,
         winner_mapping: Mapping[str, str],
         repository: Any,
+        config_json_path: Union[str, Path] = WINNER_CONFIG_JSON,
         cleaner: Optional[OperationHistoryCleaner] = None,
         dispatcher: Optional[ConfigDispatcher] = None,
         forecaster: Optional[ProductionForecaster] = None,
+        tournament: Optional[ConfigTournamentRunner] = None,
     ) -> None:
         self._repository = repository
+        self._config_json_path = Path(config_json_path)
         self._cleaner = cleaner or OperationHistoryCleaner()
         self._dispatcher = dispatcher or ConfigDispatcher()
         self._forecaster = forecaster or ProductionForecaster(self._dispatcher)
+        self._tournament = tournament
         self._selector = JsonConfigSelector(winner_mapping)
 
-    def predict(self, operations: List[Any], resist: str) -> Dict[Any, Dict[str, Any]]:
-        query_rows = self._repository.fetch(resist)
-        oper_data = self._cleaner.format_data(operations, query_rows)
-        oper_data_valid = self._cleaner.drop_leading_zeros(oper_data)
+    def predict(
+        self,
+        operations: List[Any],
+        resist: str,
+        *,
+        comparison: bool = False,
+    ) -> Union[Dict[str, str], Dict[Any, Dict[str, Any]]]:
+        """Прогноз или турнир конфигов для одного ``resist``.
 
+        Args:
+            operations: список ``operation_id``.
+            resist: ``id`` модели нагрузки (resist).
+            comparison: ``True`` — турнир и merge в JSON победителей;
+                ``False`` — прогноз по JSON (по умолчанию).
+
+        Returns:
+            При ``comparison=True``: ``{\"<rid>_<op>\": \"<config_name>\", ...}``.
+            При ``comparison=False``: ``{operation_id: {\"YYYY-MM-DD\": float, ..., \"model\": str}}``.
+        """
         try:
             rid = int(resist)
         except (TypeError, ValueError):
             rid = 0
+
+        if comparison:
+            merged = run_comparison(
+                [rid],
+                self._repository,
+                config_json_path=self._config_json_path,
+                operations=operations,
+                tournament=self._tournament,
+                cleaner=self._cleaner,
+            )
+            self._selector._mapping.update(merged)
+            return merged
+
+        query_rows = self._repository.fetch(resist)
+        oper_data = self._cleaner.format_data(operations, query_rows)
+        oper_data_valid = self._cleaner.drop_leading_zeros(oper_data)
 
         result: Dict[Any, Dict[str, Any]] = {}
         for op_id, history in oper_data_valid.items():
@@ -719,7 +751,7 @@ def run_winner_comparison(
 ) -> Dict[str, str]:
     """Турнир по истории Django и запись победителей в ``WINNER_CONFIG_JSON`` (merge).
 
-    ``COMPARISON=True`` в деплое — использовать этот entrypoint для scheduled job."""
+    Для одного ``resist`` удобнее ``predict_count_operation.predict(..., comparison=True)``."""
     repo = repository or HistoryRepository()
     cfg_path = Path(config_json_path) if config_json_path is not None else WINNER_CONFIG_JSON
     return run_comparison(
@@ -744,4 +776,5 @@ if not _winner_mapping_at_import:
 predict_count_operation = PredictOparationCountCombo(
     winner_mapping=_winner_mapping_at_import,
     repository=HistoryRepository(),
+    config_json_path=WINNER_CONFIG_JSON,
 )
