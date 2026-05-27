@@ -1,4 +1,4 @@
-"""Лист «Количество поручений»: заголовки (headers), агрегация (aggregation) из «СВОД_операций» и T/Y из «REPs»."""
+"""Лист «ORD Количество поручений»: заголовки (headers), агрегация (aggregation) из «СВОД_операций» и T/Y из «REPs»."""
 
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ from typing import Any
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 
-ORD_QUANTITY_SHEET = "Количество поручений"
+ORD_QUANTITY_SHEET = "ORD Количество поручений"
+ORD_QUANTITY_SHEET_LEGACY = "Количество поручений"
 SVOD_SHEET = "СВОД_операций"
 REPS_SHEET = "REPs"
 
@@ -269,9 +270,17 @@ def _read_reps_rows(
     return rows_out
 
 
+@dataclass
+class _BucketAcc:
+    por_keys: set[str] = field(default_factory=set)
+    zakl_sum: int = 0
+    list_rows: int = 0
+
+
 def aggregate_reps_to_matrix(
     reps_rows: list[dict[str, Any]],
     layout: dict[str, Any] | None = None,
+    depo_rows: list[Any] | None = None,
 ) -> tuple[dict[tuple[str, str, str], dict[str, _BucketAcc]], list[_GroupLayout]]:
     data = layout or load_headers_layout()
     groups = _build_group_layouts(data)
@@ -285,7 +294,12 @@ def aggregate_reps_to_matrix(
         owner = (row["Владелец"] or "").strip() or "-"
         acc = row["Счет депо"].strip()
         bucket = row["bucket"]
-        cell_key = (dep, owner, acc)
+        cell_key = _matrix_row_key_for_account(
+            depo_rows,
+            acc,
+            depository=dep,
+            owner=owner,
+        )
         accm = matrix[cell_key][bucket]
         accm.por_keys.add(row["por_key"])
         accm.zakl_sum += 1
@@ -316,16 +330,71 @@ def _type_to_bucket_map(groups: list[_GroupLayout]) -> dict[str, str]:
     return m
 
 
-@dataclass
-class _BucketAcc:
-    por_keys: set[str] = field(default_factory=set)
-    zakl_sum: int = 0
-    list_rows: int = 0
+def _format_account_for_matrix(acc: str) -> str:
+    """Как в СВОД: чистые цифры — с ведущими нулями (leading zeros)."""
+    s = (acc or "").strip()
+    if not s:
+        return ""
+    if re.fullmatch(r"[0-9]+", s):
+        return s
+    try:
+        return str(int(float(s.replace(",", "."))))
+    except (ValueError, TypeError):
+        return s
+
+
+def _matrix_row_key_from_depo_row(row: Any) -> tuple[str, str, str]:
+    dep = (row.depository or "").strip() or "-"
+    owner = (row.owner or "").strip() or "-"
+    acc = _format_account_for_matrix(row.account_number)
+    return (dep, owner, acc)
+
+
+def _matrix_row_key_for_account(
+    depo_rows: list | None,
+    account: str,
+    *,
+    depository: str = "",
+    owner: str = "",
+) -> tuple[str, str, str]:
+    from depo_directory import lookup_depo_row_by_account_number
+
+    if depo_rows:
+        depo_row = lookup_depo_row_by_account_number(depo_rows, account)
+        if depo_row is not None:
+            return _matrix_row_key_from_depo_row(depo_row)
+    dep = (depository or "").strip() or "-"
+    ow = (owner or "").strip() or "-"
+    return (dep, ow, _format_account_for_matrix(account))
+
+
+def seed_matrix_from_depo_directory(
+    depo_rows: list[Any],
+) -> dict[tuple[str, str, str], dict[str, _BucketAcc]]:
+    """Базовые строки матрицы A–C: все счета из «Счета депо» (колонка «Номер счета депо»)."""
+    from depo_directory import normalize_account_key
+
+    matrix: dict[tuple[str, str, str], dict[str, _BucketAcc]] = defaultdict(
+        lambda: defaultdict(_BucketAcc),
+    )
+    seen_accounts: set[str] = set()
+    for row in depo_rows:
+        acc_raw = (row.account_number or "").strip()
+        if not acc_raw:
+            continue
+        acc_key = normalize_account_key(acc_raw)
+        if not acc_key or acc_key in seen_accounts:
+            continue
+        seen_accounts.add(acc_key)
+        cell_key = _matrix_row_key_from_depo_row(row)
+        _ = matrix[cell_key]
+    return matrix
 
 
 def aggregate_svod_to_matrix(
     svod_rows: list[dict[str, Any]],
     layout: dict[str, Any] | None = None,
+    depo_rows: list[Any] | None = None,
 ) -> tuple[dict[tuple[str, str, str], dict[str, _BucketAcc]], list[_GroupLayout]]:
     data = layout or load_headers_layout()
     groups = _build_group_layouts(data)
@@ -349,7 +418,12 @@ def aggregate_svod_to_matrix(
             continue
 
         qty = _parse_qty_mortgages(row["Количество закладных"])
-        cell_key = (dep, owner, acc)
+        cell_key = _matrix_row_key_for_account(
+            depo_rows,
+            acc,
+            depository=dep,
+            owner=owner,
+        )
         accm = matrix[cell_key][bucket]
         accm.zakl_sum += qty
         if bucket == "Q":
@@ -368,6 +442,8 @@ def _unmerge_all(ws) -> None:
 def ensure_ord_quantity_sheet(wb, layout: dict[str, Any] | None = None) -> Any:
     data = layout or load_headers_layout()
     name = data.get("sheet_name", ORD_QUANTITY_SHEET)
+    if name not in wb.sheetnames and ORD_QUANTITY_SHEET_LEGACY in wb.sheetnames:
+        wb[ORD_QUANTITY_SHEET_LEGACY].title = name
     if name not in wb.sheetnames:
         wb.create_sheet(name)
     ws = wb[name]
@@ -467,13 +543,24 @@ def fill_ord_quantity_from_workbook(
     if SVOD_SHEET not in wb.sheetnames:
         raise ValueError(f"В книге нет листа «{SVOD_SHEET}»")
 
+    depo_rows = read_depo_directory_rows(str(workbook_path))
+    matrix = seed_matrix_from_depo_directory(depo_rows)
+
     svod_rows = _read_svod_rows(wb[SVOD_SHEET], year, month)
-    matrix, groups = aggregate_svod_to_matrix(svod_rows, layout)
+    svod_matrix, groups = aggregate_svod_to_matrix(
+        svod_rows,
+        layout,
+        depo_rows,
+    )
+    matrix = _merge_bucket_matrices(matrix, svod_matrix)
 
     if REPS_SHEET in wb.sheetnames:
-        depo_rows = read_depo_directory_rows(str(workbook_path))
         reps_rows = _read_reps_rows(wb[REPS_SHEET], year, month, depo_rows)
-        reps_matrix, _ = aggregate_reps_to_matrix(reps_rows, layout)
+        reps_matrix, _ = aggregate_reps_to_matrix(
+            reps_rows,
+            layout,
+            depo_rows,
+        )
         matrix = _merge_bucket_matrices(matrix, reps_matrix)
 
     write_ord_quantity_matrix(workbook_path, matrix, groups, layout)
@@ -481,7 +568,7 @@ def fill_ord_quantity_from_workbook(
 
 
 def create_workbook_with_ord_quantity_template(out: Path, layout: dict[str, Any] | None = None) -> None:
-    """Создаёт xlsx с листом «Количество поручений» (только шапка)."""
+    """Создаёт xlsx с листом «ORD Количество поручений» (только шапка)."""
     data = layout or load_headers_layout()
     out.parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
@@ -492,7 +579,7 @@ def create_workbook_with_ord_quantity_template(out: Path, layout: dict[str, Any]
 
 
 def create_workbook_svod_and_ord_templates(out: Path, layout: dict[str, Any] | None = None) -> None:
-    """Книга с шапками «СВОД_операций» и «Количество поручений» (для 2026_01_Ord_Quantity.xlsx)."""
+    """Книга с шапками «СВОД_операций» и «ORD Количество поручений» (для 2026_01_Ord_Quantity.xlsx)."""
     from svod_excel import SVOD_HEADERS
 
     data = layout or load_headers_layout()
