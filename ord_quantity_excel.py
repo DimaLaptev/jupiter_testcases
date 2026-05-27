@@ -18,7 +18,8 @@ ORD_QUANTITY_SHEET_LEGACY = "Количество поручений"
 SVOD_SHEET = "СВОД_операций"
 REPS_SHEET = "REPs"
 
-# REPs: колонка «Тип сделки или иного основания» → bucket T/Y (после нормализации регистра)
+# REPs: колонка «Операция» и «Тип сделки или иного основания» → bucket T/Y
+REPS_OPERATION_FOR_TY = "перевод ценных бумаг по разделам счета депо"
 REPS_DEAL_TYPE_FOR_T = "прием цб на учет"
 REPS_DEAL_TYPE_FOR_Y = "внесение изменений"
 
@@ -85,6 +86,10 @@ def _normalize_reps_deal_type(raw: str) -> str:
     return re.sub(r"\s+", " ", t)
 
 
+def _reps_operation_for_t_y(operation_raw: str) -> bool:
+    return _normalize_reps_deal_type(operation_raw) == REPS_OPERATION_FOR_TY
+
+
 def _reps_deal_type_bucket(deal_type_raw: str) -> str | None:
     n = _normalize_reps_deal_type(deal_type_raw)
     if n == REPS_DEAL_TYPE_FOR_T:
@@ -92,6 +97,12 @@ def _reps_deal_type_bucket(deal_type_raw: str) -> str | None:
     if n == REPS_DEAL_TYPE_FOR_Y:
         return "Y"
     return None
+
+
+def _reps_row_t_y_bucket(operation_raw: str, deal_type_raw: str) -> str | None:
+    if not _reps_operation_for_t_y(operation_raw):
+        return None
+    return _reps_deal_type_bucket(deal_type_raw)
 
 
 def _instruction_to_bucket(
@@ -219,6 +230,7 @@ def _read_reps_rows(
     need = [
         "Номер операции",
         "Дата операции",
+        "Операция",
         "Тип сделки или иного основания",
         "счет депо",
         "Tab1_Счета.владелец",
@@ -238,7 +250,8 @@ def _read_reps_rows(
             return str(v).strip()
 
         deal = cell("Тип сделки или иного основания")
-        bucket = _reps_deal_type_bucket(deal)
+        operation = cell("Операция")
+        bucket = _reps_row_t_y_bucket(operation, deal)
         if bucket is None:
             continue
 
