@@ -1,10 +1,10 @@
 {
-  "sheet_name": "Количество поручений",
+  "sheet_name": "ORD Количество поручений",
   "description": "Схема колонок листа матрицы для привязки индексов в openpyxl; человекочитаемая спека — memory/Ord_Quantity_sheet_spec.md",
   "id_columns": [
     { "header": "Депозитарий", "merge_rows": 2 },
     { "header": "Владелец", "merge_rows": 2 },
-    { "header": "Счет Деп", "merge_rows": 2 }
+    { "header": "Счет Депо", "merge_rows": 2 }
   ],
   "data_groups": [
     { "merge": "Z", "subheaders": ["Пор.", "Закл"], "instruction_types": ["Z"], "metrics": ["por_keys", "zakl_sum"] },
@@ -30,7 +30,11 @@
       "merge": "Хранение комплектов",
       "subheaders": ["в пред", "DF", "DP", "в тек"],
       "placeholder": true,
-      "source": "TBD_Dks_or_manual"
+      "storage_subcolumns": {
+        "DF": ["DF"],
+        "DP": ["DP"]
+      },
+      "source": "SVOD_DF_DP"
     },
     { "merge": "S(u)", "subheaders": ["Закл", "Лист"], "placeholder": true, "source": "TBD" },
     { "merge": "S(b)", "subheaders": ["Закл", "Лист"], "placeholder": true, "source": "TBD" },

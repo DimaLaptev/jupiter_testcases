@@ -33,6 +33,7 @@ class _GroupLayout:
     instruction_types: list[str]
     metrics: list[str]
     skip_por: bool
+    storage_subcolumns: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _project_root() -> Path:
@@ -58,6 +59,10 @@ def _build_group_layouts(data: dict[str, Any]) -> list[_GroupLayout]:
         it = list(g.get("instruction_types") or [])
         met = list(g.get("metrics") or [])
         sk = bool(g.get("skip_por"))
+        storage = {
+            str(k): list(v)
+            for k, v in (g.get("storage_subcolumns") or {}).items()
+        }
         out.append(
             _GroupLayout(
                 merge=str(g["merge"]),
@@ -68,6 +73,7 @@ def _build_group_layouts(data: dict[str, Any]) -> list[_GroupLayout]:
                 instruction_types=it,
                 metrics=met,
                 skip_por=sk,
+                storage_subcolumns=storage,
             ),
         )
         col += w
@@ -323,6 +329,9 @@ def _merge_bucket_matrices(
 def _type_to_bucket_map(groups: list[_GroupLayout]) -> dict[str, str]:
     m: dict[str, str] = {}
     for g in groups:
+        for sub_name, types in g.storage_subcolumns.items():
+            for t in types:
+                m[t.strip().upper()] = sub_name.strip().upper()
         if g.placeholder:
             continue
         for t in g.instruction_types:
@@ -503,6 +512,20 @@ def write_ord_quantity_matrix(
         buckets = matrix[(dep, owner, acc)]
 
         for g in groups:
+            if g.storage_subcolumns:
+                for j, sub in enumerate(g.subheaders):
+                    sub_key = sub.strip().upper()
+                    if sub_key in g.storage_subcolumns:
+                        accm = buckets.get(sub_key)
+                        ws.cell(
+                            row=row_idx,
+                            column=g.start_col + j,
+                            value=len(accm.por_keys) if accm else 0,
+                        )
+                    else:
+                        ws.cell(row=row_idx, column=g.start_col + j, value=0)
+                continue
+
             if g.placeholder:
                 for j in range(g.width):
                     ws.cell(row=row_idx, column=g.start_col + j, value=0)
