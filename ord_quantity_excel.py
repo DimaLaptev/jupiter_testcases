@@ -115,6 +115,35 @@ def _instruction_to_bucket(
     return type_to_bucket.get(inst)
 
 
+def _svod_instruction_bucket(
+    inst_raw: str,
+    debit_acc: str,
+    credit_acc: str,
+    depo_rows: list | None,
+    type_to_bucket: dict[str, str],
+) -> str | None:
+    """Маппинг «Тип поручения» → группа колонок; P/F → XP/XF при одном владельце счетов H/J."""
+    inst = (inst_raw or "").strip().upper()
+    if not inst or inst == "-":
+        return None
+    if inst in ("P", "F"):
+        from depo_directory import depo_account_owners_equal
+
+        h = (debit_acc or "").strip()
+        j = (credit_acc or "").strip()
+        if (
+            depo_rows
+            and h
+            and h != "-"
+            and j
+            and j != "-"
+            and depo_account_owners_equal(depo_rows, h, j)
+        ):
+            return "XP" if inst == "P" else "XF"
+        return type_to_bucket.get(inst)
+    return type_to_bucket.get(inst)
+
+
 def _parse_svod_date(s: str) -> datetime | None:
     s = (s or "").strip()
     if not s or s == "-":
@@ -165,6 +194,8 @@ def _read_svod_rows(
         "Тип операции",
         "Владелец",
         "Счет депо",
+        "Счет списания",
+        "Счет зачисления",
         "Количество закладных",
         "Тип поручения",
         "ОдноТипОперТипРазд",
@@ -197,6 +228,8 @@ def _read_svod_rows(
                 "Тип операции": cell("Тип операции"),
                 "Владелец": cell("Владелец"),
                 "Счет депо": acc,
+                "Счет списания": cell("Счет списания"),
+                "Счет зачисления": cell("Счет зачисления"),
                 "Количество закладных": cell("Количество закладных"),
                 "Тип поручения": cell("Тип поручения"),
                 "ОдноТипОперТипРазд": cell("ОдноТипОперТипРазд"),
@@ -435,7 +468,13 @@ def aggregate_svod_to_matrix(
         if not tech:
             tech = f"{acc}_{inst}_{row['Дата операции']}"
 
-        bucket = _instruction_to_bucket(inst, tmap)
+        bucket = _svod_instruction_bucket(
+            inst,
+            row.get("Счет списания", ""),
+            row.get("Счет зачисления", ""),
+            depo_rows,
+            tmap,
+        )
         if bucket is None:
             continue
 
