@@ -13,6 +13,20 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 # Вторая таблица (остатки) — не парсить
 R01_HOLDINGS_MARKER = "ценные бумаги, учитываемые на счете депо"
+R01_DEPO_ACCOUNT_LEN = 12
+
+
+def normalize_r01_depo_account(acc: str) -> str:
+    """
+    Номер счёта депо R-01: эталон — 12 цифр.
+    Если не хватает ровно 3 символа (9 цифр) и счёт начинается с «3» — дописать «000» в начало.
+    """
+    s = (acc or "").replace(" ", "").strip()
+    if not s or not s.isdigit():
+        return s
+    if len(s) == R01_DEPO_ACCOUNT_LEN - 3 and s.startswith("3"):
+        return "000" + s
+    return s
 
 
 @dataclass
@@ -71,8 +85,8 @@ def _pick_sheet(wb) -> Any:
 
 
 def find_r01_depo_account(ws: Worksheet) -> str:
-    """Номер счёта депо в шапке: 11–12 цифр рядом с «депо»/«счет»."""
-    acc_re = re.compile(r"^(\d{11,14})$")
+    """Номер счёта депо в шапке: 9 (с «3»…) или 11–14 цифр рядом с «депо»/«счет»."""
+    acc_re = re.compile(r"^(\d{9}|\d{11,14})$")
     for r in range(1, min(55, (ws.max_row or 55) + 1)):
         for c in range(1, min(14, (ws.max_column or 14) + 1)):
             raw = _cell_value_str(ws.cell(row=r, column=c).value)
@@ -87,10 +101,7 @@ def find_r01_depo_account(ws: Worksheet) -> str:
                         continue
                     ctx += _norm_scan(_cell_value_str(ws.cell(row=rr, column=cc).value))
             if "депо" in ctx or "счет" in ctx or "счёт" in ctx:
-                try:
-                    return str(int(compact))
-                except ValueError:
-                    return compact
+                return normalize_r01_depo_account(compact)
     return ""
 
 
@@ -155,7 +166,7 @@ def parse_r01_xlsx(path: Path) -> R01ParseResult | None:
         return None
     try:
         ws = _pick_sheet(wb)
-        depo = find_r01_depo_account(ws)
+        depo = normalize_r01_depo_account(find_r01_depo_account(ws))
         hr, cmap = find_operations_table_header(ws)
         if not hr or not cmap:
             return None
