@@ -92,6 +92,7 @@ ERRORS_SHEET_HEADERS = [
 
 REGION_ERROR_FILENAME_PARSE = "region_filename_parse"
 REGION_ERROR_ACCOUNT_MISMATCH = "region_filename_account_mismatch"
+REGION_ERROR_CODIFIER_INCOMPLETE = "region_codifier_incomplete"
 
 VTB_ERROR_BASIS_NO_CONTRACT = "vtb_basis_no_contract"
 VTB_ERROR_DEPO_NO_MATCH = "vtb_depo_no_match"
@@ -722,11 +723,8 @@ def build_svod_row_rsd(
     owner = owner_row.owner if owner_row else (depo_by_client.owner if depo_by_client else "")
 
     nrn = parts[RsdIField.NRN].strip() if len(parts) > RsdIField.NRN else ""
-    qty = (
-        parts[RsdIField.QTY].strip()
-        if len(parts) > RsdIField.QTY
-        else "1"
-    ) or "1"
+    # РСД: колонка «Количество закладных» всегда 1 (не поле QTY строки I*.MSG).
+    qty = "1"
 
     tech = svod_technical_key(f_raw, g_raw, inst_type, op_date)
 
@@ -1016,6 +1014,12 @@ def build_svod_row_region(
     op_code_cell = op_code.strip() if op_code.strip() else SVOD_DASH
     op_resolved = op_type.strip()
 
+    codifier_incomplete = (
+        not (op_code or "").strip()
+        or not (op_type or "").strip()
+        or not (inst_type or "").strip()
+    )
+
     fa, fs = (result.from_acc or "").strip(), (result.from_sec or "").strip()
     ta, ts = (result.to_acc or "").strip(), (result.to_sec or "").strip()
     token = (result.filename_account or "").strip()
@@ -1114,29 +1118,40 @@ def build_svod_row_region(
 
     tech = svod_technical_key(f_raw, g_raw, inst_cell, op_date)
 
-    return (
-        [
-            op_date,
-            depository,
-            op_code_cell,
-            op_type_disp,
-            owner,
-            f_raw,
-            g_raw,
-            h_acc,
-            i_sec,
-            j_acc,
-            k_sec,
-            nrn,
-            "1",
-            inst_cell,
-            "",
-            basis,
-            tech,
-            result.path.name,
-        ],
-        None,
-    )
+    svod_row = [
+        op_date,
+        depository,
+        op_code_cell,
+        op_type_disp,
+        owner,
+        f_raw,
+        g_raw,
+        h_acc,
+        i_sec,
+        j_acc,
+        k_sec,
+        nrn,
+        "1",
+        inst_cell,
+        "",
+        basis,
+        tech,
+        result.path.name,
+    ]
+    if codifier_incomplete:
+        detail = (
+            f"метка={cod_label!r}; код={op_code_cell!r}; "
+            f"тип_оп={op_type_disp!r}; тип_пор={inst_cell!r}"
+        )
+        return svod_row, region_error_row_region(
+            result,
+            table_row,
+            reason=REGION_ERROR_CODIFIER_INCOMPLETE,
+            doc_detail=detail[:800],
+            op_date=op_date,
+        )
+
+    return (svod_row, None)
 
 
 def ensure_svod_sheet(wb) -> None:
