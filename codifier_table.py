@@ -827,6 +827,28 @@ def normalize_svod_document_op_type_display(op_type: str) -> str:
     return t.strip()
 
 
+def lookup_codifier_fields_by_instruction_type(
+    rows: list[CodifierRow],
+    instruction_type_raw: str,
+) -> tuple[str, str]:
+    """«Код операции» и «Тип операции» по «Тип поручения» (лист «Коды»)."""
+    inst = instruction_type_raw.strip().upper()
+    if not inst:
+        return "", ""
+    op_code = ""
+    op_type = ""
+    for r in rows:
+        if r.instruction_type.strip().upper() != inst:
+            continue
+        if r.op_code.strip() and not op_code:
+            op_code = r.op_code.strip()
+        if r.op_type.strip() and not op_type:
+            op_type = r.op_type.strip()
+        if op_code and op_type:
+            break
+    return op_code, op_type
+
+
 def lookup_document_op_type_by_instruction(
     rows: list[CodifierRow],
     instruction_type_raw: str,

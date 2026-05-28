@@ -23,6 +23,11 @@ REPS_OPERATION_FOR_TY = "перевод ценных бумаг по разде�
 REPS_DEAL_TYPE_FOR_T = "прием цб на учет"
 REPS_DEAL_TYPE_FOR_Y = "внесение изменений"
 
+# «Пор.» по одному ключу на файл-источник (ГПБ / REGION / ВТБ СД)
+FILENAME_POR_BUCKETS = frozenset(
+    {"T", "Y", "RF", "RP", "VF", "VP", "F", "P", "XP", "XF"},
+)
+
 
 @dataclass
 class _GroupLayout:
@@ -105,6 +110,66 @@ def _reps_row_t_y_bucket(operation_raw: str, deal_type_raw: str) -> str | None:
     return _reps_deal_type_bucket(deal_type_raw)
 
 
+def _normalize_source_filename(name: str) -> str:
+    return (name or "").strip().casefold()
+
+
+def _is_rsd_depository(depository: str) -> bool:
+    d = (depository or "").strip().casefold()
+    return "рсд" in d
+
+
+def _svod_row_uses_filename_por_key(
+    bucket: str,
+    source_filename: str,
+    depository: str,
+) -> bool:
+    """ГПБ / REGION / ВТБ СД: для T,Y,RF,RP,VF,VP,F,P,XP,XF — одно «Пор.» на имя файла (Источник)."""
+    if bucket not in FILENAME_POR_BUCKETS:
+        return False
+    name = (source_filename or "").strip()
+    if not name:
+        return False
+    low = name.lower()
+    dep_cf = (depository or "").strip().casefold()
+    stem = Path(name).stem.upper()
+
+    if low.endswith(".xml"):
+        return True
+    if "втб" in dep_cf and "сд" in dep_cf:
+        return True
+
+    if stem.startswith("IS") and low.endswith((".xls", ".xlsx")):
+        return True
+    if "регион" in dep_cf and low.endswith((".xls", ".xlsx")):
+        return True
+
+    if _is_rsd_depository(depository):
+        return False
+    if re.match(r"^R-01", stem, re.IGNORECASE):
+        return False
+    if re.match(r"^I_.*\.MSG$", name, re.IGNORECASE):
+        return True
+    if re.match(r"^D_.*\.MSG$", name, re.IGNORECASE):
+        return True
+    if re.match(r"^REP[_-]", name, re.IGNORECASE) and low.endswith((".xls", ".xlsx")):
+        return True
+    return False
+
+
+def _por_key_for_svod_row(
+    row: dict[str, Any],
+    bucket: str,
+    tech: str,
+) -> str:
+    source = row.get("Источник", "")
+    dep = row.get("Депозитарий", "")
+    if _svod_row_uses_filename_por_key(bucket, source, dep):
+        key = _normalize_source_filename(source)
+        return key or tech
+    return tech
+
+
 def _instruction_to_bucket(
     inst_raw: str,
     type_to_bucket: dict[str, str],
@@ -112,35 +177,6 @@ def _instruction_to_bucket(
     inst = (inst_raw or "").strip().upper()
     if not inst or inst == "-":
         return None
-    return type_to_bucket.get(inst)
-
-
-def _svod_instruction_bucket(
-    inst_raw: str,
-    debit_acc: str,
-    credit_acc: str,
-    depo_rows: list | None,
-    type_to_bucket: dict[str, str],
-) -> str | None:
-    """Маппинг «Тип поручения» → группа колонок; P/F → XP/XF при одном владельце счетов H/J."""
-    inst = (inst_raw or "").strip().upper()
-    if not inst or inst == "-":
-        return None
-    if inst in ("P", "F"):
-        from depo_directory import depo_account_owners_equal
-
-        h = (debit_acc or "").strip()
-        j = (credit_acc or "").strip()
-        if (
-            depo_rows
-            and h
-            and h != "-"
-            and j
-            and j != "-"
-            and depo_account_owners_equal(depo_rows, h, j)
-        ):
-            return "XP" if inst == "P" else "XF"
-        return type_to_bucket.get(inst)
     return type_to_bucket.get(inst)
 
 
@@ -194,11 +230,10 @@ def _read_svod_rows(
         "Тип операции",
         "Владелец",
         "Счет депо",
-        "Счет списания",
-        "Счет зачисления",
         "Количество закладных",
         "Тип поручения",
         "ОдноТипОперТипРазд",
+        "Источник",
     ]
     for k in need:
         if k not in hdr:
@@ -228,11 +263,10 @@ def _read_svod_rows(
                 "Тип операции": cell("Тип операции"),
                 "Владелец": cell("Владелец"),
                 "Счет депо": acc,
-                "Счет списания": cell("Счет списания"),
-                "Счет зачисления": cell("Счет зачисления"),
                 "Количество закладных": cell("Количество закладных"),
                 "Тип поручения": cell("Тип поручения"),
                 "ОдноТипОперТипРазд": cell("ОдноТипОперТипРазд"),
+                "Источник": cell("Источник"),
             },
         )
     return rows_out
@@ -268,6 +302,7 @@ def _read_reps_rows(
         "счет депо",
         "Tab1_Счета.владелец",
         "НГРИ",
+        "Источник",
     ]
     for k in need:
         if k not in hdr:
@@ -308,7 +343,9 @@ def _read_reps_rows(
 
         op_num = cell("Номер операции")
         ngri = cell("НГРИ")
+        source = cell("Источник")
         tech = f"{op_num}_{d_raw}_{acc}_{ngri}".strip("_")
+        por_key = _normalize_source_filename(source) or tech or f"{acc}_{bucket}_{d_raw}"
 
         rows_out.append(
             {
@@ -316,7 +353,7 @@ def _read_reps_rows(
                 "Депозитарий": depository,
                 "Владелец": owner,
                 "Счет депо": acc,
-                "por_key": tech or f"{acc}_{bucket}_{d_raw}",
+                "por_key": por_key,
             },
         )
     return rows_out
@@ -468,13 +505,7 @@ def aggregate_svod_to_matrix(
         if not tech:
             tech = f"{acc}_{inst}_{row['Дата операции']}"
 
-        bucket = _svod_instruction_bucket(
-            inst,
-            row.get("Счет списания", ""),
-            row.get("Счет зачисления", ""),
-            depo_rows,
-            tmap,
-        )
+        bucket = _instruction_to_bucket(inst, tmap)
         if bucket is None:
             continue
 
@@ -490,7 +521,7 @@ def aggregate_svod_to_matrix(
         if bucket == "Q":
             accm.list_rows += 1
         else:
-            accm.por_keys.add(tech)
+            accm.por_keys.add(_por_key_for_svod_row(row, bucket, tech))
 
     return matrix, groups
 
@@ -538,6 +569,17 @@ def ensure_ord_quantity_sheet(wb, layout: dict[str, Any] | None = None) -> Any:
     return ws
 
 
+def _storage_v_tek_formula(row_idx: int, group: _GroupLayout) -> str:
+    """«в тек» = «в пред» + DF − DP (эталон: =AD+AE−AF при текущей схеме колонок)."""
+    letters: dict[str, str] = {}
+    for j, sub in enumerate(group.subheaders):
+        letters[sub.strip()] = get_column_letter(group.start_col + j)
+    r = row_idx
+    return (
+        f"={letters['в пред']}{r}+{letters['DF']}{r}-{letters['DP']}{r}"
+    )
+
+
 def write_ord_quantity_matrix(
     path: Path,
     matrix: dict[tuple[str, str, str], dict[str, _BucketAcc]],
@@ -567,15 +609,22 @@ def write_ord_quantity_matrix(
             if g.storage_subcolumns:
                 for j, sub in enumerate(g.subheaders):
                     sub_key = sub.strip().upper()
-                    if sub_key in g.storage_subcolumns:
+                    col = g.start_col + j
+                    if sub.strip() == "в тек":
+                        ws.cell(
+                            row=row_idx,
+                            column=col,
+                            value=_storage_v_tek_formula(row_idx, g),
+                        )
+                    elif sub_key in g.storage_subcolumns:
                         accm = buckets.get(sub_key)
                         ws.cell(
                             row=row_idx,
-                            column=g.start_col + j,
+                            column=col,
                             value=len(accm.por_keys) if accm else 0,
                         )
                     else:
-                        ws.cell(row=row_idx, column=g.start_col + j, value=0)
+                        ws.cell(row=row_idx, column=col, value=0)
                 continue
 
             if g.placeholder:

@@ -12,6 +12,7 @@ from codifier_table import (
     CodifierRow,
     fallback_document_op_type,
     lookup_codifier,
+    lookup_codifier_fields_by_instruction_type,
     lookup_codifier_r01_operation_type,
     lookup_codifier_region,
     lookup_codifier_rsd,
@@ -31,6 +32,7 @@ from depo_directory import (
     lookup_depo_row_by_account_number,
     lookup_depo_row_by_client_id,
     lookup_depo_row_vtb_account_owner_filter,
+    depo_account_owners_equal,
     normalize_account_key,
 )
 from gpb_d_msg import DMsgDataRow, DMsgFile, instruction_type_df_dp
@@ -161,6 +163,39 @@ def svod_technical_key_vtb(
         return base
     safe = re.sub(r"[^\w\-.:]+", "_", n, flags=re.UNICODE)
     return f"{base}_{safe}"
+
+
+def reclassify_pf_to_xp_xf_for_same_owner(
+    inst_type: str,
+    op_type: str,
+    op_code: str,
+    debit_acc: str,
+    credit_acc: str,
+    depo_rows: list[DepoDirectoryRow],
+    codifier_rows: list[CodifierRow],
+) -> tuple[str, str, str]:
+    """P/F → XP/XF при одном «Владелец счета депо» у счетов списания/зачисления; поля из «Коды»."""
+    inst = (inst_type or "").strip().upper()
+    if inst not in ("P", "F"):
+        return inst_type, op_type, op_code
+
+    h = (debit_acc or "").strip()
+    j = (credit_acc or "").strip()
+    if not h or h == SVOD_DASH or not j or j == SVOD_DASH:
+        return inst_type, op_type, op_code
+    if not depo_account_owners_equal(depo_rows, h, j):
+        return inst_type, op_type, op_code
+
+    new_inst = "XP" if inst == "P" else "XF"
+    new_code, new_op_type = lookup_codifier_fields_by_instruction_type(
+        codifier_rows,
+        new_inst,
+    )
+    return (
+        new_inst,
+        new_op_type.strip() or op_type,
+        new_code.strip() or op_code,
+    )
 
 
 def depository_fallback_from_source_path(path: Path) -> str:
@@ -642,6 +677,16 @@ def build_svod_row(
         flow_hint=flow_hint,
     )
 
+    inst_type, op_type, op_code = reclassify_pf_to_xp_xf_for_same_owner(
+        inst_type,
+        op_type,
+        op_code,
+        h_acc,
+        j_acc,
+        depo_rows,
+        codifier_rows,
+    )
+
     owner_row = lookup_depo_row_by_account_number(depo_rows, f_svod or f_raw)
     owner = owner_row.owner if owner_row else (depo_by_client.owner if depo_by_client else "")
 
@@ -715,6 +760,16 @@ def build_svod_row_rsd(
         op_type,
     )
 
+    inst_type, op_type, op_code = reclassify_pf_to_xp_xf_for_same_owner(
+        inst_type,
+        op_type,
+        op_code,
+        h_acc,
+        j_acc,
+        depo_rows,
+        codifier_rows,
+    )
+
     depo_by_client = lookup_depo_row_by_client_id(depo_rows, client_id)
     depository = (depo_by_client.depository if depo_by_client else "").strip()
     if not depository:
@@ -779,6 +834,16 @@ def build_svod_row_r01(
         f_raw,
         g_raw,
         op_type,
+    )
+
+    inst_type, op_type, op_code = reclassify_pf_to_xp_xf_for_same_owner(
+        inst_type,
+        op_type,
+        op_code,
+        h_acc,
+        j_acc,
+        depo_rows,
+        codifier_rows,
     )
 
     owner_row = lookup_depo_row_by_account_number(depo_rows, f_raw)
@@ -930,6 +995,17 @@ def build_svod_row_vtb(
             src_sections_blob=src_blob,
             dst_sections_blob=dst_blob,
         )
+
+    inst_type, op_type, op_code = reclassify_pf_to_xp_xf_for_same_owner(
+        inst_type,
+        op_type,
+        op_code,
+        h_acc,
+        j_acc,
+        depo_rows,
+        codifier_rows,
+    )
+
     op_code_cell = op_code if op_code else SVOD_DASH
     if not (op_type or "").strip():
         op_type = SVOD_DASH
@@ -1105,6 +1181,18 @@ def build_svod_row_region(
     i_sec = _format_section_cell(i_sec) or i_sec
     j_acc = _format_depo_account_cell(j_acc) or j_acc
     k_sec = _format_section_cell(k_sec) or k_sec
+
+    inst_type, op_type, op_code = reclassify_pf_to_xp_xf_for_same_owner(
+        inst_type,
+        op_type,
+        op_code,
+        h_acc,
+        j_acc,
+        depo_rows,
+        codifier_rows,
+    )
+    op_type_disp = op_type.strip() if op_type.strip() else SVOD_DASH
+    op_code_cell = op_code.strip() if op_code.strip() else SVOD_DASH
 
     owner_row = lookup_depo_row_by_account_number(depo_rows, f_raw)
     depository = (owner_row.depository if owner_row else "").strip()
