@@ -1,11 +1,5 @@
-"""SQLite ETL: замена VBA-макросов загрузки в staging-таблицы."""
+"""Загрузчики — импорт для регистрации в LOADER_REGISTRY."""
 
-from sql_upload.connection import DEFAULT_DB_PATH, open_db
-from sql_upload.pipeline import DEFAULT_PIPELINE_ORDER, run_pipeline
+from sql_upload.loaders import gpb, region, region2, rsd, rsd_dop, vtb
 
-__all__ = [
-    "DEFAULT_DB_PATH",
-    "DEFAULT_PIPELINE_ORDER",
-    "open_db",
-    "run_pipeline",
-]
+__all__ = ["gpb", "region", "region2", "rsd", "rsd_dop", "vtb"]
