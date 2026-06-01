@@ -1,0 +1,15 @@
+# Пути к каталогам отчётов (аналог Sheet1 колонка B в VBA).
+paths:
+  gpb: "2026_01/GPB"
+  vtb: "2026_01/VTBSD"
+  region: "2026_01/REGION"
+  rsd: "2026_01/RSD/I"
+  rsd_dop: "2026_01/RSD/R01"
+
+# Порядок шагов legacy ETL (как в VBA_upload_macros_guide.md).
+pipeline:
+  - gpb
+  - region2
+  - vtb
+  - rsd
+  - rsd_dop
