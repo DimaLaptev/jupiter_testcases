@@ -22,6 +22,7 @@ REPS_SHEET = "REPs"
 REPS_OPERATION_FOR_TY = "перевод ценных бумаг по разделам счета депо"
 REPS_DEAL_TYPE_FOR_T = "прием цб на учет"
 REPS_DEAL_TYPE_FOR_Y = "внесение изменений"
+REPS_REFUSAL_OP_NUM = "отказ"
 
 # «Пор.» по одному ключу на файл-источник (ГПБ / REGION / ВТБ СД)
 FILENAME_POR_BUCKETS = frozenset(
@@ -102,6 +103,11 @@ def _reps_deal_type_bucket(deal_type_raw: str) -> str | None:
     if n == REPS_DEAL_TYPE_FOR_Y:
         return "Y"
     return None
+
+
+def _reps_operation_number_is_refusal(op_num_raw: str) -> bool:
+    """Строки REPs с «Номер операции» = ОТКАЗ не учитываются в ORD Количество поручений."""
+    return _normalize_reps_deal_type(op_num_raw) == REPS_REFUSAL_OP_NUM
 
 
 def _reps_row_t_y_bucket(operation_raw: str, deal_type_raw: str) -> str | None:
@@ -316,6 +322,9 @@ def _read_reps_rows(
             if v is None:
                 return ""
             return str(v).strip()
+
+        if _reps_operation_number_is_refusal(cell("Номер операции")):
+            continue
 
         deal = cell("Тип сделки или иного основания")
         operation = cell("Операция")

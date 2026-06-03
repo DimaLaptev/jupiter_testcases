@@ -78,6 +78,14 @@ def _col_content_vtb(col_map: dict[str, int]) -> int | None:
     return None
 
 
+def _col_content_rsd(col_map: dict[str, int]) -> int | None:
+    """Колонка «Содержание РСД (для R-01, R-05)» или короткий заголовок."""
+    for key, idx in col_map.items():
+        if "содержание" in key and "рсд" in key:
+            return idx
+    return None
+
+
 def _cell(ws, r: int, col: int | None) -> str:
     if not col:
         return ""
@@ -114,7 +122,7 @@ def read_codifier_rows(workbook_path: str, sheet_name: str = "Коды") -> list
     c_ex = col("код исполнения")
     c_type = col("тип операции")
     c_gpb = col("содержание гпб")
-    c_rsd = col("содержание рсд")
+    c_rsd = col("содержание рсд") or _col_content_rsd(col_map)
     c_inst = col("тип поручения")
     c_com = col("комментарий")
     c_gpb_rep = _col_content_gpb_rep(col_map)
@@ -490,7 +498,9 @@ def lookup_codifier(
 
 
 def _norm_match_snippet(s: str) -> str:
-    t = (s or "").strip().lower()
+    t = (s or "").replace("\u00a0", " ").replace("\u202f", " ")
+    t = t.strip().lower()
+    t = t.replace("ё", "е")
     t = re.sub(r"\s+", " ", t)
     return t
 
@@ -585,6 +595,74 @@ def lookup_codifier_rsd(
     return chosen.instruction_type, chosen.op_type
 
 
+def _r01_label_flow_hint(label: str) -> str | None:
+    """Зачисление / списание по тексту «Тип операции» R-01."""
+    t = _norm_match_snippet(label)
+    has_z = "зачисление" in t
+    has_s = "списание" in t
+    if has_z and not has_s:
+        return "credit"
+    if has_s and not has_z:
+        return "debit"
+    return None
+
+
+def _r01_row_matches_flow(row: CodifierRow, flow: str) -> bool:
+    blob = _norm_match_snippet(f"{row.content_rsd} {row.op_type}")
+    if flow == "credit":
+        return "зачисление" in blob
+    if flow == "debit":
+        return "списание" in blob
+    return False
+
+
+def _disambiguate_r01_codifier_candidates(
+    label: str,
+    candidates: list[CodifierRow],
+) -> CodifierRow:
+    if len(candidates) == 1:
+        return candidates[0]
+
+    flow = _r01_label_flow_hint(label)
+    if flow:
+        matched = [r for r in candidates if _r01_row_matches_flow(r, flow)]
+        if len(matched) == 1:
+            return matched[0]
+        if matched:
+            candidates = matched
+        if flow == "credit":
+            for r in candidates:
+                if _norm_exec(r.exec_code) == "0011":
+                    return r
+        elif flow == "debit":
+            for r in candidates:
+                if _norm_exec(r.exec_code) == "1100":
+                    return r
+
+    with_rsd = [r for r in candidates if (r.content_rsd or "").strip()]
+    if len(with_rsd) == 1:
+        return with_rsd[0]
+    if with_rsd:
+        candidates = with_rsd
+
+    return candidates[0]
+
+
+def _score_r01_codifier_row(lab: str, row: CodifierRow) -> int:
+    score = 0
+    cr = _norm_match_snippet(row.content_rsd)
+    ot = _norm_match_snippet(row.op_type)
+    cg = _norm_match_snippet(row.content_gpb)
+
+    for token, weight in ((cr, 3), (ot, 2), (cg, 1)):
+        if not token:
+            continue
+        s = _codifier_label_token_score(lab, token, weight)
+        if s:
+            score = max(score, s)
+    return score
+
+
 def lookup_codifier_r01_operation_type(
     rows: list[CodifierRow],
     label: str,
@@ -592,7 +670,7 @@ def lookup_codifier_r01_operation_type(
     """
     Маппинг текста «Тип операции» из R-01 xlsx на строку кодификатора.
     Возвращает (тип_поручения, тип_операции, код_операции).
-    Полное совпадение ячейки с меткой важнее вложения метки в более длинный текст каталога.
+    Приоритет: «Содержание РСД», затем «Тип операции», «Содержание ГПБ».
     """
     if not (label or "").strip():
         return "", "", ""
@@ -601,36 +679,39 @@ def lookup_codifier_r01_operation_type(
     if not lab:
         return "", "", ""
 
-    best: CodifierRow | None = None
+    scored: list[tuple[int, CodifierRow]] = []
     best_score = 0
 
     for r in rows:
-        score = 0
-        cr = _norm_match_snippet(r.content_rsd)
-        ot = _norm_match_snippet(r.op_type)
-        cg = _norm_match_snippet(r.content_gpb)
+        score = _score_r01_codifier_row(lab, r)
+        if score > 0:
+            scored.append((score, r))
+            best_score = max(best_score, score)
 
-        for token, weight in ((cr, 3), (ot, 2), (cg, 1)):
-            if not token:
-                continue
-            s = _codifier_label_token_score(lab, token, weight)
-            if s:
-                score = max(score, s)
+    chosen: CodifierRow | None = None
+    if scored:
+        tied = [r for s, r in scored if s == best_score]
+        chosen = _disambiguate_r01_codifier_candidates(label, tied)
+    elif "перевод между разделами" in lab:
+        rsd_candidates = [
+            r
+            for r in rows
+            if (r.content_rsd or "").strip()
+            and "перевод между разделами" in _norm_match_snippet(r.content_rsd)
+        ]
+        if rsd_candidates:
+            chosen = _disambiguate_r01_codifier_candidates(label, rsd_candidates)
 
-        if score > best_score:
-            best_score = score
-            best = r
-
-    if best is None or best_score == 0:
+    if chosen is None:
         return "", "", ""
 
-    opc_raw = (best.op_code or "").strip()
+    opc_raw = (chosen.op_code or "").strip()
     if _is_dash(opc_raw):
         opc_raw = ""
     opc = _norm_op_code(opc_raw) if opc_raw else ""
     return (
-        best.instruction_type.strip(),
-        best.op_type.strip(),
+        chosen.instruction_type.strip(),
+        chosen.op_type.strip(),
         opc,
     )
 

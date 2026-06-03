@@ -810,20 +810,12 @@ def build_svod_row_r01(
     data: R01DataRow,
     depo_rows: list[DepoDirectoryRow],
     codifier_rows: list[CodifierRow],
-    *,
-    skip_instruction_e: bool = True,
 ) -> list | None:
     """Одна строка «СВОД_операций» из отчёта РСД R-01 *.xlsx."""
-    low_op = data.operation_type.lower()
-    if skip_instruction_e and "перевод между разделами" in low_op:
-        return None
-
     inst_type, op_type, op_code = lookup_codifier_r01_operation_type(
         codifier_rows,
         data.operation_type,
     )
-    if skip_instruction_e and inst_type.strip().upper() == "E":
-        return None
 
     f_raw = _format_depo_account_cell(result.depo_account) or result.depo_account.strip()
     g_raw = parse_section_code(data.section_raw)

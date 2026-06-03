@@ -12,21 +12,33 @@ _SRC = _ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from codifier_table import read_codifier_rows
+from codifier_table import read_codifier_rows, read_vtb_sd_codifier_rows
 from depo_directory import read_depo_directory_rows
 from gpb_d_msg import parse_d_msg_file
-from gpb_i_msg import parse_i_msg_file, passes_execution_filter
+from gpb_i_msg import (
+    gpb_instruction_pair_key,
+    is_gpb_i_row,
+    normalize_ngri_for_match,
+    parse_i_msg_file,
+    passes_execution_filter,
+)
 from openpyxl import Workbook, load_workbook
 from rsd_i_msg import (
-    is_gpb_i_row,
     is_rsd_i_row,
     is_rsd_technical_row,
     rsd_execution_code,
 )
-from region_is_xls import RegionTableRow, parse_region_is_xls
+from region_is_xls import (
+    REGION_PARSE_SKIP_BAD_NAME,
+    REGION_PARSE_SKIP_UNREADABLE,
+    RegionTableRow,
+    parse_region_is_xls,
+)
 from rsd_r01_xlsx import parse_r01_xlsx
 from svod_excel import (
+    ERRORS_SHEET_HEADERS,
     SVOD_HEADERS,
+    build_gpb_i_d_match_index,
     build_svod_row,
     build_svod_row_from_d,
     build_svod_row_r01,
@@ -34,10 +46,18 @@ from svod_excel import (
     build_svod_row_rsd,
     build_svod_row_vtb,
     create_workbook_with_svod_only,
+    ensure_errors_sheet,
     ensure_svod_sheet,
+    select_d_msg_rows_for_svod,
     write_svod_rows,
 )
-from vtb_f752_xml import find_vtb_zip_for_xml, list_ngri_from_vtb_zip, parse_vtb_f752_xml
+from vtb_f752_xml import (
+    find_vtb_xls_for_xml,
+    find_vtb_zip_for_xml,
+    list_ngri_from_vtb_xls_path,
+    list_ngri_from_vtb_zip,
+    parse_vtb_f752_xml,
+)
 
 from dks_excel import SCHEETA_DEPO_HEADERS
 
@@ -277,6 +297,10 @@ def seed_minimal_reference_workbook(path: Path) -> None:
     for col, title in enumerate(SVOD_HEADERS, start=1):
         ws_svod.cell(row=1, column=col, value=title)
 
+    ws_err = wb.create_sheet("Ошибки")
+    for col, title in enumerate(ERRORS_SHEET_HEADERS, start=1):
+        ws_err.cell(row=1, column=col, value=title)
+
     wb.save(path)
 
 
@@ -296,8 +320,14 @@ def ensure_workbook_structure(path: Path, create: bool, seed: bool) -> None:
         return
 
     wb = load_workbook(path)
+    changed = False
     if "СВОД_операций" not in wb.sheetnames:
         ensure_svod_sheet(wb)
+        changed = True
+    if "Ошибки" not in wb.sheetnames:
+        ensure_errors_sheet(wb)
+        changed = True
+    if changed:
         wb.save(path)
     wb.close()
 
@@ -335,11 +365,6 @@ def main() -> int:
         help="Не обрабатывать R-01*.xlsx из --input-dir-rsd-r01",
     )
     parser.add_argument(
-        "--r01-include-instruction-e",
-        action="store_true",
-        help="Включать в СВОД строки R-01 с типом поручения E (переводы между разделами)",
-    )
-    parser.add_argument(
         "--input-dir-region",
         type=Path,
         default=_ROOT / "2026_01" / "REGION" / "REP",
@@ -360,7 +385,7 @@ def main() -> int:
         "--input-dir-vtb-zip",
         type=Path,
         default=_ROOT / "2026_01" / "VTBSD" / "REP" / "XML_приложения",
-        help="Каталог с ZIP-приложениями (список закладных .xls внутри)",
+        help="Каталог приложений: одноимённый *.zip (НГРИ в .xls внутри) или одноимённый *.xls, если архива нет",
     )
     parser.add_argument(
         "--no-vtb-xml",
@@ -370,7 +395,12 @@ def main() -> int:
     parser.add_argument(
         "--no-vtb-zip",
         action="store_true",
-        help="Не читать ZIP для НГРИ (по одной строке СВОД на XML с пустым НГРИ)",
+        help="Не читать приложения для НГРИ (ни ZIP, ни одноимённый .xls из --input-dir-vtb-zip) — одна строка СВОД на XML с пустым НГРИ",
+    )
+    parser.add_argument(
+        "--debug-vtb-ngri",
+        action="store_true",
+        help="Подробный вывод в stderr при извлечении НГРИ из ZIP ВТБ СД (архив, .xls/.xlsx, ошибки)",
     )
     parser.add_argument(
         "--input-dir-d",
@@ -407,7 +437,7 @@ def main() -> int:
     parser.add_argument(
         "--svod-d-only",
         action="store_true",
-        help="Только строки из D*.MSG (не обрабатывать I*.MSG)",
+        help="Только строки из D*.MSG из --input-dir-d (I*.MSG из --input-dir для сопоставления DF/DP рекомендуется)",
     )
     parser.add_argument(
         "--include-empty-doc-name",
@@ -424,6 +454,7 @@ def main() -> int:
 
     depo_rows = read_depo_directory_rows(str(wb_path))
     cod_rows = read_codifier_rows(str(wb_path))
+    vtb_sd_cod_rows = read_vtb_sd_codifier_rows(str(wb_path))
     if not depo_rows:
         print(
             "Предупреждение: лист «Счета депо» пуст или отсутствует — колонки B, E могут быть пустыми.",
@@ -434,16 +465,37 @@ def main() -> int:
             "Предупреждение: лист «Коды» пуст или отсутствует — колонки D, N могут быть пустыми.",
             file=sys.stderr,
         )
+    if not vtb_sd_cod_rows:
+        print(
+            'Предупреждение: лист «Коды ВТБ СД» (или имя с «Коды» и «ВТБ») '
+            "отсутствует или без строк данных — для ВТБ СД колонки C, D, N берутся из «Коды».",
+            file=sys.stderr,
+        )
 
     rows_out: list[list] = []
+
+    error_rows: list[list] = []
+    gpb_d_index: dict[tuple[str, str], str] = {}
+    gpb_d_stmt_keys: set[str] = set()
+    if not args.no_d_msg:
+        gpb_i_for_d = args.input_dir.resolve()
+        if gpb_i_for_d.is_dir():
+            gpb_d_index, gpb_d_stmt_keys = build_gpb_i_d_match_index(
+                gpb_i_for_d,
+                depo_rows,
+                cod_rows,
+            )
 
     if not args.svod_d_only:
         i_dirs: list[Path] = [args.input_dir.resolve()]
         if not args.no_rsd_msg:
             i_dirs.append(args.input_dir_rsd.resolve())
 
+        gpb_i_root = args.input_dir.resolve()
+
         seen_i: set[Path] = set()
         files_i: list[Path] = []
+        i_msg_from_gpb_dir: dict[Path, bool] = {}
         for input_dir in i_dirs:
             if not input_dir.is_dir():
                 print(
@@ -451,12 +503,15 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 continue
+            input_res = input_dir.resolve()
+            from_gpb_catalog = input_res == gpb_i_root
             for pat in ("I*.MSG", "i*.MSG"):
                 for f in sorted(input_dir.glob(pat)):
                     rp = f.resolve()
                     if rp not in seen_i:
                         seen_i.add(rp)
                         files_i.append(f)
+                        i_msg_from_gpb_dir[rp] = from_gpb_catalog
 
         if not files_i:
             print("Нет файлов I*.MSG в указанных каталогах ГПБ/РСД")
@@ -464,13 +519,14 @@ def main() -> int:
         for fp in files_i:
             parsed = parse_i_msg_file(fp)
             client_id = (parsed.header.get("ClientID") or "").strip()
+            from_gpb_catalog = i_msg_from_gpb_dir[fp.resolve()]
 
             for data in parsed.rows:
                 parts = data.parts
-                if is_gpb_i_row(parts):
-                    if not passes_execution_filter(data):
+                if from_gpb_catalog:
+                    if not is_gpb_i_row(parts):
                         continue
-                    if len(parts) < 18:
+                    if not passes_execution_filter(data):
                         continue
                     rows_out.append(
                         build_svod_row(
@@ -514,7 +570,6 @@ def main() -> int:
                             files_r01.append(f)
                 if not files_r01:
                     print(f"Нет файлов R-01*.xlsx в {r01_dir}")
-                skip_e = not args.r01_include_instruction_e
                 for fp in files_r01:
                     pr = parse_r01_xlsx(fp)
                     if pr is None:
@@ -529,7 +584,6 @@ def main() -> int:
                             dr,
                             depo_rows,
                             cod_rows,
-                            skip_instruction_e=skip_e,
                         )
                         if row_svod is not None:
                             rows_out.append(row_svod)
@@ -558,25 +612,31 @@ def main() -> int:
                 if not files_reg:
                     print(f"Нет файлов IS*.xls в {region_dir}")
                 for fp in files_reg:
-                    pr = parse_region_is_xls(fp)
+                    pr, region_skip = parse_region_is_xls(fp)
                     if pr is None:
-                        print(
-                            f"Пропуск (не IS*.xls): {fp.name}",
-                            file=sys.stderr,
-                        )
+                        if region_skip == REGION_PARSE_SKIP_BAD_NAME:
+                            msg = "Пропуск REGION (имя не IS*.xls):"
+                        else:
+                            msg = (
+                                "Пропуск REGION (файл не прочитан, пустые листы "
+                                "или неподдерживаемый формат):"
+                            )
+                        print(f"{msg} {fp.name}", file=sys.stderr)
                         continue
                     tbody = pr.table_rows
                     if not tbody:
                         tbody = [RegionTableRow(ngri="")]
                     for tr in tbody:
-                        rows_out.append(
-                            build_svod_row_region(
-                                pr,
-                                tr,
-                                depo_rows,
-                                cod_rows,
-                            ),
+                        svod_r, region_err = build_svod_row_region(
+                            pr,
+                            tr,
+                            depo_rows,
+                            cod_rows,
                         )
+                        if region_err is not None:
+                            error_rows.append(region_err)
+                        if svod_r is not None:
+                            rows_out.append(svod_r)
 
         if not args.no_vtb_xml:
             vtb_xml_dir = args.input_dir_vtb_xml.resolve()
@@ -596,6 +656,12 @@ def main() -> int:
                     vtb_files.append(p)
                 if not vtb_files:
                     print(f"Нет файлов *.xml в {vtb_xml_dir}")
+                dbg_z = args.debug_vtb_ngri
+                if dbg_z and not args.no_vtb_zip and not vtb_zip_dir.is_dir():
+                    print(
+                        f"[VTB НГРИ] каталог приложений не найден (--input-dir-vtb-zip): {vtb_zip_dir}",
+                        file=sys.stderr,
+                    )
                 for xp in vtb_files:
                     pr_vtb = parse_vtb_f752_xml(xp)
                     if pr_vtb is None:
@@ -606,20 +672,58 @@ def main() -> int:
                         continue
                     ngri_list: list[str] = []
                     if not args.no_vtb_zip and vtb_zip_dir.is_dir():
-                        zp = find_vtb_zip_for_xml(xp, vtb_zip_dir)
+                        zp = find_vtb_zip_for_xml(
+                            xp,
+                            vtb_zip_dir,
+                            debug=dbg_z,
+                            context=xp.name,
+                        )
                         if zp is not None:
-                            ngri_list = list_ngri_from_vtb_zip(zp)
+                            ngri_list = list_ngri_from_vtb_zip(
+                                zp,
+                                debug=dbg_z,
+                                context=xp.name,
+                            )
+                        else:
+                            xls_p = find_vtb_xls_for_xml(
+                                xp,
+                                vtb_zip_dir,
+                                debug=dbg_z,
+                                context=xp.name,
+                            )
+                            if xls_p is not None:
+                                ngri_list = list_ngri_from_vtb_xls_path(
+                                    xls_p,
+                                    debug=dbg_z,
+                                    context=xp.name,
+                                )
+                        if dbg_z and ngri_list:
+                            print(
+                                f"[VTB НГРИ] {xp.name}: итого НГРИ (ZIP или .xls): {len(ngri_list)}",
+                                file=sys.stderr,
+                            )
                     if not ngri_list:
                         ngri_list = [""]
+                    vtb_file_err: list | None = None
+                    vtb_svod_block: list[list] = []
                     for ng in ngri_list:
-                        rows_out.append(
-                            build_svod_row_vtb(
-                                pr_vtb,
-                                ng,
-                                depo_rows,
-                                cod_rows,
-                            ),
+                        sv, err = build_svod_row_vtb(
+                            pr_vtb,
+                            ng,
+                            depo_rows,
+                            cod_rows,
+                            vtb_sd_cod_rows,
                         )
+                        if err is not None and sv is None:
+                            error_rows.append(err)
+                            vtb_file_err = err
+                            break
+                        if err is not None:
+                            error_rows.append(err)
+                        if sv is not None:
+                            vtb_svod_block.append(sv)
+                    if vtb_file_err is None:
+                        rows_out.extend(vtb_svod_block)
 
     if not args.no_d_msg:
         input_d = args.input_dir_d.resolve()
@@ -649,9 +753,35 @@ def main() -> int:
                     print(f"Пропуск D (не DOC_INSTRUCT): {fp.name}", file=sys.stderr)
                     continue
                 client_id = (parsed.header.get("ClientID") or "").strip()
-                for data in parsed.rows:
-                    if not args.include_empty_doc_name and not data.doc_type.strip():
-                        continue
+                picked_rows = select_d_msg_rows_for_svod(
+                    parsed.rows,
+                    include_empty_doc_name=args.include_empty_doc_name,
+                )
+                for data in picked_rows:
+                    stmt_key = gpb_instruction_pair_key(fp)
+                    ng_key = normalize_ngri_for_match(data.ngri)
+                    i_flow = None
+                    if stmt_key is not None:
+                        hit = gpb_d_index.get((stmt_key, ng_key))
+                        if hit is not None:
+                            i_flow = hit  # "debit" | "credit"
+                    if i_flow is None:
+                        if stmt_key is None:
+                            reason = "key_unparsed"
+                        elif stmt_key not in gpb_d_stmt_keys:
+                            reason = "no_i_file"
+                        else:
+                            reason = "no_ngri_in_i"
+                        error_rows.append(
+                            [
+                                fp.name,
+                                stmt_key or "",
+                                data.ngri.strip(),
+                                reason,
+                                data.doc_type.strip(),
+                                (parsed.header.get("ReportDate") or "").strip(),
+                            ],
+                        )
                     rows_out.append(
                         build_svod_row_from_d(
                             parsed,
@@ -659,10 +789,15 @@ def main() -> int:
                             depo_rows,
                             cod_rows,
                             client_id,
+                            i_match_flow=i_flow,
                         ),
                     )
 
-    write_svod_rows(wb_path, rows_out)
+    write_svod_rows(
+        wb_path,
+        rows_out,
+        error_rows,
+    )
     print(f"Записано строк: {len(rows_out)} в {wb_path}")
     return 0
 
