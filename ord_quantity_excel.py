@@ -530,7 +530,7 @@ def apply_gpb_spr_q_pdf_to_matrix(
     spr_dir: Path,
 ) -> int:
     """
-    Колонка Q: «Закл» = число Q*.pdf по счёту, «Лист» = сумма страниц в этих PDF (GPB/SPR).
+    Колонка Q: «Закл» = число Q*.pdf по счёту, «Лист» = сумма (страниц − 1) по каждому PDF (GPB/SPR).
     Возвращает число строк матрицы, для которых заданы ненулевые метрики Q.
     """
     from gpb_spr_q_pdf import scan_gpb_spr_q_pdfs

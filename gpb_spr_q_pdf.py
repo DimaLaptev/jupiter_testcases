@@ -12,7 +12,12 @@ from depo_directory import normalize_account_key
 @dataclass
 class SprQAccountStats:
     file_count: int = 0
-    page_sum: int = 0
+    page_sum: int = 0  # сумма (страниц − 1) по PDF для колонки «Лист»
+
+
+def q_list_sheet_count(pages: int) -> int:
+    """Колонка Q «Лист»: по одному PDF — число страниц минус 1 (не меньше 0)."""
+    return max(0, pages - 1)
 
 
 _Q_PDF_RE = re.compile(r"^q.+\.pdf$", re.IGNORECASE)
@@ -77,6 +82,6 @@ def scan_gpb_spr_q_pdfs(spr_dir: Path) -> dict[str, SprQAccountStats]:
             if acc_key not in by_acc:
                 by_acc[acc_key] = SprQAccountStats()
             by_acc[acc_key].file_count += 1
-            by_acc[acc_key].page_sum += pages
+            by_acc[acc_key].page_sum += q_list_sheet_count(pages)
 
     return by_acc
