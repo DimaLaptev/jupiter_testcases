@@ -11,7 +11,14 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
+
+_ORD_QUANTITY_HEADER_FILL = PatternFill(
+    start_color="C6EFCE",
+    end_color="C6EFCE",
+    fill_type="solid",
+)
 
 ORD_QUANTITY_SHEET = "ORD Количество поручений"
 ORD_QUANTITY_SHEET_LEGACY = "Количество поручений"
@@ -690,6 +697,13 @@ def _unmerge_all(ws) -> None:
         ws.unmerge_cells(str(rng))
 
 
+def _apply_ord_quantity_header_fill(ws, last_col: int) -> None:
+    """Зелёная заливка строк 1–2 (названия колонок и подзаголовки)."""
+    for r in range(1, 3):
+        for c in range(1, last_col + 1):
+            ws.cell(row=r, column=c).fill = _ORD_QUANTITY_HEADER_FILL
+
+
 def ensure_ord_quantity_sheet(wb, layout: dict[str, Any] | None = None) -> Any:
     data = layout or load_headers_layout()
     name = data.get("sheet_name", ORD_QUANTITY_SHEET)
@@ -725,6 +739,7 @@ def ensure_ord_quantity_sheet(wb, layout: dict[str, Any] | None = None) -> Any:
         for j, sub in enumerate(g.subheaders):
             ws.cell(row=2, column=c0 + j, value=sub if sub else None)
 
+    _apply_ord_quantity_header_fill(ws, last_col)
     return ws
 
 
