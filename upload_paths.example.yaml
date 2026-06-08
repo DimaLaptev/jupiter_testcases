@@ -5,8 +5,49 @@ paths:
   region: "2026_01/REGION"
   rsd: "2026_01/RSD/I"
   rsd_dop: "2026_01/RSD/R01"
+  # Workbook предсвода (аналог O12/O17/O22/O27) — задать реальные пути перед --phase svod
+  svod_gpb_workbook: ""
+  svod_vtb_workbook: ""
+  svod_region_workbook: ""
+  svod_rsd_workbook: ""
+  # Справочник.xls — листы 1 и 2 (аналог O4)
+  sprav_workbook: ""
+  # 2_СВОД_поДЕПО.xlsx (без макросов) — фаза depo (svod_depo)
+  svod_depo_workbook: ""
 
-# Порядок шагов legacy ETL (как в VBA_upload_macros_guide.md).
+# Фаза upload: staging *_temp + post_process после rsd_dop
+pipeline_upload:
+  - gpb
+  - region2
+  - vtb
+  - rsd
+  - rsd_dop
+
+# Опционально после upload, если менялся Справочник.xls
+pipeline_sprav:
+  - spravochnik_1
+  - spravochnik_2
+
+# После готовности промежуточных книг
+pipeline_svod:
+  - svod_gpb
+  - svod_vtb
+  - svod_region
+  - svod_rsd
+
+# Фаза depo: add_new → export x4 → checks x3 → archive
+pipeline_depo:
+  - depo_add_new
+  - depo_export_dom_ia
+  - depo_export_vtb
+  - depo_export_sber
+  - depo_export_rezervis
+  - depo_check_upload
+  - depo_check_ngri
+  - depo_check_mortgage
+  - depo_archive
+
+# Обратная совместимость (если указан только pipeline — трактуется как pipeline_upload)
 pipeline:
   - gpb
   - region2
