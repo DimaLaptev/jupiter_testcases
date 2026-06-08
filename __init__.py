@@ -1,15 +1,33 @@
-"""Фаза depo (svod_depo): SQL ↔ Excel для 2_СВОД_поДЕПО.xlsx."""
+"""Регистрация всех загрузчиков в LOADER_REGISTRY (вызывать явно, без циклических import)."""
 
-from sql_upload.depo.pipeline import DepoPipelineResult, run_depo_pipeline
-from sql_upload.depo.runner import DepoStepStats, FormUpdateParams, run_depo_step
-from sql_upload.depo.steps import DEFAULT_DEPO_PIPELINE_ORDER, DEPO_STEPS
+from __future__ import annotations
 
-__all__ = [
-    "DEFAULT_DEPO_PIPELINE_ORDER",
-    "DEPO_STEPS",
-    "DepoPipelineResult",
-    "DepoStepStats",
-    "FormUpdateParams",
-    "run_depo_pipeline",
-    "run_depo_step",
-]
+
+def register_all_loaders() -> None:
+    from . import (
+        gpb,
+        region,
+        region2,
+        rsd,
+        rsd_dop,
+        spravochnik,
+        svod_gpb,
+        svod_region,
+        svod_rsd,
+        svod_vtb,
+        vtb,
+    )
+
+    _ = (
+        gpb,
+        region,
+        region2,
+        rsd,
+        rsd_dop,
+        vtb,
+        svod_gpb,
+        svod_region,
+        svod_vtb,
+        svod_rsd,
+        spravochnik,
+    )
