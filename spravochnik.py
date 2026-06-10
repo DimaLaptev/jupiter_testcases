@@ -1,4 +1,4 @@
-"""VBA Справочник1/2 → spravochnik_1/2 (листы 1 и 2 по индексу)."""
+"""Справочник.xls → spravochnik_1 (13 col) / spravochnik_2 (3 col)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,13 @@ from typing import Any, Iterator
 
 from sql_upload.base import LoaderConfig
 from sql_upload.loaders._workbook_grid import iter_workbook_sheet_rows
+from sql_upload.predsvod_layout import (
+    SPRAV1_ACCOUNT_COL,
+    SPRAV1_COL_END,
+    SPRAV1_ROW_START,
+    SPRAV2_COL_END,
+    SPRAV2_ROW_START,
+)
 from sql_upload.registry import register_loader
 
 
@@ -25,10 +32,10 @@ class Spravochnik1Loader:
         yield from iter_workbook_sheet_rows(
             path,
             0,
-            row_start=2,
+            row_start=SPRAV1_ROW_START,
             col_start=1,
-            col_end=7,
-            last_row_col=1,
+            col_end=SPRAV1_COL_END,
+            last_row_col=SPRAV1_ACCOUNT_COL,
         )
 
 
@@ -47,8 +54,8 @@ class Spravochnik2Loader:
         yield from iter_workbook_sheet_rows(
             path,
             1,
-            row_start=2,
+            row_start=SPRAV2_ROW_START,
             col_start=1,
-            col_end=3,
+            col_end=SPRAV2_COL_END,
             last_row_col=1,
         )

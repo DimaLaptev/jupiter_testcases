@@ -5,6 +5,12 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
+from sql_upload.predsvod_layout import (
+    SPRAV1_ACCOUNT_COL,
+    SPRAV1_PORTFOLIO_SECTION_COL,
+    predsvod_row_to_registry,
+)
+
 PREDSVOD_TABLES = (
     "predsvod_gpb",
     "predsvod_vtb",
@@ -18,7 +24,7 @@ _COLS = ", ".join(f"col_{i:02d}" for i in range(1, 25))
 def sync_editable_from_predsvod(conn: sqlite3.Connection) -> int:
     """
     Первичное наполнение editable_registry из predsvod_* (если реестр пуст).
-    v1: col_01..col_24 → первые 24 поля реестра; portfolio_section из spravochnik_1.
+    Маппинг col_01..col_24 по predsvod_layout; portfolio_section из spravochnik_1 col_11.
     """
     existing = conn.execute("SELECT COUNT(*) FROM editable_registry").fetchone()[0]
     if existing:
@@ -29,33 +35,57 @@ def sync_editable_from_predsvod(conn: sqlite3.Connection) -> int:
         source = table.replace("predsvod_", "")
         rows = conn.execute(f"SELECT {_COLS} FROM {table}").fetchall()
         for row in rows:
-            pf = _lookup_portfolio(conn, row[3] if len(row) > 3 else None)
+            fields = predsvod_row_to_registry(row)
+            pf = _lookup_portfolio(conn, fields.get("schet_depo"))
             conn.execute(
                 """
                 INSERT INTO editable_registry (
                     source, portfolio_section,
                     n_zakladnoy, depository, owner, schet_depo, razdel_scheta,
-                    quantity, fio, nomer_kd, ngri_v_depo, ngri_v_portfele,
+                    data_priema, quantity, fio, nomer_kd, ngri_v_depo, ngri_v_portfele,
                     vremennoe_snyatie, enc, agent_soprovozhdeniya, pul_zakladnyh,
                     gorod_hraneniya, comment, massiv_po_n, massiv_po_ngri,
-                    master_date, investor, servisny_agent, status_eis
+                    master_date, investor, servisny_agent, status_eis,
+                    data_pogasheniya_eis, status_hraneniya, hranitel
                 ) VALUES (
                     ?, ?,
                     ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
-                    ?, ?, ?, ?
+                    ?, ?, ?, ?,
+                    ?, ?, ?
                 )
                 """,
                 (
                     source,
                     pf,
-                    row[0], row[1], row[2], row[3], row[4],
-                    row[5], row[6], row[7], row[8], row[9],
-                    row[10], row[11], row[12], row[13],
-                    row[14], row[15], row[16], row[17],
-                    row[18], row[19], row[20], row[21],
+                    fields["n_zakladnoy"],
+                    fields["depository"],
+                    fields["owner"],
+                    fields["schet_depo"],
+                    fields["razdel_scheta"],
+                    fields["data_priema"],
+                    fields["quantity"],
+                    fields["fio"],
+                    fields["nomer_kd"],
+                    fields["ngri_v_depo"],
+                    fields["ngri_v_portfele"],
+                    fields["vremennoe_snyatie"],
+                    fields["enc"],
+                    fields["agent_soprovozhdeniya"],
+                    fields["pul_zakladnyh"],
+                    fields["gorod_hraneniya"],
+                    fields["comment"],
+                    fields["massiv_po_n"],
+                    fields["massiv_po_ngri"],
+                    fields["master_date"],
+                    fields["investor"],
+                    fields["servisny_agent"],
+                    fields["status_eis"],
+                    fields["data_pogasheniya_eis"],
+                    fields["status_hraneniya"],
+                    fields["hranitel"],
                 ),
             )
             inserted += 1
@@ -64,13 +94,33 @@ def sync_editable_from_predsvod(conn: sqlite3.Connection) -> int:
 
 
 def _lookup_portfolio(conn: sqlite3.Connection, schet: str | None) -> str | None:
+    """
+    Раздел КП для листов СВОД_поДЕПО: spravochnik_1 col_11 (новый формат),
+    fallback col_01 (legacy 7-col справочник из VBA).
+    Ключ: col_03 «Номер счета депo» = predsvod col_05 «Счет депo».
+    """
     if not schet or not str(schet).strip():
         return None
+    key = str(schet).strip()
+    account_col = f"col_{SPRAV1_ACCOUNT_COL:02d}"
+    section_col = f"col_{SPRAV1_PORTFOLIO_SECTION_COL:02d}"
     row = conn.execute(
-        "SELECT col_01 FROM spravochnik_1 WHERE TRIM(col_03) = TRIM(?) LIMIT 1",
-        (str(schet).strip(),),
+        f"""
+        SELECT {section_col}, col_01
+        FROM spravochnik_1
+        WHERE TRIM({account_col}) = TRIM(?)
+        LIMIT 1
+        """,
+        (key,),
     ).fetchone()
-    return row[0] if row else None
+    if not row:
+        return None
+    section, legacy = row
+    if section and str(section).strip():
+        return str(section).strip()
+    if legacy and str(legacy).strip():
+        return str(legacy).strip()
+    return None
 
 
 def run_napolnenie_ruki(conn: sqlite3.Connection) -> dict[str, int]:

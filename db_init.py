@@ -16,6 +16,23 @@ def list_schema_files() -> list[Path]:
     return sorted(SCHEMA_DIR.glob("*.sql"))
 
 
+def _migrate_spravochnik_1(conn: sqlite3.Connection) -> None:
+    """Добавить col_08..col_13 в spravochnik_1 (миграция с 7-col legacy)."""
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='spravochnik_1'",
+    ).fetchone()
+    if not row:
+        return
+    existing = {
+        str(r[1])
+        for r in conn.execute("PRAGMA table_info(spravochnik_1)").fetchall()
+    }
+    for i in range(8, 14):
+        col = f"col_{i:02d}"
+        if col not in existing:
+            conn.execute(f"ALTER TABLE spravochnik_1 ADD COLUMN {col} TEXT")
+
+
 def apply_schema(conn: sqlite3.Connection, *, force: bool = False) -> list[str]:
     applied: list[str] = []
     if force:
@@ -28,6 +45,7 @@ def apply_schema(conn: sqlite3.Connection, *, force: bool = False) -> list[str]:
     for sql_file in list_schema_files():
         conn.executescript(sql_file.read_text(encoding="utf-8"))
         applied.append(sql_file.name)
+    _migrate_spravochnik_1(conn)
     conn.commit()
     return applied
 

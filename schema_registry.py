@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+_COLS_24 = [f"col_{i:02d}" for i in range(1, 25)]
+
 TABLE_COLUMNS: dict[str, list[str]] = {
     "gpb_temp": [f"col_{i:02d}" for i in range(1, 10)],
     "region_temp": [f"col_{i:02d}" for i in range(1, 41)],
@@ -15,9 +17,17 @@ TABLE_COLUMNS: dict[str, list[str]] = {
     "vtb_temp": ["schet"] + [f"col_{i:02d}" for i in range(1, 13)],
     "rsd_temp": [f"col_{i:02d}" for i in range(1, 7)],
     "rsd_dop_temp": ["schet"] + [f"col_{i:02d}" for i in range(2, 11)],
+    "predsvod_gpb": list(_COLS_24),
+    "predsvod_region": list(_COLS_24),
+    "predsvod_vtb": list(_COLS_24),
+    "predsvod_rsd": list(_COLS_24),
+    "spravochnik_1": [f"col_{i:02d}" for i in range(1, 14)],
+    "spravochnik_2": [f"col_{i:02d}" for i in range(1, 4)],
 }
 
-TEMP_TABLES = tuple(TABLE_COLUMNS.keys())
+TEMP_TABLES = tuple(
+    k for k in TABLE_COLUMNS if k.endswith("_temp") or k.startswith("predsvod_") or k.startswith("spravochnik_")
+)
 
 VBA_TABLE_MAP: dict[str, str] = {
     "gpb": "gpb_temp",
@@ -26,7 +36,17 @@ VBA_TABLE_MAP: dict[str, str] = {
     "vtb": "vtb_temp",
     "rsd": "rsd_temp",
     "rsd_dop": "rsd_dop_temp",
+    "svod_gpb": "predsvod_gpb",
+    "svod_region": "predsvod_region",
+    "svod_vtb": "predsvod_vtb",
+    "svod_rsd": "predsvod_rsd",
+    "spravochnik_1": "spravochnik_1",
+    "spravochnik_2": "spravochnik_2",
 }
+
+WORKBOOK_LOADER_NAMES = frozenset(
+    {"svod_gpb", "svod_region", "svod_vtb", "svod_rsd", "spravochnik_1", "spravochnik_2"},
+)
 
 
 def columns_for(table: str) -> list[str]:

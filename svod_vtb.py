@@ -1,4 +1,4 @@
-"""VBA сводВТБ → predsvod_vtb (лист VTBSD, 24 колонки)."""
+"""Предсвод ВТБ → predsvod_vtb (лист VTBSD)."""
 
 from __future__ import annotations
 
@@ -6,11 +6,9 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from sql_upload.base import LoaderConfig
-from sql_upload.loaders._workbook_grid import iter_workbook_sheet_rows
+from sql_upload.loaders._predsvod_common import iter_predsvod_sheet_rows
+from sql_upload.predsvod_layout import PREDSVOD_SHEETS
 from sql_upload.registry import register_loader
-
-_SHEET = "VTBSD"
-_COLS = 24
 
 
 @register_loader("svod_vtb")
@@ -25,11 +23,4 @@ class SvodVtbLoader:
         )
 
     def iter_rows(self, path: Path) -> Iterator[tuple[Any, ...]]:
-        yield from iter_workbook_sheet_rows(
-            path,
-            _SHEET,
-            row_start=2,
-            col_start=1,
-            col_end=_COLS,
-            last_row_col=1,
-        )
+        yield from iter_predsvod_sheet_rows(path, PREDSVOD_SHEETS["svod_vtb"])
