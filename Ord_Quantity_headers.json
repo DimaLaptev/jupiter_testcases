@@ -9,8 +9,8 @@
   "data_groups": [
     { "merge": "Z", "subheaders": ["Пор.", "Закл"], "instruction_types": ["Z"], "metrics": ["por_keys", "zakl_sum"] },
     { "merge": "G", "subheaders": ["Пор.", "Закл"], "instruction_types": ["G"], "metrics": ["por_keys", "zakl_sum"] },
-    { "merge": "T", "subheaders": ["Пор.", "Закл"], "metrics": ["por_keys", "zakl_sum"], "source": "REPs" },
-    { "merge": "Y", "subheaders": ["Пор.", "Закл"], "metrics": ["por_keys", "zakl_sum"], "source": "REPs" },
+    { "merge": "T", "subheaders": ["Пор.", "Закл"], "instruction_types": ["T"], "metrics": ["por_keys", "zakl_sum"], "source": "REPs, СВОД_операций" },
+    { "merge": "Y", "subheaders": ["Пор.", "Закл"], "instruction_types": ["Y"], "metrics": ["por_keys", "zakl_sum"], "source": "REPs, СВОД_операций" },
     { "merge": "P", "subheaders": ["Пор.", "Закл"], "instruction_types": ["P"], "metrics": ["por_keys", "zakl_sum"] },
     { "merge": "F", "subheaders": ["Пор.", "Закл"], "instruction_types": ["F"], "metrics": ["por_keys", "zakl_sum"] },
     { "merge": "XP", "subheaders": ["Пор.", "Закл"], "instruction_types": ["XP"], "metrics": ["por_keys", "zakl_sum"] },
@@ -24,7 +24,8 @@
       "subheaders": ["Закл", "Лист"],
       "instruction_types": ["Q"],
       "metrics": ["zakl_sum", "list_rows"],
-      "skip_por": true
+      "skip_por": true,
+      "source": "GPB_SPR_PDF"
     },
     {
       "merge": "Хранение комплектов",
@@ -36,12 +37,23 @@
       },
       "source": "SVOD_DF_DP"
     },
-    { "merge": "S(u)", "subheaders": ["Закл", "Лист"], "placeholder": true, "source": "TBD" },
+    {
+      "merge": "S(u)",
+      "subheaders": ["Закл", "Лист"],
+      "spr_su_archives": true,
+      "source": "GPB_SPR_ARCHIVE"
+    },
     { "merge": "S(b)", "subheaders": ["Закл", "Лист"], "placeholder": true, "source": "TBD" },
     { "merge": "Spr(u)", "subheaders": ["Закл", "Лист"], "placeholder": true, "source": "TBD" },
     { "merge": "Spr(b)", "subheaders": ["Закл", "Лист"], "placeholder": true, "source": "TBD" },
     { "merge": "Открытие счета", "subheaders": ["Пор."], "placeholder": true, "source": "TBD" },
     { "merge": "Назначение УЛ", "subheaders": ["Пор."], "placeholder": true, "source": "TBD" },
+    {
+      "merge": "Обслуживание счета",
+      "subheaders": [""],
+      "account_service": true,
+      "source": "REGION_VL"
+    },
     { "merge": "Прочие расходы в сумме руб.", "subheaders": [""], "placeholder": true, "source": "TBD" }
   ]
 }

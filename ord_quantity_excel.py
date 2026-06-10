@@ -1,4 +1,4 @@
-"""Лист «ORD Количество поручений»: заголовки (headers), агрегация (aggregation) из «СВОД_операций» и T/Y из «REPs»."""
+"""Лист «ORD Количество поручений»: заголовки (headers), агрегация (aggregation) из «СВОД_операций»; T/Y — из «REPs» и «СВОД_операций»."""
 
 from __future__ import annotations
 
@@ -11,7 +11,14 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
+
+_ORD_QUANTITY_HEADER_FILL = PatternFill(
+    start_color="C6EFCE",
+    end_color="C6EFCE",
+    fill_type="solid",
+)
 
 ORD_QUANTITY_SHEET = "ORD Количество поручений"
 ORD_QUANTITY_SHEET_LEGACY = "Количество поручений"
@@ -23,11 +30,15 @@ REPS_OPERATION_FOR_TY = "перевод ценных бумаг по разде�
 REPS_DEAL_TYPE_FOR_T = "прием цб на учет"
 REPS_DEAL_TYPE_FOR_Y = "внесение изменений"
 REPS_REFUSAL_OP_NUM = "отказ"
+# Блок «Хранение комплектов»: DF/DP — число строк СВОД, не уникальных ключей
+STORAGE_SVOD_ROW_BUCKETS = frozenset({"DF", "DP"})
 
 # «Пор.» по одному ключу на файл-источник (ГПБ / REGION / ВТБ СД)
 FILENAME_POR_BUCKETS = frozenset(
     {"T", "Y", "RF", "RP", "VF", "VP", "F", "P", "XP", "XF"},
 )
+
+REGION_DK_DEPOSITORY = 'АО "ДК РЕГИОН"'
 
 
 @dataclass
@@ -41,6 +52,8 @@ class _GroupLayout:
     metrics: list[str]
     skip_por: bool
     storage_subcolumns: dict[str, list[str]] = field(default_factory=dict)
+    account_service: bool = False
+    spr_su_archives: bool = False
 
 
 def _project_root() -> Path:
@@ -70,17 +83,21 @@ def _build_group_layouts(data: dict[str, Any]) -> list[_GroupLayout]:
             str(k): list(v)
             for k, v in (g.get("storage_subcolumns") or {}).items()
         }
+        acct_svc = bool(g.get("account_service"))
+        spr_su = bool(g.get("spr_su_archives"))
         out.append(
             _GroupLayout(
                 merge=str(g["merge"]),
                 start_col=col,
                 width=w,
                 subheaders=subs,
-                placeholder=ph,
+                placeholder=ph and not acct_svc and not spr_su,
                 instruction_types=it,
                 metrics=met,
                 skip_por=sk,
                 storage_subcolumns=storage,
+                account_service=acct_svc,
+                spr_su_archives=spr_su,
             ),
         )
         col += w
@@ -125,6 +142,26 @@ def _is_rsd_depository(depository: str) -> bool:
     return "рсд" in d
 
 
+def _normalize_depository_label(raw: str) -> str:
+    t = (raw or "").replace("\u00a0", " ").replace("\u202f", " ")
+    t = t.strip().casefold().replace("ё", "е")
+    t = t.replace("«", '"').replace("»", '"')
+    return re.sub(r"\s+", " ", t)
+
+
+def _account_service_cell_value(depository: str, account: str) -> int | None:
+    """
+    Колонка «Обслуживание счета»: 1 для АО «ДК РЕГИОН» и счёта, начинающегося с VL; иначе пусто.
+    """
+    if _normalize_depository_label(depository) != _normalize_depository_label(
+        REGION_DK_DEPOSITORY,
+    ):
+        return None
+    if (account or "").strip().upper().startswith("VL"):
+        return 1
+    return None
+
+
 def _svod_row_uses_filename_por_key(
     bucket: str,
     source_filename: str,
@@ -163,13 +200,24 @@ def _svod_row_uses_filename_por_key(
     return False
 
 
+def _normalize_por_basis(raw: str) -> str:
+    t = (raw or "").replace("\u00a0", " ").replace("\u202f", " ")
+    t = t.strip().lower().replace("ё", "е")
+    if t in ("", "-", "—", "–"):
+        return ""
+    return re.sub(r"\s+", " ", t)
+
+
 def _por_key_for_svod_row(
     row: dict[str, Any],
     bucket: str,
     tech: str,
 ) -> str:
-    source = row.get("Источник", "")
     dep = row.get("Депозитарий", "")
+    if _is_rsd_depository(dep):
+        return _normalize_por_basis(row.get("Основание", ""))
+
+    source = row.get("Источник", "")
     if _svod_row_uses_filename_por_key(bucket, source, dep):
         key = _normalize_source_filename(source)
         return key or tech
@@ -239,6 +287,7 @@ def _read_svod_rows(
         "Количество закладных",
         "Тип поручения",
         "ОдноТипОперТипРазд",
+        "Основание",
         "Источник",
     ]
     for k in need:
@@ -272,6 +321,7 @@ def _read_svod_rows(
                 "Количество закладных": cell("Количество закладных"),
                 "Тип поручения": cell("Тип поручения"),
                 "ОдноТипОперТипРазд": cell("ОдноТипОперТипРазд"),
+                "Основание": cell("Основание"),
                 "Источник": cell("Источник"),
             },
         )
@@ -373,6 +423,7 @@ class _BucketAcc:
     por_keys: set[str] = field(default_factory=set)
     zakl_sum: int = 0
     list_rows: int = 0
+    svod_row_count: int = 0
 
 
 def aggregate_reps_to_matrix(
@@ -405,6 +456,125 @@ def aggregate_reps_to_matrix(
     return matrix, groups
 
 
+def _is_gpb_depository(depository: str) -> bool:
+    d = (depository or "").strip().casefold()
+    return "гпб" in d
+
+
+def _is_vtb_sd_depository(depository: str) -> bool:
+    d = (depository or "").strip().casefold()
+    return "втб" in d and "сд" in d
+
+
+def _svod_zakl_increment_for_bucket(
+    depository: str,
+    bucket: str,
+    qty_mortgages: int,
+) -> int:
+    """ВТБ СД: для F/P/T/Y «Закл» = число строк СВОД; для остальных — сумма «Количество закладных»."""
+    if _is_vtb_sd_depository(depository) and bucket in ("F", "P", "T", "Y"):
+        return 1
+    return qty_mortgages
+
+
+def _is_region_dk_depository(depository: str) -> bool:
+    return _normalize_depository_label(depository) == _normalize_depository_label(
+        REGION_DK_DEPOSITORY,
+    )
+
+
+def apply_gpb_spr_su_archives_to_matrix(
+    matrix: dict[tuple[str, str, str], dict[str, _BucketAcc]],
+    spr_dir: Path,
+) -> int:
+    """
+    Колонка S(u) для ГПБ: «Закл» и «Лист» = число архивов SPR*_<счёт>_*.zip|7z (GPB/SPR).
+    """
+    from gpb_spr_su_archive import scan_gpb_spr_su_archives
+
+    stats_by_acc = scan_gpb_spr_su_archives(spr_dir)
+    if not stats_by_acc:
+        return 0
+
+    filled = 0
+    for cell_key in matrix:
+        dep, _owner, acc = cell_key
+        if not _is_gpb_depository(dep):
+            continue
+        acc_key = _matrix_account_lookup_key(acc)
+        cnt = stats_by_acc.get(acc_key)
+        if not cnt:
+            continue
+        accm = matrix[cell_key]["S(u)"]
+        accm.zakl_sum = cnt
+        accm.list_rows = cnt
+        filled += 1
+    return filled
+
+
+def apply_region_spr_pdfs_to_matrix(
+    matrix: dict[tuple[str, str, str], dict[str, _BucketAcc]],
+    region_spr_dir: Path,
+) -> int:
+    """
+    Колонка S(u) для Регион: «Закл» и «Лист» = число PDF [счёт]… внутри архивов REGION/SPR.
+    """
+    from region_spr_pdf import normalize_region_account_key, scan_region_spr_pdfs
+
+    stats_by_acc = scan_region_spr_pdfs(region_spr_dir)
+    if not stats_by_acc:
+        return 0
+
+    filled = 0
+    for cell_key in matrix:
+        dep, _owner, acc = cell_key
+        if not _is_region_dk_depository(dep):
+            continue
+        acc_key = normalize_region_account_key(acc)
+        cnt = stats_by_acc.get(acc_key)
+        if not cnt:
+            continue
+        accm = matrix[cell_key]["S(u)"]
+        accm.zakl_sum = cnt
+        accm.list_rows = cnt
+        filled += 1
+    return filled
+
+
+def apply_gpb_spr_q_pdf_to_matrix(
+    matrix: dict[tuple[str, str, str], dict[str, _BucketAcc]],
+    spr_dir: Path,
+) -> int:
+    """
+    Колонка Q: «Закл» = число Q*.pdf по счёту, «Лист» = сумма (страниц − 1) по каждому PDF (GPB/SPR).
+    Возвращает число строк матрицы, для которых заданы ненулевые метрики Q.
+    """
+    from gpb_spr_q_pdf import scan_gpb_spr_q_pdfs
+
+    stats_by_acc = scan_gpb_spr_q_pdfs(spr_dir)
+    if not stats_by_acc:
+        return 0
+
+    filled = 0
+    for cell_key in matrix:
+        _dep, _owner, acc = cell_key
+        acc_key = _matrix_account_lookup_key(acc)
+        st = stats_by_acc.get(acc_key)
+        if st is None or (st.file_count == 0 and st.page_sum == 0):
+            continue
+        accm = matrix[cell_key]["Q"]
+        accm.zakl_sum = st.file_count
+        accm.list_rows = st.page_sum
+        filled += 1
+    return filled
+
+
+def _matrix_account_lookup_key(account_display: str) -> str:
+    from depo_directory import normalize_account_key
+
+    return normalize_account_key(account_display)
+
+
 def _merge_bucket_matrices(
     primary: dict[tuple[str, str, str], dict[str, _BucketAcc]],
     extra: dict[tuple[str, str, str], dict[str, _BucketAcc]],
@@ -415,6 +585,7 @@ def _merge_bucket_matrices(
             dst.por_keys |= accm.por_keys
             dst.zakl_sum += accm.zakl_sum
             dst.list_rows += accm.list_rows
+            dst.svod_row_count += accm.svod_row_count
     return primary
 
 
@@ -526,9 +697,11 @@ def aggregate_svod_to_matrix(
             owner=owner,
         )
         accm = matrix[cell_key][bucket]
-        accm.zakl_sum += qty
-        if bucket == "Q":
-            accm.list_rows += 1
+        accm.zakl_sum += _svod_zakl_increment_for_bucket(dep, bucket, qty)
+        if bucket in STORAGE_SVOD_ROW_BUCKETS:
+            accm.svod_row_count += 1
+        elif bucket == "Q":
+            continue
         else:
             accm.por_keys.add(_por_key_for_svod_row(row, bucket, tech))
 
@@ -538,6 +711,13 @@ def aggregate_svod_to_matrix(
 def _unmerge_all(ws) -> None:
     for rng in list(ws.merged_cells.ranges):
         ws.unmerge_cells(str(rng))
+
+
+def _apply_ord_quantity_header_fill(ws, last_col: int) -> None:
+    """Зелёная заливка строк 1–2 (названия колонок и подзаголовки)."""
+    for r in range(1, 3):
+        for c in range(1, last_col + 1):
+            ws.cell(row=r, column=c).fill = _ORD_QUANTITY_HEADER_FILL
 
 
 def ensure_ord_quantity_sheet(wb, layout: dict[str, Any] | None = None) -> Any:
@@ -575,6 +755,7 @@ def ensure_ord_quantity_sheet(wb, layout: dict[str, Any] | None = None) -> Any:
         for j, sub in enumerate(g.subheaders):
             ws.cell(row=2, column=c0 + j, value=sub if sub else None)
 
+    _apply_ord_quantity_header_fill(ws, last_col)
     return ws
 
 
@@ -615,6 +796,14 @@ def write_ord_quantity_matrix(
         buckets = matrix[(dep, owner, acc)]
 
         for g in groups:
+            if g.account_service:
+                ws.cell(
+                    row=row_idx,
+                    column=g.start_col,
+                    value=_account_service_cell_value(dep, acc),
+                )
+                continue
+
             if g.storage_subcolumns:
                 for j, sub in enumerate(g.subheaders):
                     sub_key = sub.strip().upper()
@@ -630,7 +819,7 @@ def write_ord_quantity_matrix(
                         ws.cell(
                             row=row_idx,
                             column=col,
-                            value=len(accm.por_keys) if accm else 0,
+                            value=accm.svod_row_count if accm else 0,
                         )
                     else:
                         ws.cell(row=row_idx, column=col, value=0)
@@ -650,6 +839,9 @@ def write_ord_quantity_matrix(
             if g.merge == "Q":
                 ws.cell(row=row_idx, column=g.start_col, value=accm.zakl_sum)
                 ws.cell(row=row_idx, column=g.start_col + 1, value=accm.list_rows)
+            elif g.spr_su_archives:
+                ws.cell(row=row_idx, column=g.start_col, value=accm.zakl_sum)
+                ws.cell(row=row_idx, column=g.start_col + 1, value=accm.list_rows)
             else:
                 ws.cell(row=row_idx, column=g.start_col, value=len(accm.por_keys))
                 ws.cell(row=row_idx, column=g.start_col + 1, value=accm.zakl_sum)
@@ -664,6 +856,12 @@ def fill_ord_quantity_from_workbook(
     year: int,
     month: int,
     layout_path: Path | None = None,
+    *,
+    gpb_spr_dir: Path | None = None,
+    skip_gpb_spr_q: bool = False,
+    skip_gpb_spr_su: bool = False,
+    region_spr_dir: Path | None = None,
+    skip_region_spr_su: bool = False,
 ) -> int:
     from depo_directory import read_depo_directory_rows
 
@@ -695,6 +893,29 @@ def fill_ord_quantity_from_workbook(
             depo_rows,
         )
         matrix = _merge_bucket_matrices(matrix, reps_matrix)
+
+    gpb_spr = (gpb_spr_dir or (_project_root() / "2026_01" / "GPB" / "SPR")).resolve()
+    if gpb_spr.is_dir():
+        if not skip_gpb_spr_q:
+            apply_gpb_spr_q_pdf_to_matrix(matrix, gpb_spr)
+        if not skip_gpb_spr_su:
+            apply_gpb_spr_su_archives_to_matrix(matrix, gpb_spr)
+    elif gpb_spr_dir is not None:
+        import sys
+
+        print(f"Каталог GPB/SPR не найден (пропуск Q/S(u) ГПБ): {gpb_spr}", file=sys.stderr)
+
+    region_spr = (region_spr_dir or (_project_root() / "2026_01" / "REGION" / "SPR")).resolve()
+    if region_spr.is_dir():
+        if not skip_region_spr_su:
+            apply_region_spr_pdfs_to_matrix(matrix, region_spr)
+    elif region_spr_dir is not None:
+        import sys
+
+        print(
+            f"Каталог REGION/SPR не найден (пропуск S(u) Регион): {region_spr}",
+            file=sys.stderr,
+        )
 
     write_ord_quantity_matrix(workbook_path, matrix, groups, layout)
     return len(matrix)
