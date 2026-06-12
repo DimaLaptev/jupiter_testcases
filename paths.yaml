@@ -1,0 +1,27 @@
+# Пути относительно SVOD_DEPO_PIPELINE/
+report_date: "31.03.2026"
+
+paths:
+  source_root: "source"
+  output_dir: "output"
+  depo_dom: "source/DEPO_DOM.xlsx"
+  sprav_workbook: "source/SPRAV/Справочник.xlsx"
+  template_workbook: "source/2_СВОД_поДЕПО.xlsx"
+  gpb: "source/GPB"
+  rsd_msg: "source/RSD_MSG"
+  rsd_exl: "source/RSD_EXL"
+  region: "source/REGION"
+  vtbsd: "source/VTBSD"
+  staging: "source/_staging"
+
+# Исключить отчёты Region (инструкция MAF)
+region_exclude_accounts:
+  - "10198"
+  - "10165"
+  - "VL0038"
+  - "10131"
+  - "VL0119"
+
+depository_aliases:
+  "банк гпб": "Банк ГПБ АО"
+  "банк гпб ао": "Банк ГПБ АО"
