@@ -52,6 +52,54 @@ STATSFORECAST_FREQ = "MS"
 MONTHLY_SEASON_LENGTH = 12
 INTERMITTENT_ZERO_MIN_FRACTION = 0.15
 LOCAL_MAX_LAG = 6
+FORECAST_REL_CAP = 50.0
+FORECAST_ABS_CAP = 1e6
+
+
+def _forecast_cap_from_hist(
+    y_hist,
+    *,
+    abs_cap: float | None = None,
+    rel_cap: float = FORECAST_REL_CAP,
+) -> float:
+    y_arr = np.asarray(y_hist, dtype=float).ravel()
+    if y_arr.size == 0:
+        train_max = 0.0
+    else:
+        train_max = float(np.nanmax(y_arr))
+    if not np.isfinite(train_max) or train_max < 0:
+        train_max = 0.0
+    cap_abs = float(abs_cap if abs_cap is not None else FORECAST_ABS_CAP)
+    return min(cap_abs, max(train_max * rel_cap, train_max + 1.0))
+
+
+def _sanitize_forecast(
+    fc,
+    y_hist,
+    *,
+    abs_cap: float | None = None,
+    rel_cap: float = FORECAST_REL_CAP,
+) -> np.ndarray:
+    fc = np.asarray(fc, dtype=float).ravel()
+    cap = _forecast_cap_from_hist(y_hist, abs_cap=abs_cap, rel_cap=rel_cap)
+    fc = np.where(np.isfinite(fc), fc, np.nan)
+    fc = np.nan_to_num(fc, nan=0.0, posinf=cap, neginf=0.0)
+    return np.clip(fc, 0.0, cap)
+
+
+def holdout_forecast_is_valid(
+    y_hat,
+    y_train,
+    *,
+    rel_cap: float = FORECAST_REL_CAP,
+    abs_cap: float | None = None,
+) -> bool:
+    """False если holdout-прогноз не конечный или превышает cap от train."""
+    y_hat = np.asarray(y_hat, dtype=float).ravel()
+    if y_hat.size == 0 or not np.all(np.isfinite(y_hat)):
+        return False
+    cap = _forecast_cap_from_hist(y_train, abs_cap=abs_cap, rel_cap=rel_cap)
+    return float(np.max(y_hat)) <= cap + 1e-9
 
 
 def _statsmodels_module_tag(warning) -> str:
@@ -216,7 +264,7 @@ def train_ets_per_series(
             )
         except Exception:
             fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
+        preds.loc[test_part.index] = _sanitize_forecast(fc, y_hist)
     return preds.values
 
 
@@ -282,7 +330,7 @@ def train_theta_per_series(
             fc = np.asarray(fc, dtype=float).ravel()
         except Exception:
             fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
+        preds.loc[test_part.index] = _sanitize_forecast(fc, y_hist)
     return preds.values
 
 
@@ -364,7 +412,7 @@ def train_sarimax_per_series(
             fc = np.asarray(fc, dtype=float).ravel()
         except Exception:
             fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
+        preds.loc[test_part.index] = _sanitize_forecast(fc, y_hist)
     return preds.values
 
 
@@ -435,7 +483,7 @@ def train_auto_arima_per_series(
             fc = np.asarray(fc, dtype=float).ravel()
         except Exception:
             fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
+        preds.loc[test_part.index] = _sanitize_forecast(fc, y_hist)
     return preds.values
 
 
@@ -592,7 +640,7 @@ def train_statsforecast_per_series(
                 fc = fc[:n_fc] if fc.shape[0] > n_fc else np.resize(fc, n_fc)
         except Exception:
             fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
+        preds.loc[test_part.index] = _sanitize_forecast(fc, y_hist)
     return preds.values
 
 
@@ -662,7 +710,7 @@ def train_statsforecast_intermittent_per_series(
                 fc = fc[:n_fc] if fc.shape[0] > n_fc else np.resize(fc, n_fc)
         except Exception:
             fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
+        preds.loc[test_part.index] = _sanitize_forecast(fc, y_hist)
     return preds.values
 
 
@@ -728,7 +776,7 @@ def train_ucm_per_series(
             fc = np.asarray(fc, dtype=float).ravel()
         except Exception:
             fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
+        preds.loc[test_part.index] = _sanitize_forecast(fc, y_hist)
     return preds.values
 
 
@@ -751,6 +799,7 @@ def _local_recursive_forecast(model, scaler, y_hist: np.ndarray, n_fc: int, max_
     history = list(np.asarray(y_hist, dtype=float))
     fc = []
     fallback = float(np.mean(history)) if history else 0.0
+    cap_step = _forecast_cap_from_hist(y_hist)
     for _ in range(n_fc):
         if len(history) < max_lag:
             pred = fallback
@@ -759,6 +808,7 @@ def _local_recursive_forecast(model, scaler, y_hist: np.ndarray, n_fc: int, max_
             if use_scaler and scaler is not None:
                 xrow = scaler.transform(xrow)
             pred = float(model.predict(xrow)[0])
+        pred = max(0.0, min(float(pred), cap_step))
         fc.append(pred)
         history.append(pred)
     return np.array(fc, dtype=float)
@@ -857,7 +907,7 @@ def train_local_supervised_per_series(
             fc = _local_recursive_forecast(model, scaler, y_hist, n_fc, L, use_scaler)
         except Exception:
             fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
+        preds.loc[test_part.index] = _sanitize_forecast(fc, y_hist)
     return preds.values
 
 
@@ -930,17 +980,18 @@ def train_glm_count_per_series(
                 caught=w_fit,
             )
             history = list(np.maximum(np.round(y_hist), 0).astype(float))
+            cap_step = _forecast_cap_from_hist(y_hist)
             fc = []
             for _ in range(n_fc):
                 x1 = np.array([[1.0, history[-1]]])
                 mu = float(np.squeeze(res.predict(x1)))
-                pred = max(0.0, mu)
+                pred = max(0.0, min(mu, cap_step))
                 fc.append(pred)
                 history.append(float(max(0, round(pred))))
             fc = np.array(fc, dtype=float)
         except Exception:
             fc = np.full(n_fc, np.mean(y_hist) if len(y_hist) > 0 else 0)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
+        preds.loc[test_part.index] = _sanitize_forecast(fc, y_hist)
     return preds.values
 
 
@@ -973,7 +1024,7 @@ def train_window_median_per_series(
                 fc.append(float(np.median(tail)))
             history.append(fc[-1])
         fc = np.array(fc, dtype=float)
-        preds.loc[test_part.index] = np.maximum(fc, 0)
+        preds.loc[test_part.index] = _sanitize_forecast(fc, y_hist)
     return preds.values
 
 

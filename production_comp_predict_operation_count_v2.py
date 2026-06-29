@@ -39,8 +39,11 @@ WINNER_CONFIG_DIR: Path = Path(".")
 WINNER_CONFIG_JSON: Path = WINNER_CONFIG_DIR / WINNER_CONFIG_FILENAME
 
 from scripts.production_comparison_tsa_per_series_nb37_trainers import (  # noqa: E402
+    FORECAST_REL_CAP,
     SERIES_CONFIGS,
+    _sanitize_forecast,
     cleanup_memory,
+    holdout_forecast_is_valid,
     train_auto_arima_per_series,
     train_ets_per_series,
     train_glm_count_per_series,
@@ -405,7 +408,18 @@ class ConfigTournamentRunner:
                     cfg_name, df_sorted["operation_id"].iloc[0], resist_id, exc,
                 )
                 continue
-            _, _, kachestvo = _calc_metrics(y_true, np.asarray(y_hat, dtype=float))
+            y_hat_arr = np.asarray(y_hat, dtype=float)
+            y_train_arr = df_sorted.loc[mask_train, "fact_value"].astype(float).values
+            if not holdout_forecast_is_valid(
+                y_hat_arr, y_train_arr, rel_cap=FORECAST_REL_CAP,
+            ):
+                logger.debug(
+                    "tournament reject config=%s op=%s rid=%s: holdout exceeds cap",
+                    cfg_name, df_sorted["operation_id"].iloc[0], resist_id,
+                )
+                cleanup_memory()
+                continue
+            _, _, kachestvo = _calc_metrics(y_true, y_hat_arr)
             if kachestvo > best_q or (
                 abs(kachestvo - best_q) < 1e-9 and (best_name is None or cfg_name < best_name)
             ):
@@ -473,7 +487,8 @@ class ProductionForecaster:
             return np.zeros(self._horizon, dtype=float)
         if winner == FALLBACK_AVERAGE_LABEL:
             const = float(np.mean(y_hist))
-            return np.full(self._horizon, max(0.0, const), dtype=float)
+            raw = np.full(self._horizon, max(0.0, const), dtype=float)
+            return _sanitize_forecast(raw, y_hist, rel_cap=FORECAST_REL_CAP)
         history = list(y_hist)
         out: List[float] = []
         for _ in range(self._horizon):
@@ -481,7 +496,7 @@ class ProductionForecaster:
             v = float(np.median(tail)) if tail else 0.0
             out.append(max(0.0, v))
             history.append(out[-1])
-        return np.asarray(out, dtype=float)
+        return _sanitize_forecast(np.asarray(out, dtype=float), y_hist, rel_cap=FORECAST_REL_CAP)
 
     def _series_forecast(self, df_sorted: pd.DataFrame, resist_id: int, winner: str) -> np.ndarray:
         if winner not in self._configs:
@@ -528,7 +543,12 @@ class ProductionForecaster:
             return self._fallback_forecast(df_sorted, FALLBACK_WINDOW_MEDIAN_3_LABEL)
         finally:
             cleanup_memory()
-        y_arr = np.asarray(y_hat, dtype=float).ravel()
+        y_hist = df_sorted["fact_value"].astype(float).fillna(0.0).values
+        y_arr = _sanitize_forecast(
+            np.asarray(y_hat, dtype=float).ravel(),
+            y_hist,
+            rel_cap=FORECAST_REL_CAP,
+        )
         if y_arr.shape[0] != self._horizon:
             y_arr = np.resize(y_arr, self._horizon)
         return y_arr
