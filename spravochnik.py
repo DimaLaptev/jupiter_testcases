@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from path_bootstrap import bootstrap
@@ -11,9 +12,8 @@ bootstrap()
 from sql_upload.excel_grid import cell_at, last_row_in_column, read_workbook_sheets
 from sql_upload.predsvod_layout import (
     SPRAV1_ACCOUNT_COL,
-    SPRAV1_COL_END,
+    SPRAV1_PORTFOLIO_SECTION_COL,
     SPRAV1_ROW_START,
-    SPRAV2_COL_END,
     SPRAV2_ROW_START,
 )
 
@@ -24,8 +24,8 @@ def _norm_account(s: str | None) -> str:
     return (s or "").strip().casefold()
 
 
-def _norm_depo(s: str | None) -> str:
-    return (s or "").strip().casefold()
+def _norm_header(h: str) -> str:
+    return re.sub(r"\s+", " ", (h or "").strip().casefold())
 
 
 class Sprav1Lookup:
@@ -60,6 +60,7 @@ class Sprav1Lookup:
                 enc = ""
             if "кодификатор" in vid.lower() or "см." in vid.lower():
                 vid = ""
+            portfolio = cell_at(rows, r, SPRAV1_PORTFOLIO_SECTION_COL).strip() or None
             lookup._by_account[_norm_account(account)] = Sprav1Record(
                 depository=cell_at(rows, r, 2) or None,
                 owner=cell_at(rows, r, 10) or None,
@@ -67,6 +68,7 @@ class Sprav1Lookup:
                 sdelka_ia=cell_at(rows, r, 6) or None,
                 enc=enc or None,
                 vid_ucheta=vid or None,
+                portfolio_section=portfolio,
             )
         return lookup
 
@@ -75,10 +77,16 @@ class Sprav1Lookup:
             return None
         return self._by_account.get(_norm_account(schet_depo))
 
+    def portfolio_section(self, schet_depo: str | None) -> str | None:
+        rec = self.get(schet_depo)
+        if rec is None:
+            return None
+        return rec.portfolio_section
+
 
 class Sprav2Lookup:
     def __init__(self) -> None:
-        self._by_depo_section: dict[tuple[str, str], str] = {}
+        self._by_section: dict[str, str] = {}
 
     @classmethod
     def load(cls, path: Path, sheet_index: int = 1) -> Sprav2Lookup:
@@ -97,31 +105,42 @@ class Sprav2Lookup:
             return lookup
 
         _name, rows = sheets[sheet_index]
-        last = last_row_in_column(rows, 1)
+        if not rows:
+            return lookup
+
+        header_row = 1
+        header = rows[header_row - 1] if header_row <= len(rows) else []
+        col_map = {_norm_header(h): i for i, h in enumerate(header) if (h or "").strip()}
+
+        section_col: int | None = None
+        city_col: int | None = None
+        for key, idx in col_map.items():
+            if "номер раздела" in key and "текст" in key:
+                section_col = idx + 1
+            if "город" in key and "место хранения" in key:
+                city_col = idx + 1
+
+        if section_col is None or city_col is None:
+            section_col = section_col or 2
+            city_col = city_col or 3
+
+        last = last_row_in_column(rows, section_col)
         for r in range(SPRAV2_ROW_START, last + 1):
-            depo = cell_at(rows, r, 1)
-            section = cell_at(rows, r, 2)
-            city = cell_at(rows, r, 3)
+            section = cell_at(rows, r, section_col)
+            city = cell_at(rows, r, city_col)
             if not section.strip():
                 continue
-            lookup._by_depo_section[(_norm_depo(depo), section.strip())] = city.strip()
+            lookup._by_section[section.strip()] = city.strip()
         return lookup
 
-    def get(self, depository: str | None, section: str | None, aliases: dict[str, str] | None = None) -> str | None:
+    def get(self, section: str | None) -> str | None:
         if not section:
             return None
         sec = section.strip()
-        depo_keys = [_norm_depo(depository)]
-        if aliases and depository:
-            alias = aliases.get(_norm_depo(depository))
-            if alias:
-                depo_keys.append(_norm_depo(alias))
-
-        for dk in depo_keys:
-            city = self._by_depo_section.get((dk, sec))
-            if city:
-                return city
-        for (d, s), city in self._by_depo_section.items():
-            if s == sec and (not depository or d in depo_keys):
-                return city
+        city = self._by_section.get(sec)
+        if city:
+            return city
+        for key, val in self._by_section.items():
+            if key.casefold() == sec.casefold():
+                return val
         return None

@@ -2,32 +2,56 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
 
 
 class SourceKind(str, Enum):
     GPB = "GPB"
     RSD_MSG = "RSD_MSG"
-    RSD_XLS = "RSD_xls"
+    RSD_R05 = "RSD_R05"
+    RSD_XLS = "RSD_xls"  # alias для совместимости
     REGION = "REGION"
     VTBSD = "VTBSD"
 
 
-class OutputSheet(str, Enum):
+class DepoDomSheet(str, Enum):
+    """Листы DEPO_DOM для lookup по источнику."""
+
     GPB = "GPB"
     RSD_MSG = "RSD_MSG"
     REGION = "REGION"
     VTBSD = "VTBSD"
 
 
-SOURCE_TO_SHEET: dict[SourceKind, OutputSheet] = {
-    SourceKind.GPB: OutputSheet.GPB,
-    SourceKind.RSD_MSG: OutputSheet.RSD_MSG,
-    SourceKind.RSD_XLS: OutputSheet.RSD_MSG,
-    SourceKind.REGION: OutputSheet.REGION,
-    SourceKind.VTBSD: OutputSheet.VTBSD,
+SOURCE_TO_DEPO_DOM_SHEET: dict[SourceKind, DepoDomSheet] = {
+    SourceKind.GPB: DepoDomSheet.GPB,
+    SourceKind.RSD_MSG: DepoDomSheet.RSD_MSG,
+    SourceKind.RSD_R05: DepoDomSheet.RSD_MSG,
+    SourceKind.RSD_XLS: DepoDomSheet.RSD_MSG,
+    SourceKind.REGION: DepoDomSheet.REGION,
+    SourceKind.VTBSD: DepoDomSheet.VTBSD,
+}
+
+PORTFOLIO_SHEET_DOM_IA = "ДОМ ИА"
+PORTFOLIO_SHEET_VTB = "ДОМ ИА-Оригинатор ВТБ"
+PORTFOLIO_SHEET_SBER = "ДОМ ИА-Оригинатор Сбер"
+PORTFOLIO_SHEET_REZERVIS = "ДОМ_Оригинатор ДОМ_РезСервис"
+
+SVOD_IA_SHEETS: tuple[str, ...] = (
+    PORTFOLIO_SHEET_DOM_IA,
+    PORTFOLIO_SHEET_VTB,
+    PORTFOLIO_SHEET_SBER,
+)
+SVOD_DOM_SHEETS: tuple[str, ...] = (PORTFOLIO_SHEET_REZERVIS,)
+
+ALL_PORTFOLIO_SHEETS: tuple[str, ...] = SVOD_IA_SHEETS + SVOD_DOM_SHEETS
+
+PORTFOLIO_TO_WORKBOOK: dict[str, str] = {
+    PORTFOLIO_SHEET_DOM_IA: "svod",
+    PORTFOLIO_SHEET_VTB: "svod",
+    PORTFOLIO_SHEET_SBER: "svod",
+    PORTFOLIO_SHEET_REZERVIS: "svod_dom",
 }
 
 
@@ -71,11 +95,12 @@ class Sprav1Record:
     sdelka_ia: str | None
     enc: str | None
     vid_ucheta: str | None
+    portfolio_section: str | None = None
 
 
 @dataclass
 class SvodRow:
-    """Строка выходного свода (колонки A–AA)."""
+    """Строка выходного свода (колонки A–Z)."""
 
     n_zakladnoy_portfel: str | None = None
     n_zakladnoy_dom: str | None = None
@@ -120,7 +145,6 @@ class SvodRow:
             self.ngri_v_portfele,
             self.enc,
             self.vid_ucheta,
-            None,  # O — не используется в новой спецификации
             self.sostoyanie,
             self.servisny_agent,
             self.sdelka_ia,
@@ -151,7 +175,6 @@ SVOD_HEADERS: tuple[str, ...] = (
     "НГРИ в портфеле",
     "ENC",
     "Вид учета",
-    "",  # O
     "Состояние",
     "Сервисный агент",
     "Сделка ИА",

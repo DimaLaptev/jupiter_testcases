@@ -14,6 +14,9 @@ class PipelinePaths:
     depo_dom: Path
     sprav_workbook: Path
     template_workbook: Path
+    template_dom_workbook: Path
+    svod_workbook: Path
+    svod_dom_workbook: Path
     gpb: Path
     rsd_msg: Path
     rsd_exl: Path
@@ -79,7 +82,10 @@ def load_config(pipeline_root: Path) -> PipelinePaths:
         output_dir=resolve("output_dir", "output"),
         depo_dom=resolve("depo_dom", "source/DEPO_DOM.xlsx"),
         sprav_workbook=resolve("sprav_workbook", "source/SPRAV/Справочник.xlsx"),
-        template_workbook=resolve("template_workbook", "source/2_СВОД_поДЕПО.xlsx"),
+        template_workbook=resolve("template_workbook", "source/СВОД_поДЕПО.xlsx"),
+        template_dom_workbook=resolve("template_dom_workbook", "source/СВОД_поДЕПО_ДОМ.xlsx"),
+        svod_workbook=resolve("svod_workbook", "output/СВОД_поДЕПО.xlsx"),
+        svod_dom_workbook=resolve("svod_dom_workbook", "output/СВОД_поДЕПО_ДОМ.xlsx"),
         gpb=resolve("gpb", "source/GPB"),
         rsd_msg=resolve("rsd_msg", "source/RSD_MSG"),
         rsd_exl=resolve("rsd_exl", "source/RSD_EXL"),

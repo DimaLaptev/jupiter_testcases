@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import sys
+from typing import TextIO
+
+from date_format import format_date_ddmmyyyy
 from models import (
-    SOURCE_TO_SHEET,
+    ALL_PORTFOLIO_SHEETS,
+    SOURCE_TO_DEPO_DOM_SHEET,
     DepoReportRow,
-    SourceKind,
     SvodRow,
 )
 from references.depo_dom import DepoDomIndex
@@ -35,7 +39,7 @@ def _apply_depo_dom(svod: SvodRow, dom, *, fill_kd: bool) -> None:
     if fill_kd and dom.nomer_kd:
         svod.nomer_kd = dom.nomer_kd
     if dom.data_pogasheniya:
-        svod.data_pogasheniya = dom.data_pogasheniya
+        svod.data_pogasheniya = format_date_ddmmyyyy(dom.data_pogasheniya)
     if dom.mos_nz:
         svod.mos_nz = dom.mos_nz
     if dom.comment:
@@ -51,9 +55,8 @@ def build_svod_row(
     depo_dom: DepoDomIndex,
     sprav1: Sprav1Lookup,
     sprav2: Sprav2Lookup,
-    depository_aliases: dict[str, str] | None = None,
 ) -> SvodRow:
-    sheet = SOURCE_TO_SHEET[do.source_kind].value
+    depo_dom_sheet = SOURCE_TO_DEPO_DOM_SHEET[do.source_kind].value
     svod = SvodRow(
         schet_depo=do.schet_depo or None,
         razdel_scheta=do.razdel_scheta or None,
@@ -74,7 +77,7 @@ def build_svod_row(
 
     fill_kd_from_dom = use_depo_dom_portfolio(do.source_kind) and not kd_from_do(do.source_kind)
     if use_depo_dom_portfolio(do.source_kind):
-        dom = depo_dom.by_ngri(sheet, do.ngri_v_depo)
+        dom = depo_dom.by_ngri(depo_dom_sheet, do.ngri_v_depo)
         if dom:
             _apply_depo_dom(svod, dom, fill_kd=fill_kd_from_dom)
 
@@ -85,7 +88,7 @@ def build_svod_row(
         svod.nomer_kd = do.nomer_kd
 
     if data_priema_from_do(do.source_kind) and do.data_priema:
-        svod.data_priema = do.data_priema
+        svod.data_priema = format_date_ddmmyyyy(do.data_priema)
 
     const_status = status_constant(do.source_kind)
     if const_status:
@@ -99,7 +102,7 @@ def build_svod_row(
         svod.enc = cod.enc
         svod.vid_ucheta = cod.vid_ucheta
 
-    city = sprav2.get(svod.depository, do.razdel_scheta, depository_aliases)
+    city = sprav2.get(svod.razdel_scheta)
     if city:
         svod.gorod_hraneniya = city
 
@@ -114,17 +117,24 @@ def build_all_rows(
     depo_dom: DepoDomIndex,
     sprav1: Sprav1Lookup,
     sprav2: Sprav2Lookup,
-    depository_aliases: dict[str, str] | None = None,
+    *,
+    warn: TextIO | None = None,
 ) -> dict[str, list[SvodRow]]:
-    by_sheet: dict[str, list[SvodRow]] = {
-        "GPB": [],
-        "RSD_MSG": [],
-        "REGION": [],
-        "VTBSD": [],
-    }
+    out: TextIO = warn or sys.stdout
+    by_sheet: dict[str, list[SvodRow]] = {name: [] for name in ALL_PORTFOLIO_SHEETS}
+    skipped = 0
     for do in do_rows:
-        sheet = SOURCE_TO_SHEET[do.source_kind].value
-        by_sheet[sheet].append(
-            build_svod_row(do, depo_dom, sprav1, sprav2, depository_aliases),
+        portfolio = sprav1.portfolio_section(do.schet_depo)
+        if not portfolio or portfolio not in by_sheet:
+            skipped += 1
+            out.write(
+                f"  предупреждение: пропуск строки — нет «Раздел КП для Свода депо» "
+                f"для счёта {do.schet_depo!r} (НГРИ {do.ngri_v_depo})\n",
+            )
+            continue
+        by_sheet[portfolio].append(
+            build_svod_row(do, depo_dom, sprav1, sprav2),
         )
+    if skipped:
+        out.write(f"  пропущено строк без маршрутизации: {skipped}\n")
     return by_sheet

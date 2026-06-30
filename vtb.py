@@ -24,8 +24,9 @@ def _parse_vtb_sheet(sheet_rows: list[list[str]], source_file: str) -> list[Depo
 
     for r in range(13, last_row + 1):
         section_text = cell_at(sheet_rows, r, 2)
+        razdel_mesto = cell_at(sheet_rows, r, 4)
         ngri = cell_at(sheet_rows, r, 9)
-        if not ngri.strip() and not section_text.strip():
+        if not ngri.strip() and not section_text.strip() and not razdel_mesto.strip():
             continue
         if not ngri.strip():
             continue
@@ -37,7 +38,7 @@ def _parse_vtb_sheet(sheet_rows: list[list[str]], source_file: str) -> list[Depo
         if basis.strip():
             nomer_kd = basis.strip()
 
-        razdel = section_text.strip()
+        razdel = razdel_mesto.strip() or section_text.strip()
         if " - " in razdel:
             razdel = razdel.split(" - ", 1)[0].strip()
         elif razdel.startswith("["):

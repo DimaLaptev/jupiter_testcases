@@ -1,1 +1,1 @@
-"""SVOD DEPO pipeline — сборка 2_СВОД_поДЕПО.xlsx."""
+"""SVOD DEPO pipeline — сборка СВОД_поДЕПО.xlsx и СВОД_поДЕПО_ДОМ.xlsx."""

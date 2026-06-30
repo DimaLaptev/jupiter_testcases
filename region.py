@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from path_bootstrap import bootstrap
@@ -23,16 +22,6 @@ from extract.region_formats import (
     read_region_sheet_rows,
 )
 from models import DepoReportRow, SourceKind
-
-
-def _division_to_section(name: str) -> str:
-    s = (name or "").strip()
-    if not s:
-        return ""
-    m = re.match(r"^(\d+)", s)
-    if m:
-        return m.group(1)
-    return s
 
 
 def _row_from_region2(sheet_rows: list[list[str]], source_file: str) -> list[DepoReportRow]:
@@ -64,7 +53,7 @@ def _row_from_region2(sheet_rows: list[list[str]], source_file: str) -> list[Dep
                 source_kind=SourceKind.REGION,
                 source_file=source_file,
                 schet_depo=schet or "",
-                razdel_scheta=_division_to_section(division or ""),
+                razdel_scheta=(division or "").strip(),
                 ngri_v_depo=ngri,
                 status=None,
                 nomer_kd=kd or None,
@@ -120,7 +109,7 @@ def _row_from_region_v1(sheet_rows: list[list[str]], source_file: str) -> list[D
                 source_kind=SourceKind.REGION,
                 source_file=source_file,
                 schet_depo=g("account"),
-                razdel_scheta=_division_to_section(g("division")),
+                razdel_scheta=g("division"),
                 ngri_v_depo=ngri,
                 status=g("status") or None,
                 nomer_kd=g("kd") or None,

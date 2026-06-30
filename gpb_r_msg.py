@@ -66,7 +66,7 @@ def parse_gpb_r_msg(path: Path) -> list[DepoReportRow]:
                 source_kind=SourceKind.GPB,
                 source_file=source_name,
                 schet_depo=_field(parts, 1),
-                razdel_scheta=_field(parts, 3),
+                razdel_scheta=_field(parts, 2),
                 ngri_v_depo=ngri,
                 status=status or "На хранении",
             ),

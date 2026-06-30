@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Сборка 2_СВОД_поДЕПО.xlsx из source/."""
+"""Сборка СВОД_поДЕПО.xlsx и СВОД_поДЕПО_ДОМ.xlsx из source/."""
 
 from __future__ import annotations
 
@@ -17,20 +17,20 @@ from config import load_config
 from extract.gpb_r_msg import iter_gpb_rows
 from extract.region import iter_region_rows
 from extract.rsd_msg import iter_rsd_msg_rows
-from extract.rsd_r01 import iter_rsd_r01_rows
+from extract.rsd_r05 import iter_rsd_r05_rows
 from extract.vtb import iter_vtb_rows
 from references.depo_dom import DepoDomIndex
 from references.spravochnik import Sprav1Lookup, Sprav2Lookup
 from unpack import prepare_staging
-from write.excel_writer import write_svod_workbook
+from write.excel_writer import write_svod_workbooks
 
 
 def collect_do_rows(cfg, staging: Path) -> list:
     rows = []
     rows.extend(iter_gpb_rows(cfg.gpb))
     rows.extend(iter_rsd_msg_rows(cfg.rsd_msg))
-    rows.extend(iter_rsd_r01_rows(staging / "RSD_EXL"))
-    rows.extend(iter_rsd_r01_rows(cfg.rsd_exl))
+    rows.extend(iter_rsd_r05_rows(staging / "RSD_EXL"))
+    rows.extend(iter_rsd_r05_rows(cfg.rsd_exl))
     region_root = staging / "REGION" if (staging / "REGION").is_dir() else cfg.region
     rows.extend(iter_region_rows(region_root, cfg.region_exclude_accounts))
     vtbsd_root = staging / "VTBSD" if (staging / "VTBSD").is_dir() else cfg.vtbsd
@@ -51,13 +51,20 @@ def main(argv: list[str] | None = None) -> int:
         "--output",
         type=Path,
         default=None,
-        help="Путь к выходному xlsx",
+        help="Путь к СВОД_поДЕПО.xlsx (основной файл)",
+    )
+    parser.add_argument(
+        "--output-dom",
+        type=Path,
+        default=None,
+        help="Путь к СВОД_поДЕПО_ДОМ.xlsx",
     )
     args = parser.parse_args(argv)
 
     cfg = load_config(args.pipeline_root)
     report_date = args.report_date or cfg.report_date
-    output = args.output or (cfg.output_dir / "2_СВОД_поДЕПО.xlsx")
+    svod_path = args.output or cfg.svod_workbook
+    svod_dom_path = args.output_dom or cfg.svod_dom_workbook
 
     staging = prepare_staging([cfg.region, cfg.rsd_exl], cfg.staging)
 
@@ -66,21 +73,23 @@ def main(argv: list[str] | None = None) -> int:
     sprav2 = Sprav2Lookup.load(cfg.sprav_workbook)
 
     do_rows = collect_do_rows(cfg, staging)
-    rows_by_sheet = build_all_rows(
-        do_rows,
-        depo_dom,
-        sprav1,
-        sprav2,
-        cfg.depository_aliases,
-    )
+    rows_by_sheet = build_all_rows(do_rows, depo_dom, sprav1, sprav2)
 
     template = cfg.template_workbook if cfg.template_workbook.is_file() else None
-    write_svod_workbook(output, rows_by_sheet, report_date, template)
+    template_dom = cfg.template_dom_workbook if cfg.template_dom_workbook.is_file() else None
+    write_svod_workbooks(
+        svod_path,
+        svod_dom_path,
+        rows_by_sheet,
+        report_date,
+        template,
+        template_dom,
+    )
 
     total = sum(len(v) for v in rows_by_sheet.values())
     for name, rows in rows_by_sheet.items():
         print(f"  {name}: {len(rows)} строк")
-    print(f"Итого: {total} строк -> {output}")
+    print(f"Итого: {total} строк -> {svod_path}, {svod_dom_path}")
     return 0
 
 
