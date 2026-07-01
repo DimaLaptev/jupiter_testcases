@@ -33,25 +33,16 @@ def _parse_vtb_sheet(sheet_rows: list[list[str]], source_file: str) -> list[Depo
 
         data_priema = cell_at(sheet_rows, r, 5) or None
         fio = cell_at(sheet_rows, r, 6) or None
-        nomer_kd = None
-        basis = cell_at(sheet_rows, r, 8)
-        if basis.strip():
-            nomer_kd = basis.strip()
+        nomer_kd = cell_at(sheet_rows, r, 11).strip() or None
 
-        razdel = razdel_mesto.strip() or section_text.strip()
-        if " - " in razdel:
-            razdel = razdel.split(" - ", 1)[0].strip()
-        elif razdel.startswith("["):
-            parts = razdel.split("]", 1)
-            if len(parts) > 1:
-                razdel = parts[0].lstrip("[").strip()
+        razdel = (razdel_mesto or section_text).strip()
 
         out.append(
             DepoReportRow(
                 source_kind=SourceKind.VTBSD,
                 source_file=source_file,
                 schet_depo=schet,
-                razdel_scheta=razdel or section_text.strip(),
+                razdel_scheta=razdel,
                 ngri_v_depo=ngri.strip(),
                 status=None,
                 data_priema=data_priema,

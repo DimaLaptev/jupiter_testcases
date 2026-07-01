@@ -87,6 +87,7 @@ class Sprav1Lookup:
 class Sprav2Lookup:
     def __init__(self) -> None:
         self._by_section: dict[str, str] = {}
+        self._depository_rows: list[tuple[str, str]] = []
 
     @classmethod
     def load(cls, path: Path, sheet_index: int = 1) -> Sprav2Lookup:
@@ -112,25 +113,33 @@ class Sprav2Lookup:
         header = rows[header_row - 1] if header_row <= len(rows) else []
         col_map = {_norm_header(h): i for i, h in enumerate(header) if (h or "").strip()}
 
+        depository_col: int | None = None
         section_col: int | None = None
         city_col: int | None = None
         for key, idx in col_map.items():
+            if key == "депозитарий" or key.startswith("депозитарий"):
+                depository_col = idx + 1
             if "номер раздела" in key and "текст" in key:
                 section_col = idx + 1
             if "город" in key and "место хранения" in key:
                 city_col = idx + 1
 
-        if section_col is None or city_col is None:
-            section_col = section_col or 2
-            city_col = city_col or 3
+        depository_col = depository_col or 1
+        section_col = section_col or 2
+        city_col = city_col or 3
 
-        last = last_row_in_column(rows, section_col)
+        last = max(
+            last_row_in_column(rows, depository_col),
+            last_row_in_column(rows, section_col),
+        )
         for r in range(SPRAV2_ROW_START, last + 1):
-            section = cell_at(rows, r, section_col)
-            city = cell_at(rows, r, city_col)
-            if not section.strip():
-                continue
-            lookup._by_section[section.strip()] = city.strip()
+            depo = cell_at(rows, r, depository_col).strip()
+            section = cell_at(rows, r, section_col).strip()
+            city = cell_at(rows, r, city_col).strip()
+            if depo and city:
+                lookup._depository_rows.append((depo, city))
+            if section:
+                lookup._by_section[section] = city
         return lookup
 
     def get(self, section: str | None) -> str | None:
@@ -143,4 +152,13 @@ class Sprav2Lookup:
         for key, val in self._by_section.items():
             if key.casefold() == sec.casefold():
                 return val
+        return None
+
+    def get_by_depository_substring(self, *needles: str) -> str | None:
+        """Первая строка, где «Депозитарий» содержит одну из подстрок."""
+        for depo, city in self._depository_rows:
+            depo_norm = depo.casefold()
+            for needle in needles:
+                if needle.casefold() in depo_norm:
+                    return city
         return None

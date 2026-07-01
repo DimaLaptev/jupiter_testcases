@@ -10,6 +10,7 @@ from models import (
     ALL_PORTFOLIO_SHEETS,
     SOURCE_TO_DEPO_DOM_SHEET,
     DepoReportRow,
+    SourceKind,
     SvodRow,
 )
 from references.depo_dom import DepoDomIndex
@@ -102,7 +103,12 @@ def build_svod_row(
         svod.enc = cod.enc
         svod.vid_ucheta = cod.vid_ucheta
 
-    city = sprav2.get(svod.razdel_scheta)
+    if do.source_kind == SourceKind.REGION:
+        city = sprav2.get_by_depository_substring("регион", "дк регион")
+    elif do.source_kind == SourceKind.VTBSD:
+        city = sprav2.get_by_depository_substring("втб")
+    else:
+        city = sprav2.get(svod.razdel_scheta)
     if city:
         svod.gorod_hraneniya = city
 

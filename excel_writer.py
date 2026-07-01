@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill
 from openpyxl.worksheet.worksheet import Worksheet
 
 from models import (
@@ -17,6 +18,23 @@ from models import (
 
 HEADER_ROW = 5
 DATA_START_ROW = 6
+
+HEADER_FILL = PatternFill(start_color="0070C0", end_color="0070C0", fill_type="solid")
+HEADER_FONT = Font(color="FFFFFF", bold=True)
+HIGHLIGHT_COL_FILL = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
+HIGHLIGHT_COLUMNS = (1, 2, 5, 6, 11)  # A, B, E, F, K
+
+
+def _apply_sheet_styles(ws: Worksheet, last_data_row: int) -> None:
+    for c in range(1, len(SVOD_HEADERS) + 1):
+        cell = ws.cell(row=HEADER_ROW, column=c)
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+    if last_data_row < DATA_START_ROW:
+        return
+    for col in HIGHLIGHT_COLUMNS:
+        for r in range(DATA_START_ROW, last_data_row + 1):
+            ws.cell(row=r, column=col).fill = HIGHLIGHT_COL_FILL
 
 
 def _write_data_rows(ws: Worksheet, rows: list[SvodRow], start_row: int = DATA_START_ROW) -> int:
@@ -60,7 +78,9 @@ def _write_workbook(
             ws.cell(row=1, column=3, value=count)
             if ws.max_row >= DATA_START_ROW:
                 ws.delete_rows(DATA_START_ROW, ws.max_row - DATA_START_ROW + 1)
-            _write_data_rows(ws, rows_by_sheet.get(sheet_name, []))
+            written = _write_data_rows(ws, rows_by_sheet.get(sheet_name, []))
+            last_row = DATA_START_ROW + written - 1 if written else DATA_START_ROW - 1
+            _apply_sheet_styles(ws, last_row)
         for name in list(wb.sheetnames):
             if name not in sheet_order:
                 del wb[name]
@@ -76,7 +96,9 @@ def _write_workbook(
         ws = wb.create_sheet(sheet_name)
         rows = rows_by_sheet.get(sheet_name, [])
         _init_blank_sheet(ws, report_date, len(rows))
-        _write_data_rows(ws, rows)
+        written = _write_data_rows(ws, rows)
+        last_row = DATA_START_ROW + written - 1 if written else DATA_START_ROW - 1
+        _apply_sheet_styles(ws, last_row)
 
     wb.save(output_path)
     wb.close()
