@@ -1,4 +1,4 @@
-"""Загрузка DEPO_DOM.xlsx (свод за пред. месяц)."""
+"""Загрузка DEPO_DOM.xlsx / DEPO_IA.xlsx (свод за пред. месяц)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ bootstrap()
 
 from sql_upload.excel_grid import cell_at, last_row_in_column, read_workbook_sheets
 
-from models import DEPO_DOM_SHEETS, DepoDomRecord
+from models import DEPO_DOM_SHEETS, DEPO_IA_SHEETS, DepoDomRecord
 
 
 def _norm_key(s: str | None) -> str:
@@ -18,26 +18,30 @@ def _norm_key(s: str | None) -> str:
 
 
 class DepoDomIndex:
-    """Индексы по листам DEPO_DOM: by_portfolio[A], by_ngri[K]."""
+    """Индексы по листам отчёта пред. месяца: by_portfolio[A], by_ngri[K]."""
 
     def __init__(self) -> None:
-        self._by_portfolio: dict[str, dict[str, DepoDomRecord]] = {
-            s: {} for s in DEPO_DOM_SHEETS
-        }
-        self._by_ngri: dict[str, dict[str, DepoDomRecord]] = {
-            s: {} for s in DEPO_DOM_SHEETS
-        }
+        self._by_portfolio: dict[str, dict[str, DepoDomRecord]] = {}
+        self._by_ngri: dict[str, dict[str, DepoDomRecord]] = {}
 
     @classmethod
-    def load(cls, path: Path) -> DepoDomIndex:
+    def load(
+        cls,
+        path: Path,
+        sheet_names: tuple[str, ...] = DEPO_DOM_SHEETS,
+    ) -> DepoDomIndex:
         idx = cls()
+        for sheet_name in sheet_names:
+            idx._by_portfolio[sheet_name] = {}
+            idx._by_ngri[sheet_name] = {}
+
         if not path.is_file():
             return idx
 
         wb_sheets = read_workbook_sheets(path)
         sheet_map = {name: rows for name, rows in wb_sheets}
 
-        for sheet_name in DEPO_DOM_SHEETS:
+        for sheet_name in sheet_names:
             rows = sheet_map.get(sheet_name)
             if not rows:
                 for k, v in sheet_map.items():

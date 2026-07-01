@@ -1,4 +1,4 @@
-"""Сборка SvodRow из DepoReportRow + справочники + DEPO_DOM."""
+"""Сборка SvodRow из DepoReportRow + справочники + DEPO_DOM / DEPO_IA."""
 
 from __future__ import annotations
 
@@ -8,7 +8,9 @@ from typing import TextIO
 from date_format import format_date_ddmmyyyy
 from models import (
     ALL_PORTFOLIO_SHEETS,
+    PORTFOLIO_SHEET_REZERVIS,
     SOURCE_TO_DEPO_DOM_SHEET,
+    SOURCE_TO_DEPO_IA_SHEET,
     DepoReportRow,
     SourceKind,
     SvodRow,
@@ -51,13 +53,26 @@ def _apply_depo_dom(svod: SvodRow, dom, *, fill_kd: bool) -> None:
         svod.address = dom.address
 
 
+def _depo_lookup(
+    portfolio_section: str,
+    depo_ia: DepoDomIndex,
+    depo_dom: DepoDomIndex,
+    do: DepoReportRow,
+) -> tuple[DepoDomIndex, str]:
+    if portfolio_section == PORTFOLIO_SHEET_REZERVIS:
+        return depo_dom, SOURCE_TO_DEPO_DOM_SHEET[do.source_kind].value
+    return depo_ia, SOURCE_TO_DEPO_IA_SHEET[do.source_kind]
+
+
 def build_svod_row(
     do: DepoReportRow,
+    portfolio_section: str,
+    depo_ia: DepoDomIndex,
     depo_dom: DepoDomIndex,
     sprav1: Sprav1Lookup,
     sprav2: Sprav2Lookup,
 ) -> SvodRow:
-    depo_dom_sheet = SOURCE_TO_DEPO_DOM_SHEET[do.source_kind].value
+    depo_prior, depo_sheet = _depo_lookup(portfolio_section, depo_ia, depo_dom, do)
     svod = SvodRow(
         schet_depo=do.schet_depo or None,
         razdel_scheta=do.razdel_scheta or None,
@@ -78,7 +93,7 @@ def build_svod_row(
 
     fill_kd_from_dom = use_depo_dom_portfolio(do.source_kind) and not kd_from_do(do.source_kind)
     if use_depo_dom_portfolio(do.source_kind):
-        dom = depo_dom.by_ngri(depo_dom_sheet, do.ngri_v_depo)
+        dom = depo_prior.by_ngri(depo_sheet, do.ngri_v_depo)
         if dom:
             _apply_depo_dom(svod, dom, fill_kd=fill_kd_from_dom)
 
@@ -120,6 +135,7 @@ def build_svod_row(
 
 def build_all_rows(
     do_rows: list[DepoReportRow],
+    depo_ia: DepoDomIndex,
     depo_dom: DepoDomIndex,
     sprav1: Sprav1Lookup,
     sprav2: Sprav2Lookup,
@@ -139,7 +155,7 @@ def build_all_rows(
             )
             continue
         by_sheet[portfolio].append(
-            build_svod_row(do, depo_dom, sprav1, sprav2),
+            build_svod_row(do, portfolio, depo_ia, depo_dom, sprav1, sprav2),
         )
     if skipped:
         out.write(f"  пропущено строк без маршрутизации: {skipped}\n")

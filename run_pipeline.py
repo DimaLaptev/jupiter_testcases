@@ -19,6 +19,7 @@ from extract.region import iter_region_rows
 from extract.rsd_msg import iter_rsd_msg_rows
 from extract.rsd_r05 import iter_rsd_r05_rows
 from extract.vtb import iter_vtb_rows
+from models import DEPO_DOM_SHEETS, DEPO_IA_SHEETS
 from references.depo_dom import DepoDomIndex
 from references.spravochnik import Sprav1Lookup, Sprav2Lookup
 from unpack import prepare_staging
@@ -68,12 +69,13 @@ def main(argv: list[str] | None = None) -> int:
 
     staging = prepare_staging([cfg.region, cfg.rsd_exl], cfg.staging)
 
-    depo_dom = DepoDomIndex.load(cfg.depo_dom)
+    depo_dom = DepoDomIndex.load(cfg.depo_dom, DEPO_DOM_SHEETS)
+    depo_ia = DepoDomIndex.load(cfg.depo_ia, DEPO_IA_SHEETS)
     sprav1 = Sprav1Lookup.load(cfg.sprav_workbook)
     sprav2 = Sprav2Lookup.load(cfg.sprav_workbook)
 
     do_rows = collect_do_rows(cfg, staging)
-    rows_by_sheet = build_all_rows(do_rows, depo_dom, sprav1, sprav2)
+    rows_by_sheet = build_all_rows(do_rows, depo_ia, depo_dom, sprav1, sprav2)
 
     template = cfg.template_workbook if cfg.template_workbook.is_file() else None
     template_dom = cfg.template_dom_workbook if cfg.template_dom_workbook.is_file() else None

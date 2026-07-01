@@ -190,3 +190,13 @@ SVOD_HEADERS: tuple[str, ...] = (
 )
 
 DEPO_DOM_SHEETS = ("GPB", "RSD_MSG", "REGION", "VTBSD")
+DEPO_IA_SHEETS = ("GPB", "REGION", "VTBSD", "RSD_XLS")
+
+SOURCE_TO_DEPO_IA_SHEET: dict[SourceKind, str] = {
+    SourceKind.GPB: "GPB",
+    SourceKind.RSD_MSG: "RSD_XLS",
+    SourceKind.RSD_R05: "RSD_XLS",
+    SourceKind.RSD_XLS: "RSD_XLS",
+    SourceKind.REGION: "REGION",
+    SourceKind.VTBSD: "VTBSD",
+}
