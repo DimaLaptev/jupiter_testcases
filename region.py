@@ -15,11 +15,13 @@ from sql_upload.loaders.region2 import _match_header_columns
 from sql_upload.values import cell_to_sql_value
 
 from extract.region_formats import (
+    _read_xml_root,
     account_from_bracket_filename,
     apply_status_from_format2,
     build_status_by_ngri,
-    is_format1_path,
+    is_depoaccount_balance_root,
     is_format2_path,
+    parse_depoaccount_balance_xml,
     parse_format1_xml,
     parse_format2_vl_xls,
     read_region_sheet_rows,
@@ -125,15 +127,16 @@ def _parse_region_file(path: Path) -> list[DepoReportRow]:
     if is_format2_path(path):
         return parse_format2_vl_xls(path)
 
-    if is_format1_path(path):
-        sheet = read_region_sheet_rows(path)
-        return parse_format1_xml(path, sheet)
-
     suffix = path.suffix.lower()
     if suffix not in (".xls", ".xlsx", ".xml"):
         return []
 
     if suffix == ".xml":
+        root = _read_xml_root(path)
+        if root is not None and is_depoaccount_balance_root(root):
+            rows = parse_depoaccount_balance_xml(path, root)
+            if rows:
+                return rows
         sheet = read_region_sheet_rows(path)
         rows = parse_format1_xml(path, sheet)
         if rows:
@@ -153,10 +156,13 @@ def _diagnose_empty_xml(path: Path) -> str:
     """Краткая причина, почему .xml не дал строк (для лога)."""
     acc = account_from_bracket_filename(path)
     acc_label = acc or "?"
+    root = _read_xml_root(path)
+    if root is not None and is_depoaccount_balance_root(root):
+        return f"счёт {acc_label!r}: DEPOACCOUNT_BALANCE_REPORT без позиций с НГРИ"
     sheet = read_region_sheet_rows(path)
     if not sheet:
         return f"счёт {acc_label!r}: SpreadsheetML пуст или не читается"
-    if not is_format1_path(path) and cell_at(sheet, 1, 1) == "/DEPOACCOUNT_BALANCE_REPORT":
+    if account_from_bracket_filename(path) is None and cell_at(sheet, 1, 1) == "/DEPOACCOUNT_BALANCE_REPORT":
         return f"счёт {acc_label!r}: balance XML — legacy-парсер не извлёк строк"
     if parse_format1_xml(path, sheet):
         return f"счёт {acc_label!r}: неожиданно (parse повторно дал строки)"

@@ -48,6 +48,103 @@ def _read_xml_root(path: Path) -> ET.Element | None:
         return None
 
 
+def _xml_child(parent: ET.Element, tag: str) -> ET.Element | None:
+    for child in parent:
+        if _xml_local_tag(child.tag) == tag:
+            return child
+    return None
+
+
+def _xml_text(parent: ET.Element, tag: str) -> str:
+    child = _xml_child(parent, tag)
+    if child is None:
+        return ""
+    return (child.text or "").strip()
+
+
+def is_depoaccount_balance_root(root: ET.Element) -> bool:
+    return _xml_local_tag(root.tag) == "DEPOACCOUNT_BALANCE_REPORT"
+
+
+def _depoaccount_from_balance_root(root: ET.Element) -> str:
+    header = _xml_child(root, "ReportHeader")
+    if header is None:
+        return ""
+    depo_wrap = _xml_child(header, "DepoAccount")
+    if depo_wrap is None:
+        return ""
+    return _xml_text(depo_wrap, "DepoAccount")
+
+
+def parse_depoaccount_balance_xml(
+    path: Path,
+    root: ET.Element | None = None,
+) -> list[DepoReportRow]:
+    """
+    Сырой XML отчёта DEPOACCOUNT_BALANCE_REPORT (не SpreadsheetML).
+    Position -> Mortgage (RegistrationNumber, AgreementNumber) + DivisionList.
+    """
+    if root is None:
+        root = _read_xml_root(path)
+    if root is None or not is_depoaccount_balance_root(root):
+        return []
+
+    schet_file = account_from_bracket_filename(path) or ""
+    schet_report = _depoaccount_from_balance_root(root)
+    schet_default = schet_report or schet_file
+
+    body = _xml_child(root, "ReportBody")
+    if body is None:
+        return []
+
+    out: list[DepoReportRow] = []
+    for pos_el in body.iter():
+        if _xml_local_tag(pos_el.tag) != "Position":
+            continue
+
+        pos_info = _xml_child(pos_el, "PositionInfo")
+        mortgage = _xml_child(pos_info, "Mortgage") if pos_info is not None else None
+        if mortgage is None:
+            continue
+
+        ngri = _xml_text(mortgage, "RegistrationNumber")
+        if not ngri:
+            continue
+        kd = _xml_text(mortgage, "AgreementNumber") or None
+
+        division_list = _xml_child(pos_el, "DivisionList")
+        divisions: list[str] = []
+        if division_list is not None:
+            for div_el in division_list:
+                if _xml_local_tag(div_el.tag) != "Division":
+                    continue
+                div_info = _xml_child(div_el, "DivisionInfo")
+                if div_info is None:
+                    continue
+                name = _xml_text(div_info, "DivisionName")
+                code = _xml_text(div_info, "DivisionCode")
+                division = name or code
+                if division:
+                    divisions.append(division)
+
+        if not divisions:
+            divisions = [""]
+
+        for division in divisions:
+            out.append(
+                DepoReportRow(
+                    source_kind=SourceKind.REGION,
+                    source_file=path.name,
+                    schet_depo=schet_default,
+                    razdel_scheta=division,
+                    ngri_v_depo=ngri,
+                    status=None,
+                    nomer_kd=kd,
+                ),
+            )
+    return out
+
+
 def _read_spreadsheet_ml(path: Path) -> list[list[str]]:
     root = _read_xml_root(path)
     if root is None:
