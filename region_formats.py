@@ -15,9 +15,69 @@ from sql_upload.values import cell_to_sql_value
 
 from models import DepoReportRow, SourceKind
 
-_SS_NS = {"ss": "urn:schemas-microsoft-com:office:spreadsheet"}
 _BRACKET_ACCOUNT_RE = re.compile(r"^\[([^\]]+)\]")
 _VL_STEM_RE = re.compile(r"^VL[\w]+$", re.IGNORECASE)
+
+
+def _xml_local_tag(tag: str) -> str:
+    if "}" in tag:
+        return tag.rsplit("}", 1)[1]
+    return tag
+
+
+def _xml_attr(element: ET.Element, name: str) -> str | None:
+    for key, value in element.attrib.items():
+        if key == name or key.endswith(f"}}{name}"):
+            return value
+    return None
+
+
+def _read_xml_root(path: Path) -> ET.Element | None:
+    """SpreadsheetML Region часто в UTF-16; ET.parse(path) без encoding может не сработать."""
+    raw = path.read_bytes()
+    if not raw.strip():
+        return None
+    for enc in ("utf-8-sig", "utf-8", "utf-16", "utf-16-le", "utf-16-be", "cp1251"):
+        try:
+            return ET.fromstring(raw.decode(enc))
+        except (UnicodeDecodeError, ET.ParseError):
+            continue
+    try:
+        return ET.parse(path).getroot()
+    except (ET.ParseError, OSError):
+        return None
+
+
+def _read_spreadsheet_ml(path: Path) -> list[list[str]]:
+    root = _read_xml_root(path)
+    if root is None:
+        return []
+
+    rows_out: list[list[str]] = []
+    for row_el in root.iter():
+        if _xml_local_tag(row_el.tag) != "Row":
+            continue
+        row: list[str] = []
+        col_idx = 0
+        for cell in row_el:
+            if _xml_local_tag(cell.tag) != "Cell":
+                continue
+            index_attr = _xml_attr(cell, "Index")
+            if index_attr:
+                target = int(index_attr) - 1
+                while col_idx < target:
+                    row.append("")
+                    col_idx += 1
+            val = ""
+            for child in cell:
+                if _xml_local_tag(child.tag) == "Data":
+                    val = (child.text or "").strip()
+                    break
+            row.append(val)
+            col_idx += 1
+        if any(c.strip() for c in row):
+            rows_out.append(row)
+    return rows_out
 
 
 def account_from_bracket_filename(path: Path) -> str | None:
@@ -41,38 +101,17 @@ def is_format2_path(path: Path) -> bool:
 
 def read_region_sheet_rows(path: Path) -> list[list[str]]:
     """Чтение .xml (SpreadsheetML) или Excel."""
+    if path.suffix.lower() == ".xml":
+        head = path.read_bytes()[:4]
+        if head[:2] == b"PK":
+            sheets = read_workbook_sheets(path)
+            if sheets:
+                return sheets[0][1]
+        return _read_spreadsheet_ml(path)
     sheets = read_workbook_sheets(path)
     if sheets:
         return sheets[0][1]
-    if path.suffix.lower() == ".xml":
-        return _read_spreadsheet_ml(path)
     return []
-
-
-def _read_spreadsheet_ml(path: Path) -> list[list[str]]:
-    try:
-        root = ET.parse(path).getroot()
-    except ET.ParseError:
-        return []
-
-    rows_out: list[list[str]] = []
-    for row_el in root.findall(".//ss:Row", _SS_NS):
-        row: list[str] = []
-        col_idx = 0
-        for cell in row_el.findall("ss:Cell", _SS_NS):
-            index_attr = cell.get("Index") or cell.get(f"{{{_SS_NS['ss']}}}Index")
-            if index_attr:
-                target = int(index_attr) - 1
-                while col_idx < target:
-                    row.append("")
-                    col_idx += 1
-            data_el = cell.find("ss:Data", _SS_NS)
-            val = (data_el.text or "").strip() if data_el is not None else ""
-            row.append(val)
-            col_idx += 1
-        if any(c.strip() for c in row):
-            rows_out.append(row)
-    return rows_out
 
 
 def _norm_header(h: str) -> str:
