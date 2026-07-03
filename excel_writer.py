@@ -37,6 +37,16 @@ def _apply_sheet_styles(ws: Worksheet, last_data_row: int) -> None:
             ws.cell(row=r, column=col).fill = HIGHLIGHT_COL_FILL
 
 
+def _clear_rows_from(ws: Worksheet, start_row: int) -> None:
+    """Очистить данные/формулы с start_row — без delete_rows (ломает xlsx)."""
+    max_r = ws.max_row or start_row
+    max_c = max(len(SVOD_HEADERS), ws.max_column or 0)
+    for r in range(start_row, max_r + 1):
+        for c in range(1, max_c + 1):
+            cell = ws.cell(row=r, column=c)
+            cell.value = None
+
+
 def _write_data_rows(ws: Worksheet, rows: list[SvodRow], start_row: int = DATA_START_ROW) -> int:
     r = start_row
     for row in rows:
@@ -76,8 +86,7 @@ def _write_workbook(
             count = len(rows_by_sheet.get(sheet_name, []))
             ws.cell(row=1, column=1, value=report_date)
             ws.cell(row=1, column=3, value=count)
-            if ws.max_row >= DATA_START_ROW:
-                ws.delete_rows(DATA_START_ROW, ws.max_row - DATA_START_ROW + 1)
+            _clear_rows_from(ws, DATA_START_ROW)
             written = _write_data_rows(ws, rows_by_sheet.get(sheet_name, []))
             last_row = DATA_START_ROW + written - 1 if written else DATA_START_ROW - 1
             _apply_sheet_styles(ws, last_row)

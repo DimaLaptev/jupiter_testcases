@@ -15,6 +15,11 @@ from models import DepoReportRow, SourceKind
 
 _STATEMENT_MARKER = "выписка по счету депо"
 _DEPO_ACCOUNT_RE = re.compile(r"^(\d{9}|\d{11,14})$")
+_FOOTER_MARKERS = (
+    "исполнитель:",
+    "ответственное лицо",
+    "ответственное лицo",
+)
 
 
 def _cell_value_str(value: Any) -> str:
@@ -36,6 +41,8 @@ def _is_r05_statement(ws: Worksheet) -> bool:
     for r in range(1, max_r + 1):
         for c in range(1, min(12, (ws.max_column or 12) + 1)):
             if _STATEMENT_MARKER in _norm_scan(_cell_value_str(ws.cell(row=r, column=c).value)):
+                return True
+            if "выписка по счету депo" in _norm_scan(_cell_value_str(ws.cell(row=r, column=c).value)):
                 return True
     return False
 
@@ -77,6 +84,28 @@ def _find_holdings_header(ws: Worksheet) -> tuple[int, dict[str, int]]:
     return 0, {}
 
 
+def _holdings_row_empty(ws: Worksheet, row: int, cmap: dict[str, int]) -> bool:
+    """Строка таблицы остатков пуста по всем ключевым колонкам."""
+    for col in cmap.values():
+        if _cell_value_str(ws.cell(row=row, column=col).value).strip():
+            return False
+    return True
+
+
+def _holdings_row_footer(ws: Worksheet, row: int, max_col: int) -> bool:
+    """Подпись / исполнитель под таблицей — не данные остатков."""
+    parts: list[str] = []
+    for c in range(1, max_col + 1):
+        parts.append(_cell_value_str(ws.cell(row=row, column=c).value))
+    row_text = _norm_scan(" ".join(parts))
+    return any(marker in row_text for marker in _FOOTER_MARKERS)
+
+
+def _is_footer_cell(value: str) -> bool:
+    text = _norm_scan(value)
+    return any(marker in text for marker in _FOOTER_MARKERS)
+
+
 def parse_r05_statement_xlsx(path: Path) -> list[DepoReportRow]:
     path = path.resolve()
     wb = None
@@ -95,13 +124,19 @@ def parse_r05_statement_xlsx(path: Path) -> list[DepoReportRow]:
                 continue
             c_sec = cmap["section"]
             c_ngri = cmap["ngri"]
+            max_col = max(cmap.values())
             out: list[DepoReportRow] = []
             last_row = ws.max_row or hr
             for r in range(hr + 1, last_row + 1):
+                if _holdings_row_empty(ws, r, cmap):
+                    break
+                if _holdings_row_footer(ws, r, max_col):
+                    break
+
                 section_raw = _cell_value_str(ws.cell(row=r, column=c_sec).value)
                 ngri = _cell_value_str(ws.cell(row=r, column=c_ngri).value)
-                if not ngri.strip() and not section_raw.strip():
-                    continue
+                if _is_footer_cell(ngri) or _is_footer_cell(section_raw):
+                    break
                 if not ngri.strip():
                     continue
                 out.append(
