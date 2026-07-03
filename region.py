@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from typing import TextIO
 
 from path_bootstrap import bootstrap
 
@@ -13,6 +15,7 @@ from sql_upload.loaders.region2 import _match_header_columns
 from sql_upload.values import cell_to_sql_value
 
 from extract.region_formats import (
+    account_from_bracket_filename,
     apply_status_from_format2,
     build_status_by_ngri,
     is_format1_path,
@@ -146,17 +149,38 @@ def _parse_region_file(path: Path) -> list[DepoReportRow]:
     return []
 
 
+def _diagnose_empty_xml(path: Path) -> str:
+    """Краткая причина, почему .xml не дал строк (для лога)."""
+    acc = account_from_bracket_filename(path)
+    acc_label = acc or "?"
+    sheet = read_region_sheet_rows(path)
+    if not sheet:
+        return f"счёт {acc_label!r}: SpreadsheetML пуст или не читается"
+    if not is_format1_path(path) and cell_at(sheet, 1, 1) == "/DEPOACCOUNT_BALANCE_REPORT":
+        return f"счёт {acc_label!r}: balance XML — legacy-парсер не извлёк строк"
+    if parse_format1_xml(path, sheet):
+        return f"счёт {acc_label!r}: неожиданно (parse повторно дал строки)"
+    return (
+        f"счёт {acc_label!r}: таблица {len(sheet)} строк, "
+        "но нет данных с НГРИ (RegistrationNumber)"
+    )
+
+
 def iter_region_rows(
     directory: Path,
     exclude_accounts: list[str] | None = None,
+    *,
+    warn: TextIO | None = None,
 ) -> list[DepoReportRow]:
     if not directory.is_dir():
         return []
+    out: TextIO = warn or sys.stderr
     exclude = {a.strip().casefold() for a in (exclude_accounts or [])}
 
     format2_all: list[DepoReportRow] = []
     other_all: list[DepoReportRow] = []
     seen_paths: set[str] = set()
+    empty_xml_count = 0
 
     for path in sorted(directory.rglob("*")):
         if not path.is_file() or path.name.startswith("~"):
@@ -170,12 +194,21 @@ def iter_region_rows(
 
         parsed = _parse_region_file(path)
         if not parsed:
+            if path.suffix.lower() == ".xml":
+                empty_xml_count += 1
+                hint = _diagnose_empty_xml(path)
+                out.write(
+                    f"  предупреждение Region: 0 строк из xml {path.name!r} ({hint})\n",
+                )
             continue
 
         if is_format2_path(path):
             format2_all.extend(parsed)
         else:
             other_all.extend(parsed)
+
+    if empty_xml_count:
+        out.write(f"  Region xml без строк: {empty_xml_count} файл(ов)\n")
 
     status_by_ngri = build_status_by_ngri(format2_all)
     apply_status_from_format2(other_all, status_by_ngri)

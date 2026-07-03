@@ -27,7 +27,7 @@ from unpack import prepare_staging
 from write.excel_writer import write_svod_workbooks
 
 
-def collect_do_rows(cfg, staging: Path) -> list:
+def collect_do_rows(cfg, staging: Path, *, warn=None) -> list:
     rows = []
     rows.extend(iter_gpb_rows(cfg.gpb))
     rows.extend(iter_rsd_msg_rows(cfg.rsd_msg))
@@ -36,7 +36,7 @@ def collect_do_rows(cfg, staging: Path) -> list:
         rsd_exl_root = cfg.rsd_exl
     rows.extend(iter_rsd_r05_rows(rsd_exl_root))
     region_root = staging / "REGION" if (staging / "REGION").is_dir() else cfg.region
-    rows.extend(iter_region_rows(region_root, cfg.region_exclude_accounts))
+    rows.extend(iter_region_rows(region_root, cfg.region_exclude_accounts, warn=warn))
     vtbsd_root = staging / "VTBSD" if (staging / "VTBSD").is_dir() else cfg.vtbsd
     rows.extend(iter_vtb_rows(vtbsd_root))
     return dedupe_rsd_do_rows(rows)
@@ -77,18 +77,14 @@ def main(argv: list[str] | None = None) -> int:
     sprav1 = Sprav1Lookup.load(cfg.sprav_workbook)
     sprav2 = Sprav2Lookup.load(cfg.sprav_workbook)
 
-    do_rows = collect_do_rows(cfg, staging)
-    rows_by_sheet = build_all_rows(do_rows, depo_ia, depo_dom, sprav1, sprav2)
+    do_rows = collect_do_rows(cfg, staging, warn=sys.stdout)
+    rows_by_sheet = build_all_rows(do_rows, depo_ia, depo_dom, sprav1, sprav2, warn=sys.stdout)
 
-    template = cfg.template_workbook if cfg.template_workbook.is_file() else None
-    template_dom = cfg.template_dom_workbook if cfg.template_dom_workbook.is_file() else None
     write_svod_workbooks(
         svod_path,
         svod_dom_path,
         rows_by_sheet,
         report_date,
-        template,
-        template_dom,
     )
 
     total = sum(len(v) for v in rows_by_sheet.values())

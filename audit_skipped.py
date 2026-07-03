@@ -329,7 +329,7 @@ def main(argv: list[str] | None = None) -> int:
     before.extend(iter_gpb_rows(gpb))
     before.extend(iter_rsd_msg_rows(rsd_msg))
     before.extend(iter_rsd_r05_rows(rsd_exl_root))
-    before.extend(iter_region_rows(region_root, cfg.region_exclude_accounts))
+    before.extend(iter_region_rows(region_root, cfg.region_exclude_accounts, warn=sys.stdout))
     before.extend(iter_vtb_rows(vtbsd_root))
     after = dedupe_rsd_do_rows(before)
     rsd_dropped = _audit_rsd_dedupe(before, after)
