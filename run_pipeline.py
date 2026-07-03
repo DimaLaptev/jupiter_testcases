@@ -16,6 +16,7 @@ from assemble.builder import build_all_rows
 from config import load_config
 from extract.gpb_r_msg import iter_gpb_rows
 from extract.region import iter_region_rows
+from extract.rsd_dedupe import dedupe_rsd_do_rows
 from extract.rsd_msg import iter_rsd_msg_rows
 from extract.rsd_r05 import iter_rsd_r05_rows
 from extract.vtb import iter_vtb_rows
@@ -30,13 +31,15 @@ def collect_do_rows(cfg, staging: Path) -> list:
     rows = []
     rows.extend(iter_gpb_rows(cfg.gpb))
     rows.extend(iter_rsd_msg_rows(cfg.rsd_msg))
-    rows.extend(iter_rsd_r05_rows(staging / "RSD_EXL"))
-    rows.extend(iter_rsd_r05_rows(cfg.rsd_exl))
+    rsd_exl_root = staging / "RSD_EXL"
+    if not rsd_exl_root.is_dir():
+        rsd_exl_root = cfg.rsd_exl
+    rows.extend(iter_rsd_r05_rows(rsd_exl_root))
     region_root = staging / "REGION" if (staging / "REGION").is_dir() else cfg.region
     rows.extend(iter_region_rows(region_root, cfg.region_exclude_accounts))
     vtbsd_root = staging / "VTBSD" if (staging / "VTBSD").is_dir() else cfg.vtbsd
     rows.extend(iter_vtb_rows(vtbsd_root))
-    return rows
+    return dedupe_rsd_do_rows(rows)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -5,6 +5,7 @@ paths:
   source_root: "source"
   output_dir: "output"
   depo_dom: "source/DEPO_DOM.xlsx"
+  depo_ia: "source/DEPO_IA.xlsx"
   sprav_workbook: "source/SPRAV/Справочник.xlsx"
   template_workbook: "source/СВОД_поДЕПО.xlsx"
   template_dom_workbook: "source/СВОД_поДЕПО_ДОМ.xlsx"
@@ -16,14 +17,6 @@ paths:
   region: "source/REGION"
   vtbsd: "source/VTBSD"
   staging: "source/_staging"
-
-# Исключить отчёты Region (инструкция MAF)
-region_exclude_accounts:
-  - "10198"
-  - "10165"
-  - "VL0038"
-  - "10131"
-  - "VL0119"
 
 depository_aliases:
   "банк гпб": "Банк ГПБ АО"

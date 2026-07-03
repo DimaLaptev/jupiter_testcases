@@ -161,8 +161,15 @@ def iter_rsd_r05_rows(directory: Path) -> list[DepoReportRow]:
     if not directory.is_dir():
         return []
     out: list[DepoReportRow] = []
-    for path in sorted(directory.rglob("*.xlsx")) + sorted(directory.rglob("*.XLSX")):
+    seen_paths: set[str] = set()
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file() or path.suffix.lower() != ".xlsx":
+            continue
         if path.name.startswith("~"):
             continue
+        path_key = str(path.resolve()).casefold()
+        if path_key in seen_paths:
+            continue
+        seen_paths.add(path_key)
         out.extend(parse_r05_statement_xlsx(path))
     return out
