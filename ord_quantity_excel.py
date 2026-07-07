@@ -54,10 +54,17 @@ class _GroupLayout:
     storage_subcolumns: dict[str, list[str]] = field(default_factory=dict)
     account_service: bool = False
     spr_su_archives: bool = False
+    empty_column: bool = False
+    sprav_enc: bool = False
+    header_fill: str | None = None
 
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
+
+
+def default_sprav_workbook_path() -> Path:
+    return _project_root() / "SVOD_DEPO_PIPELINE" / "source" / "SPRAV" / "Справочник.xlsx"
 
 
 def load_headers_layout(path: Path | None = None) -> dict[str, Any]:
@@ -85,19 +92,25 @@ def _build_group_layouts(data: dict[str, Any]) -> list[_GroupLayout]:
         }
         acct_svc = bool(g.get("account_service"))
         spr_su = bool(g.get("spr_su_archives"))
+        empty_col = bool(g.get("empty_column"))
+        sprav_enc = bool(g.get("sprav_enc"))
+        header_fill = g.get("header_fill")
         out.append(
             _GroupLayout(
                 merge=str(g["merge"]),
                 start_col=col,
                 width=w,
                 subheaders=subs,
-                placeholder=ph and not acct_svc and not spr_su,
+                placeholder=ph and not acct_svc and not spr_su and not empty_col and not sprav_enc,
                 instruction_types=it,
                 metrics=met,
                 skip_por=sk,
                 storage_subcolumns=storage,
                 account_service=acct_svc,
                 spr_su_archives=spr_su,
+                empty_column=empty_col,
+                sprav_enc=sprav_enc,
+                header_fill=str(header_fill) if header_fill else None,
             ),
         )
         col += w
@@ -147,6 +160,44 @@ def _normalize_depository_label(raw: str) -> str:
     t = t.strip().casefold().replace("ё", "е")
     t = t.replace("«", '"').replace("»", '"')
     return re.sub(r"\s+", " ", t)
+
+
+def _norm_sprav_account(s: str | None) -> str:
+    return (s or "").strip().casefold()
+
+
+def load_enc_by_account(path: Path) -> dict[str, str]:
+    """Справочник.xlsx лист 1: счёт депо (col C) → ENC (col L)."""
+    from sql_upload.excel_grid import cell_at, last_row_in_column, read_workbook_sheets
+    from sql_upload.predsvod_layout import SPRAV1_ACCOUNT_COL, SPRAV1_ROW_START
+
+    result: dict[str, str] = {}
+    if not path.is_file():
+        return result
+
+    sheets = read_workbook_sheets(path)
+    sheet_index = 0
+    if sheet_index >= len(sheets):
+        for i, (name, _) in enumerate(sheets):
+            if "сопоставления 1" in (name or "").lower():
+                sheet_index = i
+                break
+
+    if sheet_index >= len(sheets):
+        return result
+
+    _name, rows = sheets[sheet_index]
+    last = last_row_in_column(rows, SPRAV1_ACCOUNT_COL)
+    for r in range(SPRAV1_ROW_START, last + 1):
+        account = cell_at(rows, r, SPRAV1_ACCOUNT_COL)
+        if not account.strip():
+            continue
+        enc = cell_at(rows, r, 12)
+        enc_low = enc.lower()
+        if "кодификатор" in enc_low or "см." in enc_low:
+            enc = ""
+        result[_norm_sprav_account(account)] = enc.strip()
+    return result
 
 
 def _account_service_cell_value(depository: str, account: str) -> int | None:
@@ -713,11 +764,26 @@ def _unmerge_all(ws) -> None:
         ws.unmerge_cells(str(rng))
 
 
-def _apply_ord_quantity_header_fill(ws, last_col: int) -> None:
-    """Зелёная заливка строк 1–2 (названия колонок и подзаголовки)."""
+def _header_fill_for_color(color: str | None) -> PatternFill:
+    c = (color or "C6EFCE").lstrip("#").upper()
+    return PatternFill(start_color=c, end_color=c, fill_type="solid")
+
+
+def _apply_ord_quantity_header_fill(
+    ws,
+    id_col_count: int,
+    groups: list[_GroupLayout],
+) -> None:
+    """Заливка строк 1–2: зелёная по умолчанию, per-group header_fill из JSON."""
+    default_fill = _ORD_QUANTITY_HEADER_FILL
     for r in range(1, 3):
-        for c in range(1, last_col + 1):
-            ws.cell(row=r, column=c).fill = _ORD_QUANTITY_HEADER_FILL
+        for c in range(1, id_col_count + 1):
+            ws.cell(row=r, column=c).fill = default_fill
+    for g in groups:
+        fill = _header_fill_for_color(g.header_fill)
+        for c in range(g.start_col, g.start_col + g.width):
+            for r in range(1, 3):
+                ws.cell(row=r, column=c).fill = fill
 
 
 def ensure_ord_quantity_sheet(wb, layout: dict[str, Any] | None = None) -> Any:
@@ -755,7 +821,7 @@ def ensure_ord_quantity_sheet(wb, layout: dict[str, Any] | None = None) -> Any:
         for j, sub in enumerate(g.subheaders):
             ws.cell(row=2, column=c0 + j, value=sub if sub else None)
 
-    _apply_ord_quantity_header_fill(ws, last_col)
+    _apply_ord_quantity_header_fill(ws, len(data["id_columns"]), groups)
     return ws
 
 
@@ -775,6 +841,7 @@ def write_ord_quantity_matrix(
     matrix: dict[tuple[str, str, str], dict[str, _BucketAcc]],
     groups: list[_GroupLayout],
     layout: dict[str, Any] | None = None,
+    enc_by_account: dict[str, str] | None = None,
 ) -> None:
     data = layout or load_headers_layout()
     wb = load_workbook(path)
@@ -802,6 +869,22 @@ def write_ord_quantity_matrix(
                     column=g.start_col,
                     value=_account_service_cell_value(dep, acc),
                 )
+                continue
+
+            if g.empty_column:
+                for j in range(g.width):
+                    ws.cell(row=row_idx, column=g.start_col + j, value=None)
+                continue
+
+            if g.sprav_enc:
+                enc_map = enc_by_account or {}
+                enc_val = enc_map.get(_norm_sprav_account(acc))
+                for j in range(g.width):
+                    ws.cell(
+                        row=row_idx,
+                        column=g.start_col + j,
+                        value=enc_val if enc_val else None,
+                    )
                 continue
 
             if g.storage_subcolumns:
@@ -862,6 +945,7 @@ def fill_ord_quantity_from_workbook(
     skip_gpb_spr_su: bool = False,
     region_spr_dir: Path | None = None,
     skip_region_spr_su: bool = False,
+    sprav_workbook: Path | None = None,
 ) -> int:
     from depo_directory import read_depo_directory_rows
 
@@ -917,7 +1001,20 @@ def fill_ord_quantity_from_workbook(
             file=sys.stderr,
         )
 
-    write_ord_quantity_matrix(workbook_path, matrix, groups, layout)
+    sprav_path = (sprav_workbook or default_sprav_workbook_path()).resolve()
+    if not sprav_path.is_file():
+        import sys
+
+        print(f"Справочник не найден (пропуск ENC): {sprav_path}", file=sys.stderr)
+    enc_by_account = load_enc_by_account(sprav_path)
+
+    write_ord_quantity_matrix(
+        workbook_path,
+        matrix,
+        groups,
+        layout,
+        enc_by_account=enc_by_account,
+    )
     return len(matrix)
 
 

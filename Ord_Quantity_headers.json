@@ -54,6 +54,20 @@
       "account_service": true,
       "source": "REGION_VL"
     },
+    {
+      "merge": "Первичное описание",
+      "subheaders": ["Закл"],
+      "empty_column": true,
+      "header_fill": "F8CBAD",
+      "source": "manual"
+    },
+    {
+      "merge": "Признак",
+      "subheaders": ["ENC"],
+      "sprav_enc": true,
+      "header_fill": "F8CBAD",
+      "source": "Справочник.xlsx"
+    },
     { "merge": "Прочие расходы в сумме руб.", "subheaders": [""], "placeholder": true, "source": "TBD" }
   ]
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Заполнение листа «Количество поручений» из «СВОД_операций» и (T/Y) из «REPs»."""
+"""Заполнение листа «ORD Количество поручений» из «СВОД_операций» и (T/Y) из «REPs»."""
 
 from __future__ import annotations
 
@@ -46,7 +46,40 @@ def main() -> int:
     p.add_argument(
         "--ensure-sheet",
         action="store_true",
-        help="Создать/обновить шапку листа «Количество поручений», если лист пустой или без merge",
+        help="Создать/обновить шапку листа «ORD Количество поручений», если лист пустой или без merge",
+    )
+    p.add_argument(
+        "--input-dir-gpb-spr",
+        type=Path,
+        default=_ROOT / "2026_01" / "GPB" / "SPR",
+        help="Каталог GPB/SPR с PDF Q*_<счёт>_*.pdf для колонки Q",
+    )
+    p.add_argument(
+        "--no-gpb-spr-q",
+        action="store_true",
+        help="Не заполнять колонку Q из PDF в --input-dir-gpb-spr",
+    )
+    p.add_argument(
+        "--no-gpb-spr-su",
+        action="store_true",
+        help="Не заполнять S(u) ГПБ из архивов SPR* в --input-dir-gpb-spr",
+    )
+    p.add_argument(
+        "--input-dir-region-spr",
+        type=Path,
+        default=_ROOT / "2026_01" / "REGION" / "SPR",
+        help="Каталог REGION/SPR: архивы zip/7z → PDF [счёт]… для S(u) Регион",
+    )
+    p.add_argument(
+        "--no-region-spr-su",
+        action="store_true",
+        help="Не заполнять S(u) Регион из архивов в --input-dir-region-spr",
+    )
+    p.add_argument(
+        "--sprav-workbook",
+        type=Path,
+        default=_ROOT / "SVOD_DEPO_PIPELINE" / "source" / "SPRAV" / "Справочник.xlsx",
+        help="Путь к Справочник.xlsx для колонки Признак/ENC",
     )
     args = p.parse_args()
 
@@ -69,6 +102,12 @@ def main() -> int:
         args.year,
         args.month,
         layout_path=layout_path,
+        gpb_spr_dir=args.input_dir_gpb_spr,
+        skip_gpb_spr_q=args.no_gpb_spr_q,
+        skip_gpb_spr_su=args.no_gpb_spr_su,
+        region_spr_dir=args.input_dir_region_spr,
+        skip_region_spr_su=args.no_region_spr_su,
+        sprav_workbook=args.sprav_workbook,
     )
     print(f"Строк матрицы (matrix rows): {n}")
     return 0
