@@ -1,33 +1,20 @@
-"""Регистрация всех загрузчиков в LOADER_REGISTRY (вызывать явно, без циклических import)."""
+"""Валидации pipeline."""
 
-from __future__ import annotations
+from validate.accounts import find_missing_sprav_accounts, report_missing_sprav_accounts
+from validate.duplicates import (
+    DUPLICATES_NGRI_HEADER,
+    DUPLICATES_PORTFOLIO_HEADER,
+    DUPLICATES_SHEET_NAME,
+    WorkbookDuplicates,
+    find_workbook_duplicates,
+)
 
-
-def register_all_loaders() -> None:
-    from . import (
-        gpb,
-        region,
-        region2,
-        rsd,
-        rsd_dop,
-        spravochnik,
-        svod_gpb,
-        svod_region,
-        svod_rsd,
-        svod_vtb,
-        vtb,
-    )
-
-    _ = (
-        gpb,
-        region,
-        region2,
-        rsd,
-        rsd_dop,
-        vtb,
-        svod_gpb,
-        svod_region,
-        svod_vtb,
-        svod_rsd,
-        spravochnik,
-    )
+__all__ = [
+    "DUPLICATES_NGRI_HEADER",
+    "DUPLICATES_PORTFOLIO_HEADER",
+    "DUPLICATES_SHEET_NAME",
+    "WorkbookDuplicates",
+    "find_missing_sprav_accounts",
+    "find_workbook_duplicates",
+    "report_missing_sprav_accounts",
+]
