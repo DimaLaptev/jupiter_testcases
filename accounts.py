@@ -43,10 +43,14 @@ def build_validation_rows(
     rows_by_sheet: dict[str, list[SvodRow]],
     sheet_order: tuple[str, ...],
 ) -> list[ValidationRow]:
-    """Все счета Справочника + число строк свода по счёту в данном workbook."""
+    """Счета Справочника для разделов КП данного workbook + число строк по счёту."""
     counts = _count_by_account(rows_by_sheet, sheet_order)
+    allowed_sections = {name.casefold() for name in sheet_order}
     out: list[ValidationRow] = []
     for account, rec in sprav1.iter_accounts():
+        section = (rec.portfolio_section or "").strip()
+        if section.casefold() not in allowed_sections:
+            continue
         norm = normalize_account(account)
         out.append(
             ValidationRow(
