@@ -20,11 +20,11 @@ from extract.rsd_dedupe import dedupe_rsd_do_rows
 from extract.rsd_msg import iter_rsd_msg_rows
 from extract.rsd_r05 import iter_rsd_r05_rows
 from extract.vtb import iter_vtb_rows
-from models import DEPO_DOM_SHEETS, DEPO_IA_SHEETS
+from models import DEPO_DOM_SHEETS, DEPO_IA_SHEETS, SVOD_DOM_SHEETS, SVOD_IA_SHEETS
 from references.depo_dom import DepoDomIndex
 from references.spravochnik import Sprav1Lookup, Sprav2Lookup
 from unpack import prepare_staging
-from validate.accounts import find_missing_sprav_accounts, report_missing_sprav_accounts
+from validate.accounts import count_zero_accounts, build_validation_rows
 from write.excel_writer import write_svod_workbooks
 
 
@@ -77,11 +77,6 @@ def main(argv: list[str] | None = None) -> int:
 
     do_rows = collect_do_rows(cfg, staging, warn=sys.stdout)
 
-    missing_accounts = find_missing_sprav_accounts(sprav1, do_rows)
-    if missing_accounts:
-        report_missing_sprav_accounts(missing_accounts, out=sys.stdout)
-        return 1
-
     depo_dom = DepoDomIndex.load(cfg.depo_dom, DEPO_DOM_SHEETS)
     depo_ia = DepoDomIndex.load(cfg.depo_ia, DEPO_IA_SHEETS)
     sprav2 = Sprav2Lookup.load(cfg.sprav_workbook)
@@ -93,7 +88,17 @@ def main(argv: list[str] | None = None) -> int:
         svod_dom_path,
         rows_by_sheet,
         report_date,
+        sprav1,
     )
+
+    ia_validation = build_validation_rows(sprav1, rows_by_sheet, SVOD_IA_SHEETS)
+    dom_validation = build_validation_rows(sprav1, rows_by_sheet, SVOD_DOM_SHEETS)
+    ia_zero = count_zero_accounts(ia_validation)
+    dom_zero = count_zero_accounts(dom_validation)
+    if ia_zero:
+        print(f"  Валидация {svod_path.name}: {ia_zero} счёт(ов) с количеством 0 (лист «Валидация»)")
+    if dom_zero:
+        print(f"  Валидация {svod_dom_path.name}: {dom_zero} счёт(ов) с количеством 0 (лист «Валидация»)")
 
     if ia_dups.has_any:
         print(f"  предупреждение: дубли в {svod_path.name} — лист «Дубли»:")

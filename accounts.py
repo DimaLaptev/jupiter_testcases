@@ -1,59 +1,63 @@
-"""Проверка покрытия счетов из Справочника строками источников ДО."""
+"""Лист «Валидация»: счета из Справочника и количество закладных в отчёте."""
 
 from __future__ import annotations
 
-import sys
-from typing import TextIO
+from collections import Counter
+from dataclasses import dataclass
 
-from models import ALL_PORTFOLIO_SHEETS, DepoReportRow
+from models import SvodRow
 from references.spravochnik import Sprav1Lookup, normalize_account
 
+VALIDATION_SHEET_NAME = "Валидация"
+VALIDATION_HEADERS: tuple[str, ...] = (
+    "Раздел КП",
+    "Депозитарий",
+    "Счет_ДЕПО",
+    "Количество в отчет",
+)
 
-def find_missing_sprav_accounts(
+
+@dataclass(frozen=True)
+class ValidationRow:
+    razdel_kp: str | None
+    depository: str | None
+    schet_depo: str
+    count: int
+
+
+def _count_by_account(
+    rows_by_sheet: dict[str, list[SvodRow]],
+    sheet_order: tuple[str, ...],
+) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for sheet_name in sheet_order:
+        for row in rows_by_sheet.get(sheet_name, []):
+            if not row.schet_depo:
+                continue
+            counts[normalize_account(row.schet_depo)] += 1
+    return counts
+
+
+def build_validation_rows(
     sprav1: Sprav1Lookup,
-    do_rows: list[DepoReportRow],
-) -> list[str]:
-    """
-    Счета из col C «Номер счета депo», для которых не будет ни одной строки свода.
-
-    Строка попадёт в свод, если есть DepoReportRow с этим счётом и заполнен
-    «Раздел КП для Свода депo» (col K) из известных листов.
-    """
-    required = sprav1.normalized_accounts()
-    if not required:
-        return []
-
-    valid_sections = set(ALL_PORTFOLIO_SHEETS)
-    covered: set[str] = set()
-    for row in do_rows:
-        if not row.schet_depo:
-            continue
-        norm = normalize_account(row.schet_depo)
-        if norm not in required:
-            continue
-        section = sprav1.portfolio_section(row.schet_depo)
-        if section and section in valid_sections:
-            covered.add(norm)
-
-    missing_norms = required - covered
-    return [
-        sprav1.display_account(norm)
-        for norm in sorted(missing_norms, key=lambda n: sprav1.display_account(n).casefold())
-    ]
+    rows_by_sheet: dict[str, list[SvodRow]],
+    sheet_order: tuple[str, ...],
+) -> list[ValidationRow]:
+    """Все счета Справочника + число строк свода по счёту в данном workbook."""
+    counts = _count_by_account(rows_by_sheet, sheet_order)
+    out: list[ValidationRow] = []
+    for account, rec in sprav1.iter_accounts():
+        norm = normalize_account(account)
+        out.append(
+            ValidationRow(
+                razdel_kp=rec.portfolio_section,
+                depository=rec.depository,
+                schet_depo=account,
+                count=counts.get(norm, 0),
+            ),
+        )
+    return out
 
 
-def report_missing_sprav_accounts(
-    missing: list[str],
-    *,
-    out: TextIO | None = None,
-) -> None:
-    stream: TextIO = out or sys.stdout
-    stream.write(
-        "ОШИБКА валидации СВОД: для счетов из «Справочник.xlsx» "
-        "нет ни одной строки на листах свода:\n",
-    )
-    for account in missing:
-        stream.write(f"  - {account}\n")
-    stream.write(
-        f"Всего: {len(missing)} счёт(ов). Сборка прервана, файлы не записаны.\n",
-    )
+def count_zero_accounts(rows: list[ValidationRow]) -> int:
+    return sum(1 for row in rows if row.count == 0)

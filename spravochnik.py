@@ -32,6 +32,7 @@ class Sprav1Lookup:
     def __init__(self) -> None:
         self._by_account: dict[str, Sprav1Record] = {}
         self._display_by_norm: dict[str, str] = {}
+        self._account_order: list[str] = []
 
     @classmethod
     def load(cls, path: Path, sheet_index: int = 0) -> Sprav1Lookup:
@@ -64,6 +65,8 @@ class Sprav1Lookup:
             portfolio = cell_at(rows, r, SPRAV1_PORTFOLIO_SECTION_COL).strip() or None
             norm = _norm_account(account)
             lookup._display_by_norm.setdefault(norm, account.strip())
+            if norm not in lookup._by_account:
+                lookup._account_order.append(norm)
             lookup._by_account[norm] = Sprav1Record(
                 depository=cell_at(rows, r, 2) or None,
                 owner=cell_at(rows, r, 10) or None,
@@ -95,6 +98,13 @@ class Sprav1Lookup:
 
     def display_account(self, norm: str) -> str:
         return self._display_by_norm.get(norm, norm)
+
+    def iter_accounts(self) -> list[tuple[str, Sprav1Record]]:
+        """Счета в порядке строк Справочника."""
+        return [
+            (self._display_by_norm[norm], self._by_account[norm])
+            for norm in self._account_order
+        ]
 
 
 def normalize_account(s: str | None) -> str:

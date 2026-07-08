@@ -15,6 +15,13 @@ from models import (
     SvodRow,
 )
 from date_format import report_month_last_day
+from references.spravochnik import Sprav1Lookup
+from validate.accounts import (
+    VALIDATION_HEADERS,
+    VALIDATION_SHEET_NAME,
+    ValidationRow,
+    build_validation_rows,
+)
 from validate.duplicates import (
     DUPLICATES_NGRI_HEADER,
     DUPLICATES_PORTFOLIO_HEADER,
@@ -33,6 +40,8 @@ SVOD_SHEET_TITLE = (
 
 HEADER_FILL = PatternFill(start_color="0070C0", end_color="0070C0", fill_type="solid")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
+VALIDATION_HEADER_FILL = PatternFill(start_color="00B050", end_color="00B050", fill_type="solid")
+VALIDATION_HEADER_FONT = Font(color="FFFFFF", bold=True)
 HIGHLIGHT_COL_FILL = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
 HIGHLIGHT_COLUMNS = (1, 2, 5, 6, 11)  # A, B, E, F, K
 
@@ -84,6 +93,22 @@ def _init_sheet(ws: Worksheet, report_date: str, row_count: int) -> None:
         _set_cell_value(ws, HEADER_ROW, c, title)
 
 
+def _write_validation_sheet(ws: Worksheet, rows: list[ValidationRow]) -> None:
+    for c, title in enumerate(VALIDATION_HEADERS, start=1):
+        cell = ws.cell(row=1, column=c, value=title)
+        cell.fill = VALIDATION_HEADER_FILL
+        cell.font = VALIDATION_HEADER_FONT
+
+    for r, row in enumerate(rows, start=2):
+        _set_cell_value(ws, r, 1, row.razdel_kp)
+        _set_cell_value(ws, r, 2, row.depository)
+        _set_cell_value(ws, r, 3, row.schet_depo)
+        ws.cell(row=r, column=4, value=row.count)
+
+    last_row = max(len(rows) + 1, 1)
+    ws.auto_filter.ref = f"A1:D{last_row}"
+
+
 def _write_duplicates_sheet(ws: Worksheet, duplicates: WorkbookDuplicates) -> None:
     _set_cell_value(ws, 1, 1, DUPLICATES_NGRI_HEADER)
     _set_cell_value(ws, 1, 2, DUPLICATES_PORTFOLIO_HEADER)
@@ -103,6 +128,7 @@ def _write_workbook(
     rows_by_sheet: dict[str, list[SvodRow]],
     sheet_order: tuple[str, ...],
     report_date: str,
+    sprav1: Sprav1Lookup,
 ) -> WorkbookDuplicates:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -117,6 +143,10 @@ def _write_workbook(
         written = _write_data_rows(ws, rows)
         last_row = DATA_START_ROW + written - 1 if written else DATA_START_ROW - 1
         _apply_sheet_styles(ws, last_row)
+
+    validation_rows = build_validation_rows(sprav1, rows_by_sheet, sheet_order)
+    ws_val = wb.create_sheet(VALIDATION_SHEET_NAME)
+    _write_validation_sheet(ws_val, validation_rows)
 
     duplicates = find_workbook_duplicates(rows_by_sheet, sheet_order)
     if duplicates.has_any:
@@ -136,9 +166,10 @@ def write_svod_workbooks(
     svod_dom_path: Path,
     rows_by_sheet: dict[str, list[SvodRow]],
     report_date: str,
+    sprav1: Sprav1Lookup,
 ) -> tuple[Path, Path, WorkbookDuplicates, WorkbookDuplicates]:
     ia_rows = {name: rows_by_sheet.get(name, []) for name in SVOD_IA_SHEETS}
     dom_rows = {name: rows_by_sheet.get(name, []) for name in SVOD_DOM_SHEETS}
-    ia_dups = _write_workbook(svod_path, ia_rows, SVOD_IA_SHEETS, report_date)
-    dom_dups = _write_workbook(svod_dom_path, dom_rows, SVOD_DOM_SHEETS, report_date)
+    ia_dups = _write_workbook(svod_path, ia_rows, SVOD_IA_SHEETS, report_date, sprav1)
+    dom_dups = _write_workbook(svod_dom_path, dom_rows, SVOD_DOM_SHEETS, report_date, sprav1)
     return svod_path, svod_dom_path, ia_dups, dom_dups
