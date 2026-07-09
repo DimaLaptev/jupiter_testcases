@@ -15,27 +15,29 @@ if str(_SRC) not in sys.path:
 
 from ord_quantity_excel import fill_ord_quantity_from_workbook, ensure_ord_quantity_sheet, load_headers_layout
 from openpyxl import load_workbook
+from period_cli import add_period_dir_argument, apply_period_workbook
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
+    add_period_dir_argument(p)
     p.add_argument(
         "--workbook",
         type=Path,
         default=_ROOT / "2026_01" / "2026_01_Ord_Quantity.xlsx",
-        help="Путь к 2026_01_Ord_Quantity.xlsx",
+        help="Путь к Ord_Quantity.xlsx",
     )
     p.add_argument(
         "--year",
         type=int,
-        default=2026,
-        help="Год отчётного периода (reporting year)",
+        default=None,
+        help="Год отчётного периода (из имени каталога при --period-dir)",
     )
     p.add_argument(
         "--month",
         type=int,
-        default=1,
-        help="Месяц отчётного периода (1–12)",
+        default=None,
+        help="Месяц отчётного периода (из имени каталога при --period-dir)",
     )
     p.add_argument(
         "--layout",
@@ -82,6 +84,19 @@ def main() -> int:
         help="Путь к Справочник.xlsx для колонки Признак/ENC",
     )
     args = p.parse_args()
+    pp = apply_period_workbook(args, project_root=_ROOT)
+    if pp is not None:
+        args.input_dir_gpb_spr = pp.gpb_spr
+        args.input_dir_region_spr = pp.region_spr
+        if args.year is None:
+            args.year = pp.year
+        if args.month is None:
+            args.month = pp.month
+
+    if args.year is None:
+        args.year = 2026
+    if args.month is None:
+        args.month = 1
 
     if not args.workbook.is_file():
         print(f"Файл не найден: {args.workbook}", file=sys.stderr)

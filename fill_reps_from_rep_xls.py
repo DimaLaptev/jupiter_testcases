@@ -17,6 +17,8 @@ if str(_SRC) not in sys.path:
 
 from depo_directory import lookup_depo_row_by_account_number, read_depo_directory_rows
 from gpb_rep_xls import parse_rep_xls
+from period_cli import add_period_dir_argument, apply_period_workbook
+from period_paths import classify_and_resolve
 from reps_excel import append_reps_rows, create_workbook_with_reps, reps_row_values, write_reps_rows
 
 
@@ -24,17 +26,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Парсинг REP_*.xls из каталога и запись листа REPs.",
     )
-    parser.add_argument(
-        "--input-dir",
-        type=Path,
-        default=_ROOT / "2026_01" / "GPB" / "REP",
-        help="Каталог с файлами REP_*.xls / REP_*.xlsx",
-    )
+    add_period_dir_argument(parser)
     parser.add_argument(
         "--workbook",
         type=Path,
         default=_ROOT / "2026_01" / "2026_01_Ord_Quantity.xlsx",
-        help="Путь к 2026_01_Ord_Quantity.xlsx",
+        help="Путь к Ord_Quantity.xlsx",
     )
     parser.add_argument(
         "--create-workbook",
@@ -47,6 +44,14 @@ def main() -> int:
         help="Дописать строки под существующие данные вместо полной перезаписи листа",
     )
     args = parser.parse_args()
+    apply_period_workbook(args, project_root=_ROOT)
+
+    if args.period_dir:
+        input_dir, pp = classify_and_resolve(args.period_dir, _ROOT, leaf="gpb_rep")
+        if pp is None:
+            input_dir = Path(args.period_dir).resolve()
+    else:
+        input_dir = (_ROOT / "2026_01" / "GPB" / "REP").resolve()
 
     wb_path = args.workbook.resolve()
     if not wb_path.exists():
@@ -59,7 +64,6 @@ def main() -> int:
         print(f"Создаю шаблон: {wb_path}")
         create_workbook_with_reps(wb_path)
 
-    input_dir = args.input_dir.resolve()
     if not input_dir.is_dir():
         print(f"Каталог не найден: {input_dir}", file=sys.stderr)
         return 1

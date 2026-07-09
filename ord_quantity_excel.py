@@ -978,7 +978,13 @@ def fill_ord_quantity_from_workbook(
         )
         matrix = _merge_bucket_matrices(matrix, reps_matrix)
 
-    gpb_spr = (gpb_spr_dir or (_project_root() / "2026_01" / "GPB" / "SPR")).resolve()
+    gpb_spr = gpb_spr_dir
+    if gpb_spr is None:
+        from period_paths import try_resolve_from_workbook
+
+        pp = try_resolve_from_workbook(workbook_path, _project_root())
+        gpb_spr = pp.gpb_spr if pp else _project_root() / "2026_01" / "GPB" / "SPR"
+    gpb_spr = gpb_spr.resolve()
     if gpb_spr.is_dir():
         if not skip_gpb_spr_q:
             apply_gpb_spr_q_pdf_to_matrix(matrix, gpb_spr)
@@ -989,7 +995,13 @@ def fill_ord_quantity_from_workbook(
 
         print(f"Каталог GPB/SPR не найден (пропуск Q/S(u) ГПБ): {gpb_spr}", file=sys.stderr)
 
-    region_spr = (region_spr_dir or (_project_root() / "2026_01" / "REGION" / "SPR")).resolve()
+    region_spr = region_spr_dir
+    if region_spr is None:
+        from period_paths import try_resolve_from_workbook
+
+        pp = try_resolve_from_workbook(workbook_path, _project_root())
+        region_spr = pp.region_spr if pp else _project_root() / "2026_01" / "REGION" / "SPR"
+    region_spr = region_spr.resolve()
     if region_spr.is_dir():
         if not skip_region_spr_su:
             apply_region_spr_pdfs_to_matrix(matrix, region_spr)

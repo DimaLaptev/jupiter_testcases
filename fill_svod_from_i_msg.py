@@ -15,6 +15,7 @@ if str(_SRC) not in sys.path:
 from codifier_table import read_codifier_rows, read_vtb_sd_codifier_rows
 from depo_directory import read_depo_directory_rows
 from gpb_d_msg import parse_d_msg_file
+from period_cli import add_period_dir_argument, apply_period_workbook
 from gpb_i_msg import (
     gpb_instruction_pair_key,
     is_gpb_i_row,
@@ -336,12 +337,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Парсинг I*.MSG, R-01 xlsx (РСД), REGION IS*.xls, ВТБ СД F752 XML+ZIP, D*.MSG; запись листа «СВОД_операций».",
     )
-    parser.add_argument(
-        "--input-dir",
-        type=Path,
-        default=_ROOT / "2026_01" / "GPB" / "I",
-        help="Каталог с I*.MSG (ГПБ, формат INSTRUCTIONS)",
-    )
+    add_period_dir_argument(parser)
     parser.add_argument(
         "--input-dir-rsd",
         type=Path,
@@ -445,6 +441,19 @@ def main() -> int:
         help="Для D*.MSG не отбрасывать строки с пустым наименованием документа",
     )
     args = parser.parse_args()
+    pp = apply_period_workbook(args, project_root=_ROOT)
+    if pp is not None:
+        args.input_dir = pp.gpb_i
+        args.input_dir_rsd = pp.rsd_i
+        args.input_dir_rsd_r01 = pp.rsd_rep
+        args.input_dir_region = pp.region_rep
+        args.input_dir_vtb_xml = pp.vtb_xml
+        args.input_dir_vtb_zip = pp.vtb_zip
+        args.input_dir_d = pp.gpb_d
+    elif args.period_dir:
+        args.input_dir = Path(args.period_dir).resolve()
+    else:
+        args.input_dir = (_ROOT / "2026_01" / "GPB" / "I").resolve()
 
     wb_path = args.workbook.resolve()
     ensure_workbook_structure(wb_path, args.create_workbook, args.seed_demo_data)
