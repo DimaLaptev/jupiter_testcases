@@ -64,12 +64,35 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Путь к СВОД_поДЕПО_ДОМ.xlsx",
     )
+    parser.add_argument(
+        "--prior-from-svod",
+        action="store_true",
+        help=(
+            "Читать свод предыдущего месяца в формате СВОД_поДЕПО "
+            "(листы портфеля, данные с строки 6) вместо DEPO_IA/DEPO_DOM"
+        ),
+    )
+    parser.add_argument(
+        "--depo-ia",
+        type=Path,
+        default=None,
+        help="Путь к своду пред. месяца для ИА (DEPO_IA.xlsx или СВОД_поДЕПО.xlsx)",
+    )
+    parser.add_argument(
+        "--depo-dom",
+        type=Path,
+        default=None,
+        help="Путь к своду пред. месяца для ДОМ (DEPO_DOM.xlsx или СВОД_поДЕПО_ДОМ.xlsx)",
+    )
     args = parser.parse_args(argv)
 
     cfg = load_config(args.pipeline_root)
     report_date = args.report_date or cfg.report_date
     svod_path = args.output or cfg.svod_workbook
     svod_dom_path = args.output_dom or cfg.svod_dom_workbook
+    depo_ia_path = args.depo_ia or cfg.depo_ia
+    depo_dom_path = args.depo_dom or cfg.depo_dom
+    prior_layout = "svod" if args.prior_from_svod else "predsvod"
 
     staging = prepare_staging([cfg.region, cfg.rsd_exl], cfg.staging)
 
@@ -77,8 +100,18 @@ def main(argv: list[str] | None = None) -> int:
 
     do_rows = collect_do_rows(cfg, staging, warn=sys.stdout)
 
-    depo_dom = DepoDomIndex.load(cfg.depo_dom, DEPO_DOM_SHEETS)
-    depo_ia = DepoDomIndex.load(cfg.depo_ia, DEPO_IA_SHEETS)
+    depo_dom = DepoDomIndex.load(
+        depo_dom_path,
+        DEPO_DOM_SHEETS,
+        layout=prior_layout,
+        warn=sys.stdout,
+    )
+    depo_ia = DepoDomIndex.load(
+        depo_ia_path,
+        DEPO_IA_SHEETS,
+        layout=prior_layout,
+        warn=sys.stdout,
+    )
     sprav2 = Sprav2Lookup.load(cfg.sprav_workbook)
 
     rows_by_sheet = build_all_rows(do_rows, depo_ia, depo_dom, sprav1, sprav2, warn=sys.stdout)
