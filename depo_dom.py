@@ -18,6 +18,9 @@ from models import ALL_PORTFOLIO_SHEETS, DEPO_DOM_SHEETS, DepoDomRecord
 SVOD_DATA_START_ROW = 6
 PREDSVOD_DATA_START_ROW = 4
 _SKIP_SHEETS = frozenset({"Валидация", "Дубли"})
+_DEPO_SHEET_MARKERS = frozenset(
+    {"GPB", "REGION", "VTBSD", "RSD_XLS", "RSD_MSG"},
+)
 
 _GPB_MSG_RE = re.compile(r"^R_102_.*\.MSG$", re.IGNORECASE)
 _RSD_MSG_RE = re.compile(r"^R_.*\.MSG$", re.IGNORECASE)
@@ -44,6 +47,11 @@ def _record_from_row(rows: list[list[str]], r: int) -> DepoDomRecord:
     )
 
 
+def _last_data_row(rows: list[list[str]]) -> int:
+    """Конец данных: max по A (№ портфеля) и K (НГРИ) — A часто пуста в первом цикле."""
+    return max(last_row_in_column(rows, 1), last_row_in_column(rows, 11))
+
+
 def _rsd_logical_sheet(sheet_names: tuple[str, ...]) -> str:
     if "RSD_MSG" in sheet_names:
         return "RSD_MSG"
@@ -51,10 +59,9 @@ def _rsd_logical_sheet(sheet_names: tuple[str, ...]) -> str:
 
 
 def _route_by_istochnik(istochnik: str, rsd_sheet: str) -> str | None:
-    name = (istochnik or "").strip()
+    name = Path((istochnik or "").strip()).name
     if not name:
         return None
-    upper = name.upper()
     stem = Path(name).stem
     suffix = Path(name).suffix.lower()
 
@@ -65,13 +72,11 @@ def _route_by_istochnik(istochnik: str, rsd_sheet: str) -> str | None:
     if suffix == ".xml" or _VL_STEM_RE.match(stem) or _VRSN_LKK_STEM_RE.match(stem):
         return "REGION"
     if suffix in (".xls", ".xlsx"):
-        # R-05 и прочие xlsx РСД часто содержат «R-05» / «R05» / «выписка»
         folded = name.casefold()
         if "r-05" in folded or "r05" in folded or "выписка" in folded:
             return rsd_sheet
         if "втб" in folded or "vtb" in folded:
             return "VTBSD"
-        # VL*.xls уже обработан выше; остальные xlsx без маркеров — не угадываем
         if _VL_STEM_RE.match(stem) or _VRSN_LKK_STEM_RE.match(stem):
             return "REGION"
     return None
@@ -109,6 +114,19 @@ def route_svod_row_to_sheet(
     return target
 
 
+def detect_prior_layout(sheet_map: dict[str, list[list[str]]]) -> Literal["predsvod", "svod"]:
+    """Определить формат книги: листы депозитария vs листы портфеля СВОД."""
+    names = {n.strip() for n in sheet_map}
+    names_cf = {n.casefold() for n in names}
+    portfolio_cf = {p.casefold() for p in ALL_PORTFOLIO_SHEETS}
+    depo_cf = {d.casefold() for d in _DEPO_SHEET_MARKERS}
+    if names_cf & portfolio_cf:
+        return "svod"
+    if names_cf & depo_cf:
+        return "predsvod"
+    return "predsvod"
+
+
 class DepoDomIndex:
     """Индексы по листам отчёта пред. месяца: by_portfolio[A], by_ngri[K]."""
 
@@ -116,40 +134,69 @@ class DepoDomIndex:
         self._by_portfolio: dict[str, dict[str, DepoDomRecord]] = {}
         self._by_ngri: dict[str, dict[str, DepoDomRecord]] = {}
 
+    def ngri_count(self) -> int:
+        return sum(len(m) for m in self._by_ngri.values())
+
     @classmethod
     def load(
         cls,
         path: Path,
         sheet_names: tuple[str, ...] = DEPO_DOM_SHEETS,
         *,
-        layout: Literal["predsvod", "svod"] = "predsvod",
+        layout: Literal["predsvod", "svod", "auto"] = "predsvod",
         warn: TextIO | None = None,
     ) -> DepoDomIndex:
+        out: TextIO = warn or sys.stderr
         idx = cls()
         for sheet_name in sheet_names:
             idx._by_portfolio[sheet_name] = {}
             idx._by_ngri[sheet_name] = {}
 
         if not path.is_file():
+            out.write(
+                f"  предупреждение: файл свода пред. месяца не найден: {path}\n"
+                f"    колонки A/B (№ закладной) не будут заполнены из пред. месяца\n",
+            )
             return idx
 
         wb_sheets = read_workbook_sheets(path)
         sheet_map = {name: rows for name, rows in wb_sheets}
 
-        if layout == "svod":
-            idx._load_svod(sheet_map, sheet_names, warn=warn)
-            return idx
+        resolved: Literal["predsvod", "svod"]
+        if layout == "auto":
+            resolved = detect_prior_layout(sheet_map)
+        else:
+            resolved = layout
+            if layout == "predsvod" and detect_prior_layout(sheet_map) == "svod":
+                out.write(
+                    f"  предупреждение: {path.name} похож на СВОД_поДЕПО "
+                    f"(листы портфеля) — переключаю layout=svod. "
+                    f"Явно: --prior-from-svod\n",
+                )
+                resolved = "svod"
 
-        for sheet_name in sheet_names:
-            rows = sheet_map.get(sheet_name)
-            if not rows:
-                for k, v in sheet_map.items():
-                    if k.strip().upper() == sheet_name.upper():
-                        rows = v
-                        break
-            if not rows:
-                continue
-            idx._load_sheet(sheet_name, rows, start_row=PREDSVOD_DATA_START_ROW)
+        if resolved == "svod":
+            idx._load_svod(sheet_map, sheet_names, warn=out)
+        else:
+            for sheet_name in sheet_names:
+                rows = sheet_map.get(sheet_name)
+                if not rows:
+                    for k, v in sheet_map.items():
+                        if k.strip().upper() == sheet_name.upper():
+                            rows = v
+                            break
+                if not rows:
+                    continue
+                idx._load_sheet(sheet_name, rows, start_row=PREDSVOD_DATA_START_ROW)
+
+        n = idx.ngri_count()
+        if n == 0:
+            out.write(
+                f"  предупреждение: в {path.name} не найдено записей по НГРИ "
+                f"(layout={resolved}, листы {', '.join(sheet_names)})\n",
+            )
+        else:
+            out.write(f"  свод пред. месяца {path.name}: {n} НГРИ (layout={resolved})\n")
         return idx
 
     def _index_record(self, sheet_name: str, rec: DepoDomRecord) -> None:
@@ -165,9 +212,14 @@ class DepoDomIndex:
         *,
         start_row: int = PREDSVOD_DATA_START_ROW,
     ) -> None:
-        last = last_row_in_column(rows, 1)
+        last = _last_data_row(rows)
         for r in range(start_row, last + 1):
             rec = _record_from_row(rows, r)
+            # пропускаем строку-шапку, если попала в диапазон
+            if rec.ngri_v_depo and "нгри" in rec.ngri_v_depo.casefold():
+                continue
+            if rec.portfolio_no and "номер закладной" in rec.portfolio_no.casefold():
+                continue
             self._index_record(sheet_name, rec)
 
     def _load_svod(
@@ -186,19 +238,19 @@ class DepoDomIndex:
             if name in _SKIP_SHEETS:
                 continue
             if name not in portfolio_names:
-                # допускаем точное совпадение без учёта регистра
                 matched = next(
                     (p for p in portfolio_names if p.casefold() == name.casefold()),
                     None,
                 )
                 if matched is None:
                     continue
-                name = matched
 
-            last = last_row_in_column(rows, 1)
+            last = _last_data_row(rows)
             for r in range(SVOD_DATA_START_ROW, last + 1):
                 rec = _record_from_row(rows, r)
                 if not rec.portfolio_no and not rec.ngri_v_depo:
+                    continue
+                if rec.ngri_v_depo and "нгри" in rec.ngri_v_depo.casefold():
                     continue
                 depository = cell_at(rows, r, 3) or None
                 istochnik = cell_at(rows, r, 25) or None
@@ -227,5 +279,6 @@ class DepoDomIndex:
 
 __all__ = [
     "DepoDomIndex",
+    "detect_prior_layout",
     "route_svod_row_to_sheet",
 ]

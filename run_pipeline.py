@@ -92,7 +92,8 @@ def main(argv: list[str] | None = None) -> int:
     svod_dom_path = args.output_dom or cfg.svod_dom_workbook
     depo_ia_path = args.depo_ia or cfg.depo_ia
     depo_dom_path = args.depo_dom or cfg.depo_dom
-    prior_layout = "svod" if args.prior_from_svod else "predsvod"
+    # auto: predsvod по умолчанию, но книга с листами «ДОМ ИА»… переключится на svod
+    prior_layout = "svod" if args.prior_from_svod else "auto"
 
     staging = prepare_staging([cfg.region, cfg.rsd_exl], cfg.staging)
 
@@ -100,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
 
     do_rows = collect_do_rows(cfg, staging, warn=sys.stdout)
 
+    print(f"  свод пред. месяца ИА:  {depo_ia_path}")
+    print(f"  свод пред. месяца ДОМ: {depo_dom_path}")
     depo_dom = DepoDomIndex.load(
         depo_dom_path,
         DEPO_DOM_SHEETS,
