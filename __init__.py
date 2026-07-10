@@ -1,1 +1,1 @@
-"""DAY DEPO pipeline — сборка Day_Quantity."""
+"""Assemble package."""
