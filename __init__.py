@@ -1,1 +1,1 @@
-"""Extract package."""
+"""Write package."""
