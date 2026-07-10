@@ -1,0 +1,13 @@
+# Пути относительно DAY_DEPO_PIPELINE/
+report_date: "31.05.2026"
+
+paths:
+  source_root: "source"
+  output_dir: "output"
+  ord_quantity: "source/2026_05_Ord_Quantity.xlsx"
+  svod_prev: "source/СВОД_поДЕПО_апрель.xlsx"
+  svod_curr: "source/СВОД_поДЕПО_май.xlsx"
+  svod_dom_prev: "source/СВОД_поДЕПО_ДОМ_апрель.xlsx"
+  svod_dom_curr: "source/СВОД_поДЕПО_ДОМ_май.xlsx"
+  day_quantity: "output/2026_05_Day_Quantity.xlsx"
+  day_quantity_dom: "output/2026_05_Day_Quantity_DOM.xlsx"
