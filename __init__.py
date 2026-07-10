@@ -1,1 +1,1 @@
-"""Assemble package."""
+"""Extract package."""
