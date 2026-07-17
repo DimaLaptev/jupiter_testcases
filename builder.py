@@ -41,31 +41,34 @@ def _group_ops(ops: list[OrdOpRow]) -> dict[tuple[str, str, str], list[OrdOpRow]
     return grouped
 
 
+def _or_absent(value: str | None) -> str:
+    """Пустое значение в блоках начало/конец месяца → «отсутствует»."""
+    if value is None:
+        return ABSENT
+    s = str(value).strip()
+    return s if s else ABSENT
+
+
 def _fill_start(row: DayQuantityRow, start: SvodDepoRow | None) -> None:
     if start is None:
         row.start_ngri = ABSENT
-        row.start_schet = None
-        row.start_razdel = None
+        row.start_schet = ABSENT
+        row.start_razdel = ABSENT
         return
-    row.start_ngri = start.ngri
-    row.start_schet = start.schet_depo
-    row.start_razdel = start.razdel_scheta
+    row.start_ngri = _or_absent(start.ngri)
+    row.start_schet = _or_absent(start.schet_depo)
+    row.start_razdel = _or_absent(start.razdel_scheta)
 
 
 def _fill_end(row: DayQuantityRow, end: SvodDepoRow | None, *, show: bool) -> None:
     if not show or end is None:
-        if not show:
-            row.end_ngri = None
-            row.end_schet = None
-            row.end_razdel = None
-        else:
-            row.end_ngri = ABSENT
-            row.end_schet = None
-            row.end_razdel = None
+        row.end_ngri = ABSENT
+        row.end_schet = ABSENT
+        row.end_razdel = ABSENT
         return
-    row.end_ngri = end.ngri
-    row.end_schet = end.schet_depo
-    row.end_razdel = end.razdel_scheta
+    row.end_ngri = _or_absent(end.ngri)
+    row.end_schet = _or_absent(end.schet_depo)
+    row.end_razdel = _or_absent(end.razdel_scheta)
 
 
 def _identity_from_svod(svod: SvodDepoRow) -> DayQuantityRow:
@@ -171,13 +174,6 @@ def build_day_rows(
             row = _identity_from_op(op, start)
             _fill_start(row, start)
             _fill_end(row, end, show=show_end)
-            if has_end and last_is_debit:
-                # явно пустой конец при финальном списании
-                row.end_ngri = None
-                row.end_schet = None
-                row.end_razdel = None
-            elif not has_end and not last_is_debit:
-                row.end_ngri = ABSENT
             row.instruction_type = op.instruction_type
             row.instruction_date = op.op_date_raw
             row.storage_days = days
