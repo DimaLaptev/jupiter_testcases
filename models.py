@@ -45,6 +45,7 @@ class OrdOpRow:
     instruction_type: str
     op_date: date | None
     op_date_raw: str | None = None
+    op_type: str | None = None
     direction: FlowDirection | None = None
 
     def path_key(self) -> tuple[str, str, str]:
@@ -146,5 +147,6 @@ ORD_COL_ALIASES: dict[str, tuple[str, ...]] = {
     "schet_depo": ("Счет депо", "Счёт депо"),
     "razdel_scheta": ("Раздел депо", "Раздел счета депо", "Раздел счёта депо"),
     "instruction_type": ("Тип поручения",),
+    "op_type": ("Тип операции",),
     "op_date": ("Дата операции", "Дата поручения"),
 }

@@ -99,6 +99,7 @@ def iter_ord_op_rows(
         if not ngri:
             continue
         date_raw = _cell(rows, r, fmap.get("op_date"))
+        op_type = _cell(rows, r, fmap.get("op_type")) or None
         result.append(
             OrdOpRow(
                 ngri=ngri,
@@ -107,7 +108,8 @@ def iter_ord_op_rows(
                 instruction_type=inst or "",
                 op_date=parse_date(date_raw),
                 op_date_raw=format_date_ddmmyyyy(date_raw) or (date_raw or None),
-                direction=direction_for(inst),
+                op_type=op_type,
+                direction=direction_for(inst, op_type=op_type),
             ),
         )
     return result
