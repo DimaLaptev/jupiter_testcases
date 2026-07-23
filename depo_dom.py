@@ -22,8 +22,8 @@ _DEPO_SHEET_MARKERS = frozenset(
     {"GPB", "REGION", "VTBSD", "RSD_XLS", "RSD_MSG"},
 )
 
-_GPB_MSG_RE = re.compile(r"^R_102_.*\.MSG$", re.IGNORECASE)
-_RSD_MSG_RE = re.compile(r"^R_.*\.MSG$", re.IGNORECASE)
+_GPB_MSG_RE = re.compile(r"^R_\d{1,3}_\d{8}_.*\.MSG$", re.IGNORECASE)
+_RSD_MSG_RE = re.compile(r"^R_\d+_.*\.MSG$", re.IGNORECASE)
 _VL_STEM_RE = re.compile(r"^VL[\w]+$", re.IGNORECASE)
 _VRSN_LKK_STEM_RE = re.compile(r"^(?:BpCH|ВрСн)_VL([\w]+)_\d+$", re.IGNORECASE)
 
