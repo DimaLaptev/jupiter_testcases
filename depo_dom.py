@@ -32,6 +32,31 @@ def _norm_key(s: str | None) -> str:
     return (s or "").strip().casefold()
 
 
+def _norm_sheet_key(s: str | None) -> str:
+    """Сравнение имён листов: пробелы и '_' считаем одинаковыми."""
+    return " ".join((s or "").replace("_", " ").split()).casefold()
+
+
+def _match_portfolio_sheet(name: str, portfolio_names: set[str]) -> str | None:
+    if name in portfolio_names:
+        return name
+    key = _norm_sheet_key(name)
+    for p in portfolio_names:
+        if _norm_sheet_key(p) == key:
+            return p
+    return None
+
+
+def _norm_ngri_key(s: str | None) -> str:
+    """НГРИ: trim, casefold, унификация дефисов/тире."""
+    raw = (s or "").strip().casefold()
+    if not raw:
+        return ""
+    for ch in ("\u2010", "\u2011", "\u2012", "\u2013", "\u2014", "\u2212"):
+        raw = raw.replace(ch, "-")
+    return raw
+
+
 def _record_from_row(rows: list[list[str]], r: int) -> DepoDomRecord:
     return DepoDomRecord(
         portfolio_no=cell_at(rows, r, 1) or None,
@@ -117,9 +142,9 @@ def route_svod_row_to_sheet(
 def detect_prior_layout(sheet_map: dict[str, list[list[str]]]) -> Literal["predsvod", "svod"]:
     """Определить формат книги: листы депозитария vs листы портфеля СВОД."""
     names = {n.strip() for n in sheet_map}
-    names_cf = {n.casefold() for n in names}
-    portfolio_cf = {p.casefold() for p in ALL_PORTFOLIO_SHEETS}
-    depo_cf = {d.casefold() for d in _DEPO_SHEET_MARKERS}
+    names_cf = {_norm_sheet_key(n) for n in names}
+    portfolio_cf = {_norm_sheet_key(p) for p in ALL_PORTFOLIO_SHEETS}
+    depo_cf = {_norm_sheet_key(d) for d in _DEPO_SHEET_MARKERS}
     if names_cf & portfolio_cf:
         return "svod"
     if names_cf & depo_cf:
@@ -133,9 +158,10 @@ class DepoDomIndex:
     def __init__(self) -> None:
         self._by_portfolio: dict[str, dict[str, DepoDomRecord]] = {}
         self._by_ngri: dict[str, dict[str, DepoDomRecord]] = {}
+        self._by_ngri_flat: dict[str, DepoDomRecord] = {}
 
     def ngri_count(self) -> int:
-        return sum(len(m) for m in self._by_ngri.values())
+        return len(self._by_ngri_flat)
 
     @classmethod
     def load(
@@ -203,7 +229,9 @@ class DepoDomIndex:
         if rec.portfolio_no:
             self._by_portfolio[sheet_name][_norm_key(rec.portfolio_no)] = rec
         if rec.ngri_v_depo:
-            self._by_ngri[sheet_name][_norm_key(rec.ngri_v_depo)] = rec
+            nk = _norm_ngri_key(rec.ngri_v_depo)
+            self._by_ngri[sheet_name][nk] = rec
+            self._by_ngri_flat[nk] = rec
 
     def _load_sheet(
         self,
@@ -215,7 +243,6 @@ class DepoDomIndex:
         last = _last_data_row(rows)
         for r in range(start_row, last + 1):
             rec = _record_from_row(rows, r)
-            # пропускаем строку-шапку, если попала в диапазон
             if rec.ngri_v_depo and "нгри" in rec.ngri_v_depo.casefold():
                 continue
             if rec.portfolio_no and "номер закладной" in rec.portfolio_no.casefold():
@@ -231,19 +258,18 @@ class DepoDomIndex:
     ) -> None:
         out: TextIO = warn or sys.stderr
         unrouted = 0
+        matched_sheets = 0
         portfolio_names = set(ALL_PORTFOLIO_SHEETS)
+        fallback_sheet = sheet_names[0] if sheet_names else "GPB"
+        skip_keys = {_norm_sheet_key(s) for s in _SKIP_SHEETS}
 
         for sheet_name, rows in sheet_map.items():
             name = sheet_name.strip()
-            if name in _SKIP_SHEETS:
+            if _norm_sheet_key(name) in skip_keys:
                 continue
-            if name not in portfolio_names:
-                matched = next(
-                    (p for p in portfolio_names if p.casefold() == name.casefold()),
-                    None,
-                )
-                if matched is None:
-                    continue
+            if _match_portfolio_sheet(name, portfolio_names) is None:
+                continue
+            matched_sheets += 1
 
             last = _last_data_row(rows)
             for r in range(SVOD_DATA_START_ROW, last + 1):
@@ -257,13 +283,20 @@ class DepoDomIndex:
                 target = route_svod_row_to_sheet(depository, istochnik, sheet_names)
                 if target is None:
                     unrouted += 1
-                    continue
+                    # иначе строка теряется и A/B в следующем месяце пустые
+                    target = fallback_sheet
                 self._index_record(target, rec)
 
+        if matched_sheets == 0:
+            out.write(
+                "  предупреждение: СВОД prior — не найдены листы портфеля "
+                f"(ожидали: {', '.join(ALL_PORTFOLIO_SHEETS)}; "
+                f"в файле: {', '.join(sheet_map)})\n",
+            )
         if unrouted:
             out.write(
-                f"  предупреждение: СВОД prior — {unrouted} строк(и) без маршрута "
-                f"на листы {', '.join(sheet_names)}\n",
+                f"  предупреждение: СВОД prior — {unrouted} строк(и) без явного маршрута "
+                f"по Y/C, записаны на лист {fallback_sheet}\n",
             )
 
     def by_portfolio(self, sheet: str, key: str | None) -> DepoDomRecord | None:
@@ -274,7 +307,13 @@ class DepoDomIndex:
     def by_ngri(self, sheet: str, ngri: str | None) -> DepoDomRecord | None:
         if not ngri:
             return None
-        return self._by_ngri.get(sheet, {}).get(_norm_key(ngri))
+        return self._by_ngri.get(sheet, {}).get(_norm_ngri_key(ngri))
+
+    def by_ngri_any(self, ngri: str | None) -> DepoDomRecord | None:
+        """Поиск по НГРИ на любом логическом листе индекса."""
+        if not ngri:
+            return None
+        return self._by_ngri_flat.get(_norm_ngri_key(ngri))
 
 
 __all__ = [
