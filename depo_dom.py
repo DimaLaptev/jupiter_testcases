@@ -315,6 +315,33 @@ class DepoDomIndex:
             return None
         return self._by_ngri_flat.get(_norm_ngri_key(ngri))
 
+    def sheets_with_ngri(self, ngri: str | None) -> list[str]:
+        """Логические листы (карманы), где есть эта НГРИ."""
+        if not ngri:
+            return []
+        key = _norm_ngri_key(ngri)
+        return [sheet for sheet, m in self._by_ngri.items() if key in m]
+
+    def debug_ngri_location(self, label: str, ngri: str, *, out: TextIO | None = None) -> None:
+        """Печать: в каких карманах prior лежит НГРИ и что в A/B/ФИО."""
+        stream: TextIO = out or sys.stderr
+        pockets = self.sheets_with_ngri(ngri)
+        if not pockets:
+            stream.write(f"  [debug-ngri] {label}: НГРИ {ngri!r} — нет в индексе\n")
+            return
+        stream.write(
+            f"  [debug-ngri] {label}: НГРИ {ngri!r} лежит в карманах: "
+            f"{', '.join(pockets)}\n",
+        )
+        for sheet in pockets:
+            rec = self.by_ngri(sheet, ngri)
+            if rec is None:
+                continue
+            stream.write(
+                f"    [{sheet}] A={rec.portfolio_no!r} B={rec.dom_no!r} "
+                f"ФИО={rec.fio!r} K={rec.ngri_v_depo!r}\n",
+            )
+
 
 __all__ = [
     "DepoDomIndex",

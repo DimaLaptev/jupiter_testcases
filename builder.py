@@ -15,7 +15,7 @@ from models import (
     SourceKind,
     SvodRow,
 )
-from references.depo_dom import DepoDomIndex
+from references.depo_dom import DepoDomIndex, _norm_ngri_key
 from references.spravochnik import Sprav1Lookup, Sprav2Lookup
 from references.vtb_codifier import lookup_vtb_section
 
@@ -58,10 +58,15 @@ def _depo_lookup(
     depo_ia: DepoDomIndex,
     depo_dom: DepoDomIndex,
     do: DepoReportRow,
-) -> tuple[DepoDomIndex, str]:
+) -> tuple[DepoDomIndex, str, str]:
+    """Вернуть (индекс prior, логический лист, метка книги)."""
     if portfolio_section == PORTFOLIO_SHEET_REZERVIS:
-        return depo_dom, SOURCE_TO_DEPO_DOM_SHEET[do.source_kind].value
-    return depo_ia, SOURCE_TO_DEPO_IA_SHEET[do.source_kind]
+        return (
+            depo_dom,
+            SOURCE_TO_DEPO_DOM_SHEET[do.source_kind].value,
+            "depo-dom",
+        )
+    return depo_ia, SOURCE_TO_DEPO_IA_SHEET[do.source_kind], "depo-ia"
 
 
 def build_svod_row(
@@ -71,8 +76,13 @@ def build_svod_row(
     depo_dom: DepoDomIndex,
     sprav1: Sprav1Lookup,
     sprav2: Sprav2Lookup,
+    *,
+    debug_ngri: str | None = None,
+    debug_out: TextIO | None = None,
 ) -> SvodRow:
-    depo_prior, depo_sheet = _depo_lookup(portfolio_section, depo_ia, depo_dom, do)
+    depo_prior, depo_sheet, prior_label = _depo_lookup(
+        portfolio_section, depo_ia, depo_dom, do,
+    )
     svod = SvodRow(
         schet_depo=do.schet_depo or None,
         razdel_scheta=do.razdel_scheta or None,
@@ -94,6 +104,16 @@ def build_svod_row(
     fill_kd_from_dom = use_depo_dom_portfolio(do.source_kind) and not kd_from_do(do.source_kind)
     if use_depo_dom_portfolio(do.source_kind):
         dom = depo_prior.by_ngri(depo_sheet, do.ngri_v_depo)
+        if debug_ngri and do.ngri_v_depo and _ngri_matches(do.ngri_v_depo, debug_ngri):
+            _debug_lookup(
+                do,
+                portfolio_section,
+                prior_label,
+                depo_sheet,
+                depo_prior,
+                dom,
+                out=debug_out,
+            )
         if dom:
             _apply_depo_dom(svod, dom, fill_kd=fill_kd_from_dom)
 
@@ -133,6 +153,45 @@ def build_svod_row(
     return svod
 
 
+def _ngri_matches(actual: str, wanted: str) -> bool:
+    return _norm_ngri_key(actual) == _norm_ngri_key(wanted)
+
+
+def _debug_lookup(
+    do: DepoReportRow,
+    portfolio_section: str,
+    prior_label: str,
+    depo_sheet: str,
+    depo_prior: DepoDomIndex,
+    found,
+    *,
+    out: TextIO | None,
+) -> None:
+    stream: TextIO = out or sys.stdout
+    pockets = depo_prior.sheets_with_ngri(do.ngri_v_depo)
+    stream.write(
+        f"  [debug-ngri] сборка: НГРИ {do.ngri_v_depo!r}\n"
+        f"    ДО: source={do.source_kind.value} файл={do.source_file!r} "
+        f"счёт={do.schet_depo!r}\n"
+        f"    лист выхода (справочник): {portfolio_section!r}\n"
+        f"    ищем в книге {prior_label}, карман {depo_sheet!r}\n"
+        f"    в этой книге НГРИ лежит в карманах: "
+        f"{', '.join(pockets) if pockets else '(нигде)'}\n",
+    )
+    if found:
+        stream.write(
+            f"    результат: НАЙДЕНО A={found.portfolio_no!r} "
+            f"B={found.dom_no!r} ФИО={found.fio!r}\n",
+        )
+    else:
+        stream.write("    результат: НЕ НАЙДЕНО (A/B/ФИО из prior не заполнятся)\n")
+        if pockets and depo_sheet not in pockets:
+            stream.write(
+                f"    причина: карман поиска {depo_sheet!r} ≠ карманы prior "
+                f"{pockets!r}\n",
+            )
+
+
 def build_all_rows(
     do_rows: list[DepoReportRow],
     depo_ia: DepoDomIndex,
@@ -141,6 +200,7 @@ def build_all_rows(
     sprav2: Sprav2Lookup,
     *,
     warn: TextIO | None = None,
+    debug_ngri: str | None = None,
 ) -> dict[str, list[SvodRow]]:
     out: TextIO = warn or sys.stdout
     by_sheet: dict[str, list[SvodRow]] = {name: [] for name in ALL_PORTFOLIO_SHEETS}
@@ -155,7 +215,16 @@ def build_all_rows(
             )
             continue
         by_sheet[portfolio].append(
-            build_svod_row(do, portfolio, depo_ia, depo_dom, sprav1, sprav2),
+            build_svod_row(
+                do,
+                portfolio,
+                depo_ia,
+                depo_dom,
+                sprav1,
+                sprav2,
+                debug_ngri=debug_ngri,
+                debug_out=out,
+            ),
         )
     if skipped:
         out.write(f"  пропущено строк без маршрутизации: {skipped}\n")

@@ -84,6 +84,15 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Путь к своду пред. месяца для ДОМ (DEPO_DOM.xlsx или СВОД_поДЕПО_ДОМ.xlsx)",
     )
+    parser.add_argument(
+        "--debug-ngri",
+        type=str,
+        default=None,
+        help=(
+            "Диагностика prior-lookup для одной НГРИ: где лежит в depo-ia/depo-dom "
+            "и в каком кармане ищем при сборке"
+        ),
+    )
     args = parser.parse_args(argv)
 
     cfg = load_config(args.pipeline_root)
@@ -115,9 +124,20 @@ def main(argv: list[str] | None = None) -> int:
         layout=prior_layout,
         warn=sys.stdout,
     )
+    if args.debug_ngri:
+        depo_ia.debug_ngri_location("depo-ia (prior)", args.debug_ngri, out=sys.stdout)
+        depo_dom.debug_ngri_location("depo-dom (prior)", args.debug_ngri, out=sys.stdout)
     sprav2 = Sprav2Lookup.load(cfg.sprav_workbook)
 
-    rows_by_sheet = build_all_rows(do_rows, depo_ia, depo_dom, sprav1, sprav2, warn=sys.stdout)
+    rows_by_sheet = build_all_rows(
+        do_rows,
+        depo_ia,
+        depo_dom,
+        sprav1,
+        sprav2,
+        warn=sys.stdout,
+        debug_ngri=args.debug_ngri,
+    )
 
     _, _, ia_dups, dom_dups = write_svod_workbooks(
         svod_path,
