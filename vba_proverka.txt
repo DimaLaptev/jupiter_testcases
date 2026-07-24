@@ -1,10 +1,10 @@
 ' =============================================================================
 ' ИНСТРУКЦИЯ
 ' 1. Создайте новую книгу Excel и сохраните как .xlsm (книга Excel с поддержкой макросов).
-' 2. Alt+F11 → Вставка → Модуль → вставьте весь код ниже (без этой инструкции можно
-'    оставить комментарии — VBA их проигнорирует).
-' 3. На единственном листе: Вставка → Фигуры (или кнопка формы) → подпись
-'    «запустить проверку» → ПКМ по фигуре → Назначить макрос → ZapustitProverku.
+' 2. Alt+F11 → Вставка → Модуль → вставьте ВЕСЬ код из этого файла.
+' 3. Закройте редактор VBA. Нажмите Alt+F8 → выберите SozdatKnopku → Выполнить.
+'    На листе появится кнопка «запустить проверку».
+'    (При следующем открытии файла кнопка создаётся сама через Auto_Open.)
 ' 4. Положите этот .xlsm в папку с проверяемыми .xlsx/.xlsm и нажмите кнопку.
 '    Файл с макросом не изменяется; обрабатываются только соседние файлы.
 ' =============================================================================
@@ -23,6 +23,47 @@ Private Const COL_AD As Long = 30        ' содержание операции
 Private Const HDR_FIO As String = "ФИО совпадает"
 Private Const HDR_NUM_DATE As String = "Номер и Дата есть в содержании"
 Private Const HDR_BIK As String = "В БИК только цифры"
+
+Private Const BTN_NAME As String = "btnZapustitProverku"
+Private Const BTN_CAPTION As String = "запустить проверку"
+
+' -----------------------------------------------------------------------------
+' При открытии книги — создать кнопку, если её ещё нет
+' -----------------------------------------------------------------------------
+Public Sub Auto_Open()
+    Call SozdatKnopku
+End Sub
+
+' -----------------------------------------------------------------------------
+' Создаёт / обновляет кнопку на первом листе. Запустите один раз через Alt+F8.
+' -----------------------------------------------------------------------------
+Public Sub SozdatKnopku()
+    Dim ws As Worksheet
+    Dim btn As Button
+    Dim b As Button
+
+    Set ws = ThisWorkbook.Worksheets(1)
+
+    On Error Resume Next
+    For Each b In ws.Buttons
+        If b.Name = BTN_NAME Or b.OnAction = "ZapustitProverku" Then
+            b.Delete
+        End If
+    Next b
+    On Error GoTo 0
+
+    Set btn = ws.Buttons.Add(Left:=24, Top:=24, Width:=200, Height:=40)
+    With btn
+        .Name = BTN_NAME
+        .OnAction = "ZapustitProverku"
+        .Characters.Text = BTN_CAPTION
+        .Font.Size = 12
+        .Font.Bold = True
+    End With
+
+    ws.Activate
+    MsgBox "Кнопка «запустить проверку» создана на листе «" & ws.Name & "».", vbInformation
+End Sub
 
 ' -----------------------------------------------------------------------------
 ' Точка входа для кнопки «запустить проверку»
@@ -144,11 +185,9 @@ Private Sub ProcessWorksheet(ByVal ws As Worksheet)
     colBik = FindOrCreateResultCol(ws, lastCol, HDR_BIK)
 
     For r = DATA_START_ROW To lastRow
-        ' 1) ФИО: оставить только кириллицу в O и W, сравнить
+        ' 1) ФИО: очистка только в памяти для сравнения; ячейки O и W не меняем
         fioO = KeepCyrillic(CStr(ws.Cells(r, COL_O).Value2))
         fioW = KeepCyrillic(CStr(ws.Cells(r, COL_W).Value2))
-        ws.Cells(r, COL_O).Value = fioO
-        ws.Cells(r, COL_W).Value = fioW
 
         If Len(fioO) > 0 And Len(fioW) > 0 And fioO = fioW Then
             ws.Cells(r, colFio).Value = "да"
