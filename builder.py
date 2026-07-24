@@ -167,13 +167,13 @@ def build_day_rows(
             period_start=period_start,
             period_end=period_end,
         )
-        last_is_debit = ops[-1].direction == FlowDirection.DEBIT
-        show_end = has_end and not last_is_debit
+        # Если ключ есть в текущем СВОД — всегда заполняем «на конец»
+        # (не затираем из‑за последнего списания / debit).
 
         for op, (days, day_comment) in zip(ops, days_list):
             row = _identity_from_op(op, start)
             _fill_start(row, start)
-            _fill_end(row, end, show=show_end)
+            _fill_end(row, end, show=True)
             row.instruction_type = op.instruction_type
             row.instruction_date = op.op_date_raw
             row.storage_days = days
