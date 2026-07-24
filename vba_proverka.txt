@@ -1,0 +1,286 @@
+' =============================================================================
+' ИНСТРУКЦИЯ
+' 1. Создайте новую книгу Excel и сохраните как .xlsm (книга Excel с поддержкой макросов).
+' 2. Alt+F11 → Вставка → Модуль → вставьте весь код ниже (без этой инструкции можно
+'    оставить комментарии — VBA их проигнорирует).
+' 3. На единственном листе: Вставка → Фигуры (или кнопка формы) → подпись
+'    «запустить проверку» → ПКМ по фигуре → Назначить макрос → ZapustitProverku.
+' 4. Положите этот .xlsm в папку с проверяемыми .xlsx/.xlsm и нажмите кнопку.
+'    Файл с макросом не изменяется; обрабатываются только соседние файлы.
+' =============================================================================
+
+Option Explicit
+
+Private Const DATA_START_ROW As Long = 6
+Private Const HEADER_NAME_ROW As Long = 3
+Private Const COL_H As Long = 8          ' номер договора
+Private Const COL_I As Long = 9          ' дата договора
+Private Const COL_O As Long = 15         ' ФИО контрагента
+Private Const COL_W As Long = 23         ' ФИО получателя/отправителя
+Private Const COL_Z As Long = 26         ' БИК
+Private Const COL_AD As Long = 30        ' содержание операции
+
+Private Const HDR_FIO As String = "ФИО совпадает"
+Private Const HDR_NUM_DATE As String = "Номер и Дата есть в содержании"
+Private Const HDR_BIK As String = "В БИК только цифры"
+
+' -----------------------------------------------------------------------------
+' Точка входа для кнопки «запустить проверку»
+' -----------------------------------------------------------------------------
+Public Sub ZapustitProverku()
+    Call ProverkaFailov
+End Sub
+
+Public Sub ProverkaFailov()
+    Dim folderPath As String
+    Dim fileName As String
+    Dim thisName As String
+    Dim wb As Workbook
+    Dim processed As Long
+    Dim failed As Long
+    Dim errList As String
+    Dim ext As String
+    Dim fullPath As String
+    Dim seen As Object
+
+    folderPath = ThisWorkbook.Path
+    If Len(folderPath) = 0 Then
+        MsgBox "Сначала сохраните файл с макросом на диск (в нужную папку).", vbExclamation
+        Exit Sub
+    End If
+
+    thisName = LCase$(ThisWorkbook.Name)
+    Set seen = CreateObject("Scripting.Dictionary")
+    processed = 0
+    failed = 0
+    errList = ""
+
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    Application.EnableEvents = False
+
+    On Error GoTo CleanFail
+
+    ' Обход .xlsx и .xlsm в той же папке
+    fileName = Dir(folderPath & Application.PathSeparator & "*.xls*")
+    Do While Len(fileName) > 0
+        If Left$(fileName, 2) <> "~$" Then
+            If LCase$(fileName) <> thisName Then
+                ext = LCase$(Mid$(fileName, InStrRev(fileName, ".") + 1))
+                If ext = "xlsx" Or ext = "xlsm" Then
+                    If Not seen.Exists(LCase$(fileName)) Then
+                        seen.Add LCase$(fileName), True
+                        fullPath = folderPath & Application.PathSeparator & fileName
+                        On Error Resume Next
+                        Set wb = Workbooks.Open(fileName:=fullPath, UpdateLinks:=0, ReadOnly:=False)
+                        If Err.Number <> 0 Or wb Is Nothing Then
+                            failed = failed + 1
+                            errList = errList & vbCrLf & "- " & fileName & ": " & Err.Description
+                            Err.Clear
+                        Else
+                            On Error GoTo CleanFail
+                            ProcessWorksheet wb.Worksheets(1)
+                            wb.Save
+                            wb.Close SaveChanges:=False
+                            Set wb = Nothing
+                            processed = processed + 1
+                        End If
+                        On Error GoTo CleanFail
+                    End If
+                End If
+            End If
+        End If
+        fileName = Dir()
+    Loop
+
+    Application.EnableEvents = True
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+
+    MsgBox "Готово." & vbCrLf & _
+           "Обработано файлов: " & processed & vbCrLf & _
+           "Ошибок открытия: " & failed & _
+           IIf(Len(errList) > 0, vbCrLf & errList, ""), _
+           vbInformation
+    Exit Sub
+
+CleanFail:
+    Application.EnableEvents = True
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    If Not wb Is Nothing Then
+        On Error Resume Next
+        wb.Close SaveChanges:=False
+        On Error GoTo 0
+    End If
+    MsgBox "Ошибка: " & Err.Description, vbCritical
+End Sub
+
+' -----------------------------------------------------------------------------
+' Обработка одного листа
+' -----------------------------------------------------------------------------
+Private Sub ProcessWorksheet(ByVal ws As Worksheet)
+    Dim lastRow As Long
+    Dim lastCol As Long
+    Dim colFio As Long
+    Dim colNumDate As Long
+    Dim colBik As Long
+    Dim r As Long
+    Dim fioO As String
+    Dim fioW As String
+    Dim contractNo As String
+    Dim dateStr As String
+    Dim content As String
+    Dim bikRaw As String
+
+    lastRow = FindLastDataRow(ws)
+    If lastRow < DATA_START_ROW Then Exit Sub
+
+    lastCol = FindLastUsedCol(ws)
+    colFio = FindOrCreateResultCol(ws, lastCol, HDR_FIO)
+    If colFio > lastCol Then lastCol = colFio
+    colNumDate = FindOrCreateResultCol(ws, lastCol, HDR_NUM_DATE)
+    If colNumDate > lastCol Then lastCol = colNumDate
+    colBik = FindOrCreateResultCol(ws, lastCol, HDR_BIK)
+
+    For r = DATA_START_ROW To lastRow
+        ' 1) ФИО: оставить только кириллицу в O и W, сравнить
+        fioO = KeepCyrillic(CStr(ws.Cells(r, COL_O).Value2))
+        fioW = KeepCyrillic(CStr(ws.Cells(r, COL_W).Value2))
+        ws.Cells(r, COL_O).Value = fioO
+        ws.Cells(r, COL_W).Value = fioW
+
+        If Len(fioO) > 0 And Len(fioW) > 0 And fioO = fioW Then
+            ws.Cells(r, colFio).Value = "да"
+        Else
+            ws.Cells(r, colFio).Value = "нет"
+        End If
+
+        ' 2) №H и «от » + дата из I в содержании AD
+        contractNo = Trim$(CStr(ws.Cells(r, COL_H).Value2))
+        dateStr = FormatCellDate(ws.Cells(r, COL_I))
+        content = CStr(ws.Cells(r, COL_AD).Value2)
+
+        If Len(contractNo) > 0 And Len(dateStr) > 0 And _
+           InStr(1, content, "№" & contractNo, vbBinaryCompare) > 0 And _
+           InStr(1, content, "от " & dateStr, vbBinaryCompare) > 0 Then
+            ws.Cells(r, colNumDate).Value = "да"
+        Else
+            ws.Cells(r, colNumDate).Value = "нет"
+        End If
+
+        ' 3) БИК: только цифры, допускается пробел в конце
+        bikRaw = CStr(ws.Cells(r, COL_Z).Value2)
+        If IsBikDigitsOnly(bikRaw) Then
+            ws.Cells(r, colBik).Value = "да"
+        Else
+            ws.Cells(r, colBik).Value = "нет"
+        End If
+    Next r
+End Sub
+
+' -----------------------------------------------------------------------------
+' Вспомогательные функции
+' -----------------------------------------------------------------------------
+Private Function FindLastDataRow(ByVal ws As Worksheet) As Long
+    Dim lr As Long
+    lr = ws.Cells(ws.Rows.Count, COL_H).End(xlUp).Row
+    If lr < DATA_START_ROW Then
+        ' запасной поиск по колонке O
+        lr = ws.Cells(ws.Rows.Count, COL_O).End(xlUp).Row
+    End If
+    FindLastDataRow = lr
+End Function
+
+Private Function FindLastUsedCol(ByVal ws As Worksheet) As Long
+    Dim lc As Long
+    On Error Resume Next
+    lc = ws.UsedRange.Columns(ws.UsedRange.Columns.Count).Column
+    On Error GoTo 0
+    If lc < COL_AD Then lc = COL_AD
+    FindLastUsedCol = lc
+End Function
+
+' Ищет колонку по заголовку в строке 3; если нет — создаёт справа
+Private Function FindOrCreateResultCol(ByVal ws As Worksheet, ByVal lastCol As Long, ByVal headerText As String) As Long
+    Dim c As Long
+    Dim maxScan As Long
+
+    maxScan = lastCol + 10
+    If maxScan < 50 Then maxScan = 50
+
+    For c = 1 To maxScan
+        If CStr(ws.Cells(HEADER_NAME_ROW, c).Value2) = headerText Then
+            FindOrCreateResultCol = c
+            Exit Function
+        End If
+    Next c
+
+    FindOrCreateResultCol = lastCol + 1
+    ws.Cells(HEADER_NAME_ROW, FindOrCreateResultCol).Value = headerText
+End Function
+
+Private Function KeepCyrillic(ByVal s As String) As String
+    Dim i As Long
+    Dim ch As String
+    Dim code As Long
+    Dim result As String
+
+    result = ""
+    For i = 1 To Len(s)
+        ch = Mid$(s, i, 1)
+        code = AscW(ch)
+        ' А-Я (1040-1071), а-я (1072-1103), Ё (1025), ё (1105)
+        If (code >= 1040 And code <= 1103) Or code = 1025 Or code = 1105 Then
+            result = result & ch
+        End If
+    Next i
+    KeepCyrillic = result
+End Function
+
+Private Function FormatCellDate(ByVal cell As Range) As String
+    Dim v As Variant
+    v = cell.Value2
+    If IsEmpty(v) Or v = "" Then
+        FormatCellDate = ""
+        Exit Function
+    End If
+    If IsDate(cell.Value) Then
+        FormatCellDate = Format$(CDate(cell.Value), "dd.mm.yyyy")
+    Else
+        FormatCellDate = Trim$(CStr(v))
+    End If
+End Function
+
+' Допускается только пробел в конце; после RTrim — непустая строка из цифр
+Private Function IsBikDigitsOnly(ByVal s As String) As Boolean
+    Dim t As String
+    Dim i As Long
+    Dim ch As String
+
+    If Len(s) = 0 Then
+        IsBikDigitsOnly = False
+        Exit Function
+    End If
+
+    ' Пробелы только в конце: после RTrim не должно остаться пробелов внутри
+    t = RTrim$(s)
+    If Len(t) = 0 Then
+        IsBikDigitsOnly = False
+        Exit Function
+    End If
+    If InStr(t, " ") > 0 Then
+        IsBikDigitsOnly = False
+        Exit Function
+    End If
+
+    For i = 1 To Len(t)
+        ch = Mid$(t, i, 1)
+        If ch < "0" Or ch > "9" Then
+            IsBikDigitsOnly = False
+            Exit Function
+        End If
+    Next i
+
+    IsBikDigitsOnly = True
+End Function
