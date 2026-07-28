@@ -3,28 +3,22 @@
 
 from __future__ import annotations
 
-import argparse
 import logging
-import re
-import sys
 import time
-from pathlib import Path
 from typing import Any
 
 import requests
-from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
+
+from excel_utils import ensure_column
 
 BASE_URL = "https://bankrot.fedresurs.ru"
 WARMUP_URL = f"{BASE_URL}/bankrupts"
 PRSN_URL = f"{BASE_URL}/backend/prsnbankrupts"
 CMP_URL = f"{BASE_URL}/backend/cmpbankrupts"
 
-INN_HEADER = "ИНН"
 BANKRUPT_HEADER = "Банкрот"
 
-DEFAULT_INPUT = Path("source/data.xlsx")
-DEFAULT_DELAY = 1.5
 REQUEST_TIMEOUT = 30
 
 HEADERS = {
@@ -46,41 +40,6 @@ class FedresursError(Exception):
     """Ошибка запроса к API Федресурса (в т.ч. QRATOR)."""
 
 
-def normalize_inn(value: Any) -> str:
-    """Нормализовать ИНН: только цифры."""
-    if value is None:
-        return ""
-    text = str(value).strip()
-    if text.endswith(".0"):
-        text = text[:-2]
-    return re.sub(r"\D", "", text)
-
-
-def find_header_columns(ws: Worksheet) -> tuple[int, int]:
-    """Найти индекс колонки ИНН и Банкрот (1-based). Создать Банкрот при отсутствии."""
-    headers: dict[str, int] = {}
-    for col in range(1, ws.max_column + 1):
-        cell_value = ws.cell(1, col).value
-        if cell_value is None:
-            continue
-        headers[str(cell_value).strip()] = col
-
-    if INN_HEADER not in headers:
-        raise ValueError(
-            f"В первой строке нет колонки «{INN_HEADER}». "
-            f"Найдены: {', '.join(headers) or '(пусто)'}"
-        )
-
-    inn_col = headers[INN_HEADER]
-    if BANKRUPT_HEADER in headers:
-        bankrupt_col = headers[BANKRUPT_HEADER]
-    else:
-        bankrupt_col = ws.max_column + 1
-        ws.cell(1, bankrupt_col).value = BANKRUPT_HEADER
-
-    return inn_col, bankrupt_col
-
-
 def create_session() -> requests.Session:
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -89,7 +48,7 @@ def create_session() -> requests.Session:
 
 def warmup(session: requests.Session) -> None:
     """Прогрев: получить cookies QRATOR со страницы поиска."""
-    logger.info("Прогрев сессии: GET %s", WARMUP_URL)
+    logger.info("Банкрот: прогрев GET %s", WARMUP_URL)
     response = session.get(WARMUP_URL, timeout=REQUEST_TIMEOUT)
     if response.status_code in (403, 451):
         raise FedresursError(
@@ -97,7 +56,7 @@ def warmup(session: requests.Session) -> None:
             "Попробуйте позже или с другой сети."
         )
     response.raise_for_status()
-    logger.info("Прогрев OK (HTTP %s)", response.status_code)
+    logger.info("Банкрот: прогрев OK (HTTP %s)", response.status_code)
 
 
 def fetch_endpoint(
@@ -136,7 +95,6 @@ def search_bankrupts(session: requests.Session, inn: str) -> list[dict[str, Any]
     if length == 10:
         return fetch_endpoint(session, CMP_URL, inn)
 
-    # Неоднозначная длина — оба endpoint
     results: list[dict[str, Any]] = []
     results.extend(fetch_endpoint(session, PRSN_URL, inn))
     results.extend(fetch_endpoint(session, CMP_URL, inn))
@@ -175,42 +133,26 @@ def format_summary(records: list[dict[str, Any]]) -> str:
     return "; ".join(format_record(r) for r in records)
 
 
-def process_workbook(
-    input_path: Path,
-    output_path: Path,
+def ensure_bankrupt_column(ws: Worksheet, headers: dict[str, int]) -> int:
+    return ensure_column(ws, BANKRUPT_HEADER, headers)
+
+
+def process_rows(
+    ws: Worksheet,
+    rows: list[tuple[int, str]],
+    bankrupt_col: int,
     delay: float,
 ) -> None:
-    if not input_path.is_file():
-        raise FileNotFoundError(
-            f"Файл не найден: {input_path}. "
-            "Положите Excel в source/data.xlsx (колонки: id, Статус ДА, КА, ИНН)."
-        )
-
-    wb = load_workbook(input_path)
-    ws = wb.active
-    inn_col, bankrupt_col = find_header_columns(ws)
-
-    rows: list[tuple[int, str]] = []
-    for row in range(2, ws.max_row + 1):
-        raw = ws.cell(row, inn_col).value
-        inn = normalize_inn(raw)
-        if not inn:
-            logger.info("Строка %s: пустой ИНН — пропуск", row)
-            continue
-        rows.append((row, inn))
-
-    total = len(rows)
-    if total == 0:
-        logger.warning("Нет строк с ИНН для обработки")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        wb.save(output_path)
+    """Заполнить колонку Банкрот для списка строк."""
+    if not rows:
         return
 
     session = create_session()
     warmup(session)
 
+    total = len(rows)
     for index, (row, inn) in enumerate(rows, start=1):
-        logger.info("[%s/%s] ИНН %s (строка %s)", index, total, inn, row)
+        logger.info("Банкрот [%s/%s] ИНН %s (строка %s)", index, total, inn, row)
         try:
             records = search_bankrupts(session, inn)
             summary = format_summary(records)
@@ -226,59 +168,3 @@ def process_workbook(
 
         if index < total and delay > 0:
             time.sleep(delay)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(output_path)
-    logger.info("Сохранено: %s", output_path)
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Проверка ИНН на банкротство через bankrot.fedresurs.ru",
-    )
-    parser.add_argument(
-        "--input",
-        type=Path,
-        default=DEFAULT_INPUT,
-        help=f"Путь к Excel (по умолчанию {DEFAULT_INPUT})",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=None,
-        help="Куда сохранить результат (по умолчанию = --input)",
-    )
-    parser.add_argument(
-        "--delay",
-        type=float,
-        default=DEFAULT_DELAY,
-        help=f"Пауза между запросами в секундах (по умолчанию {DEFAULT_DELAY})",
-    )
-    return parser.parse_args(argv)
-
-
-def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    args = parse_args(argv)
-    output = args.output if args.output is not None else args.input
-
-    try:
-        process_workbook(args.input, output, args.delay)
-    except FileNotFoundError as exc:
-        logger.error("%s", exc)
-        return 1
-    except ValueError as exc:
-        logger.error("%s", exc)
-        return 1
-    except FedresursError as exc:
-        logger.error("%s", exc)
-        return 1
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
