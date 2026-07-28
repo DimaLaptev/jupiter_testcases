@@ -23,6 +23,12 @@ REQUEST_TIMEOUT = 30
 POLL_INTERVAL = 1.0
 POLL_MAX_ATTEMPTS = 30
 
+# Retry + backoff при captcha (вариант 1)
+DEFAULT_CAPTCHA_RETRIES = 5
+DEFAULT_CAPTCHA_BACKOFF = 30.0
+CAPTCHA_BACKOFF_FACTOR = 2.0
+CAPTCHA_BACKOFF_MAX = 180.0
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -41,6 +47,10 @@ logger = logging.getLogger(__name__)
 
 class EgrulError(Exception):
     """Ошибка запроса к egrul.nalog.ru."""
+
+
+class CaptchaRequiredError(EgrulError):
+    """Сервер требует captcha (captchaSearch / captchaRequired)."""
 
 
 def create_session() -> requests.Session:
@@ -94,6 +104,27 @@ def poll_search_result(session: requests.Session, token: str) -> list[dict[str, 
     raise EgrulError(f"Таймаут ожидания результата поиска (token={token[:16]}…)")
 
 
+def _payload_requires_captcha(payload: dict[str, Any]) -> bool:
+    if payload.get("captchaRequired"):
+        return True
+    errors = payload.get("ERRORS")
+    if isinstance(errors, dict) and "captchaSearch" in errors:
+        return True
+    return False
+
+
+def _parse_post_payload(response: requests.Response, inn: str) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise EgrulError(
+            f"Ответ POST не JSON для ИНН {inn} (HTTP {response.status_code})"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise EgrulError(f"Неожиданный JSON POST для ИНН {inn}: {payload!r}")
+    return payload
+
+
 def search_egrul(session: requests.Session, inn: str) -> list[dict[str, Any]]:
     """POST поиск + poll результата. Пустой список = «данных не найдено»."""
     response = session.post(
@@ -107,26 +138,82 @@ def search_egrul(session: requests.Session, inn: str) -> list[dict[str, Any]]:
         },
         timeout=REQUEST_TIMEOUT,
     )
+
+    # HTTP 400 с ERRORS.captchaSearch — типичный ответ при captcha
     if response.status_code != 200:
-        raise EgrulError(f"HTTP {response.status_code} POST /: {response.text[:200]}")
+        try:
+            payload = _parse_post_payload(response, inn)
+        except EgrulError:
+            raise EgrulError(
+                f"HTTP {response.status_code} POST /: {response.text[:200]}"
+            ) from None
+        if _payload_requires_captcha(payload):
+            raise CaptchaRequiredError(
+                f"Требуется captcha для ИНН {inn}: {payload.get('ERRORS') or payload}"
+            )
+        raise EgrulError(
+            f"HTTP {response.status_code} POST /: {response.text[:200]}"
+        )
 
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise EgrulError(f"Ответ POST не JSON для ИНН {inn}") from exc
+    payload = _parse_post_payload(response, inn)
 
+    if _payload_requires_captcha(payload):
+        raise CaptchaRequiredError(
+            f"Требуется captcha для ИНН {inn}: {payload.get('ERRORS') or payload}"
+        )
     if payload.get("ERRORS"):
         raise EgrulError(f"Ошибки API для ИНН {inn}: {payload['ERRORS']}")
-    if payload.get("captchaRequired"):
-        raise EgrulError(
-            f"Требуется captcha для ИНН {inn}. Повторите позже или решите captcha вручную."
-        )
 
     token = payload.get("t")
     if not token:
         raise EgrulError(f"Нет токена поиска t для ИНН {inn}: {payload}")
 
     return poll_search_result(session, str(token))
+
+
+def _captcha_wait_seconds(attempt: int, backoff_base: float) -> float:
+    """Экспоненциальный backoff: base, base*2, … до CAPTCHA_BACKOFF_MAX."""
+    wait = backoff_base * (CAPTCHA_BACKOFF_FACTOR ** max(0, attempt - 1))
+    return min(wait, CAPTCHA_BACKOFF_MAX)
+
+
+def search_egrul_with_retry(
+    session: requests.Session,
+    inn: str,
+    *,
+    captcha_retries: int = DEFAULT_CAPTCHA_RETRIES,
+    captcha_backoff: float = DEFAULT_CAPTCHA_BACKOFF,
+) -> tuple[list[dict[str, Any]], requests.Session]:
+    """
+    Поиск с повтором того же ИНН при captcha.
+
+    При CaptchaRequiredError ждём backoff, обновляем session (новый JSESSIONID)
+    и пробуем снова. Возвращает (records, актуальная session).
+    """
+    attempts = max(1, captcha_retries)
+    last_error: CaptchaRequiredError | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return search_egrul(session, inn), session
+        except CaptchaRequiredError as exc:
+            last_error = exc
+            if attempt >= attempts:
+                break
+            wait = _captcha_wait_seconds(attempt, captcha_backoff)
+            logger.warning(
+                "  captcha (попытка %s/%s): ждём %.0f с и обновляем сессию… (%s)",
+                attempt,
+                attempts,
+                wait,
+                exc,
+            )
+            time.sleep(wait)
+            session = create_session()
+            warmup(session)
+
+    assert last_error is not None
+    raise last_error
 
 
 def format_record(item: dict[str, Any]) -> str:
@@ -185,6 +272,9 @@ def process_rows(
     egrul_col: int,
     liq_col: int,
     delay: float,
+    *,
+    captcha_retries: int = DEFAULT_CAPTCHA_RETRIES,
+    captcha_backoff: float = DEFAULT_CAPTCHA_BACKOFF,
 ) -> None:
     """Заполнить колонки ЕГРЮЛ и Дата ликвидации для списка строк."""
     if not rows:
@@ -197,7 +287,12 @@ def process_rows(
     for index, (row, inn) in enumerate(rows, start=1):
         logger.info("ЕГРЮЛ [%s/%s] ИНН %s (строка %s)", index, total, inn, row)
         try:
-            records = search_egrul(session, inn)
+            records, session = search_egrul_with_retry(
+                session,
+                inn,
+                captcha_retries=captcha_retries,
+                captcha_backoff=captcha_backoff,
+            )
             summary = format_summary(records)
             liq_date = extract_liquidation_date(records)
             ws.cell(row, egrul_col).value = summary if summary else None
@@ -208,6 +303,12 @@ def process_rows(
                     logger.info("  дата ликвидации: %s", liq_date)
             else:
                 logger.info("  данных не найдено")
+        except CaptchaRequiredError as exc:
+            logger.error(
+                "  captcha после %s попыток: %s (ячейки ЕГРЮЛ не изменены)",
+                captcha_retries,
+                exc,
+            )
         except EgrulError as exc:
             logger.error("  ошибка: %s (ячейки ЕГРЮЛ не изменены)", exc)
         except requests.RequestException as exc:

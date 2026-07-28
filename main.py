@@ -31,6 +31,9 @@ def process_workbook(
     output_path: Path,
     delay: float,
     mode: str,
+    *,
+    captcha_retries: int = parse_egrul.DEFAULT_CAPTCHA_RETRIES,
+    captcha_backoff: float = parse_egrul.DEFAULT_CAPTCHA_BACKOFF,
 ) -> None:
     if not input_path.is_file():
         raise FileNotFoundError(
@@ -70,7 +73,15 @@ def process_workbook(
         parse_bankrupts.process_rows(ws, rows, bankrupt_col, delay)
 
     if run_egrul and egrul_col is not None and liq_col is not None:
-        parse_egrul.process_rows(ws, rows, egrul_col, liq_col, delay)
+        parse_egrul.process_rows(
+            ws,
+            rows,
+            egrul_col,
+            liq_col,
+            delay,
+            captcha_retries=captcha_retries,
+            captcha_backoff=captcha_backoff,
+        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
@@ -111,6 +122,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_DELAY,
         help=f"Пауза между запросами в секундах (по умолчанию {DEFAULT_DELAY})",
     )
+    parser.add_argument(
+        "--captcha-retries",
+        type=int,
+        default=parse_egrul.DEFAULT_CAPTCHA_RETRIES,
+        help=(
+            "Число попыток одного ИНН при captcha ЕГРЮЛ "
+            f"(по умолчанию {parse_egrul.DEFAULT_CAPTCHA_RETRIES})"
+        ),
+    )
+    parser.add_argument(
+        "--captcha-backoff",
+        type=float,
+        default=parse_egrul.DEFAULT_CAPTCHA_BACKOFF,
+        help=(
+            "Начальная пауза (сек) перед повтором при captcha; "
+            "далее x2 до 180 с "
+            f"(по умолчанию {parse_egrul.DEFAULT_CAPTCHA_BACKOFF})"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -124,7 +154,14 @@ def main(argv: list[str] | None = None) -> int:
     output = args.output if args.output is not None else args.input
 
     try:
-        process_workbook(args.input, output, args.delay, args.mode)
+        process_workbook(
+            args.input,
+            output,
+            args.delay,
+            args.mode,
+            captcha_retries=args.captcha_retries,
+            captcha_backoff=args.captcha_backoff,
+        )
     except FileNotFoundError as exc:
         logger.error("%s", exc)
         return 1
