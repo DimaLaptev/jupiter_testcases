@@ -186,6 +186,12 @@ Private Sub ProcessWorksheet(ByVal ws As Worksheet)
         Else
             hasNum = ContractInContent(content, contractNo)
             hasDate = DateInContent(content, dateStr)
+            ' запасной шаблон: «<номер> от <дата>» подтверждает оба условия
+            If (Not hasNum Or Not hasDate) And _
+               ContractDatePairInContent(content, contractNo, dateStr) Then
+                hasNum = True
+                hasDate = True
+            End If
             If hasNum And hasDate Then
                 dbg = "ок (номер+дата)"
             Else
@@ -234,8 +240,8 @@ Private Function NormalizeSpaces(ByVal s As String) As String
     NormalizeSpaces = Trim$(t)
 End Function
 
-' H="БН" → в AD: «б/н», «бн», «б н», «Б Н» и т.п. (регистр не важен)
-' иначе «№» + пробелы + номер (сравнение без учёта регистра)
+' H="БН" → «б/н», «бн», «б н»…;
+' иначе: «№»+номер, «договору »+номер (с границей токена)
 Private Function ContractInContent(ByVal content As String, ByVal contractNo As String) As Boolean
     Dim p As Long
     Dim i As Long
@@ -248,20 +254,19 @@ Private Function ContractInContent(ByVal content As String, ByVal contractNo As 
         If Not re Is Nothing Then
             re.IgnoreCase = True
             re.Global = False
-            ' б/н | бн | б н | Б Н | б / н
             re.Pattern = "б\s*/?\s*н"
             ContractInContent = re.Test(content)
             If Err.Number = 0 Then Exit Function
             Err.Clear
         End If
         On Error GoTo 0
-        ' запасной путь без RegExp
         ContractInContent = (InStr(1, content, "б/н", vbTextCompare) > 0) Or _
                             (InStr(1, content, "бн", vbTextCompare) > 0) Or _
                             (InStr(1, content, "б н", vbTextCompare) > 0)
         Exit Function
     End If
 
+    ' 1) № + пробелы + номер
     p = 1
     Do
         p = InStr(p, content, "№", vbBinaryCompare)
@@ -272,12 +277,27 @@ Private Function ContractInContent(ByVal content As String, ByVal contractNo As 
             i = i + 1
         Loop
 
-        If i + Len(contractNo) - 1 <= Len(content) Then
-            extracted = Mid$(content, i, Len(contractNo))
-            If StrComp(extracted, contractNo, vbTextCompare) = 0 Then
-                ContractInContent = True
-                Exit Function
-            End If
+        If HasTokenAt(content, i, contractNo) Then
+            ContractInContent = True
+            Exit Function
+        End If
+        p = p + 1
+    Loop
+
+    ' 2) «договору» + пробелы + номер
+    p = 1
+    Do
+        p = InStr(p, content, "договору", vbTextCompare)
+        If p = 0 Then Exit Do
+
+        i = p + Len("договору")
+        Do While i <= Len(content) And Mid$(content, i, 1) = " "
+            i = i + 1
+        Loop
+
+        If HasTokenAt(content, i, contractNo) Then
+            ContractInContent = True
+            Exit Function
         End If
         p = p + 1
     Loop
@@ -285,8 +305,153 @@ Private Function ContractInContent(ByVal content As String, ByVal contractNo As 
     ContractInContent = False
 End Function
 
+' Шаблон: «<номер> от <дата>» (дата — гибкий формат)
+Private Function ContractDatePairInContent(ByVal content As String, ByVal contractNo As String, ByVal dateStr As String) As Boolean
+    Dim p As Long
+    Dim i As Long
+    Dim after As String
+
+    If StrComp(contractNo, "БН", vbTextCompare) = 0 Then
+        ContractDatePairInContent = False
+        Exit Function
+    End If
+
+    p = 1
+    Do
+        p = FindTokenPos(content, contractNo, p)
+        If p = 0 Then Exit Do
+
+        i = p + Len(contractNo)
+        Do While i <= Len(content) And Mid$(content, i, 1) = " "
+            i = i + 1
+        Loop
+
+        If i + 1 <= Len(content) Then
+            If StrComp(Mid$(content, i, 2), "от", vbTextCompare) = 0 Then
+                i = i + 2
+                Do While i <= Len(content) And Mid$(content, i, 1) = " "
+                    i = i + 1
+                Loop
+                after = Mid$(content, i)
+                If DateStartsAt(after, dateStr) Then
+                    ContractDatePairInContent = True
+                    Exit Function
+                End If
+            End If
+        End If
+        p = p + 1
+    Loop
+
+    ContractDatePairInContent = False
+End Function
+
+' True, если в позиции pos стоит token и по краям граница (не продолжение 14→140)
+Private Function HasTokenAt(ByVal content As String, ByVal pos As Long, ByVal token As String) As Boolean
+    If pos < 1 Or pos + Len(token) - 1 > Len(content) Then
+        HasTokenAt = False
+        Exit Function
+    End If
+    If StrComp(Mid$(content, pos, Len(token)), token, vbTextCompare) <> 0 Then
+        HasTokenAt = False
+        Exit Function
+    End If
+    If pos > 1 Then
+        If Not IsTokenBoundaryChar(Mid$(content, pos - 1, 1)) Then
+            HasTokenAt = False
+            Exit Function
+        End If
+    End If
+    If pos + Len(token) <= Len(content) Then
+        If Not IsTokenBoundaryChar(Mid$(content, pos + Len(token), 1)) Then
+            HasTokenAt = False
+            Exit Function
+        End If
+    End If
+    HasTokenAt = True
+End Function
+
+Private Function FindTokenPos(ByVal content As String, ByVal token As String, ByVal startPos As Long) As Long
+    Dim p As Long
+    p = startPos
+    If p < 1 Then p = 1
+    Do
+        p = InStr(p, content, token, vbTextCompare)
+        If p = 0 Then
+            FindTokenPos = 0
+            Exit Function
+        End If
+        If HasTokenAt(content, p, token) Then
+            FindTokenPos = p
+            Exit Function
+        End If
+        p = p + 1
+    Loop
+End Function
+
+Private Function IsTokenBoundaryChar(ByVal ch As String) As Boolean
+    Dim code As Long
+    If Len(ch) = 0 Then
+        IsTokenBoundaryChar = True
+        Exit Function
+    End If
+    If ch >= "0" And ch <= "9" Then
+        IsTokenBoundaryChar = False
+        Exit Function
+    End If
+    code = AscW(ch)
+    ' A-Z a-z
+    If (code >= 65 And code <= 90) Or (code >= 97 And code <= 122) Then
+        IsTokenBoundaryChar = False
+        Exit Function
+    End If
+    ' А-Я а-я Ё ё
+    If (code >= 1040 And code <= 1103) Or code = 1025 Or code = 1105 Then
+        IsTokenBoundaryChar = False
+        Exit Function
+    End If
+    IsTokenBoundaryChar = True
+End Function
+
+' Проверка, что строка s начинается с даты dateStr (гибкий формат)
+Private Function DateStartsAt(ByVal s As String, ByVal dateStr As String) As Boolean
+    Dim d As Long, m As Long, y As Long
+    Dim re As Object
+    Dim pat As String
+    Dim head As String
+
+    dateStr = NormalizeSpaces(dateStr)
+    s = NormalizeSpaces(s)
+
+    If Left$(s, Len(dateStr)) = dateStr Then
+        DateStartsAt = True
+        Exit Function
+    End If
+
+    If Not ParseDateParts(dateStr, d, m, y) Then
+        DateStartsAt = False
+        Exit Function
+    End If
+
+    On Error Resume Next
+    Set re = CreateObject("VBScript.RegExp")
+    If re Is Nothing Or Err.Number <> 0 Then
+        Err.Clear
+        On Error GoTo 0
+        DateStartsAt = False
+        Exit Function
+    End If
+    On Error GoTo 0
+
+    re.IgnoreCase = True
+    re.Global = False
+    pat = "^0*" & CStr(d) & "[\.\/\s]+0*" & CStr(m) & "[\.\/\s]+" & CStr(y) & "\s*г?\.?"
+    re.Pattern = pat
+    ' достаточно начала строки (после «от »)
+    head = s
+    DateStartsAt = re.Test(head)
+End Function
+
 ' Дата после «от»: точки/слэши/пробелы, без ведущего нуля, «г»/«г.»
-' Примеры: от 06.10.2025г | от 8/09 2025 г | от 08.09.2025
 Private Function DateInContent(ByVal content As String, ByVal dateStr As String) As Boolean
     Dim d As Long, m As Long, y As Long
     Dim re As Object
@@ -294,7 +459,6 @@ Private Function DateInContent(ByVal content As String, ByVal dateStr As String)
 
     dateStr = NormalizeSpaces(dateStr)
 
-    ' быстрый путь: точное вхождение
     If InStr(1, content, "от " & dateStr, vbBinaryCompare) > 0 Then
         DateInContent = True
         Exit Function
@@ -317,7 +481,6 @@ Private Function DateInContent(ByVal content As String, ByVal dateStr As String)
 
     re.IgnoreCase = True
     re.Global = False
-    ' от + пробелы + день + разделитель + месяц + разделитель + год + опц. г/г.
     pat = "от\s+0*" & CStr(d) & "[\.\/\s]+0*" & CStr(m) & "[\.\/\s]+" & CStr(y) & "\s*г?\.?"
     re.Pattern = pat
     DateInContent = re.Test(content)
