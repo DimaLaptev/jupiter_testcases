@@ -1,12 +1,14 @@
 ' =============================================================================
 ' ИНСТРУКЦИЯ
-' 1. Создайте новую книгу Excel и сохраните как .xlsm (книга Excel с поддержкой макросов).
+' 1. Создайте новую книгу Excel и сохраните как .xlsm.
 ' 2. Alt+F11 → Вставка → Модуль → вставьте ВЕСЬ код из этого файла.
-' 3. Закройте редактор VBA. Нажмите Alt+F8 → выберите SozdatKnopku → Выполнить.
-'    На листе появится кнопка «запустить проверку».
-'    (При следующем открытии файла кнопка создаётся сама через Auto_Open.)
-' 4. Положите этот .xlsm в папку с проверяемыми .xlsx/.xlsm и нажмите кнопку.
+' 3. На листе: Разработчик → Вставить → Кнопка → макрос ZapustitProverku,
+'    текст кнопки: «запустить проверку».
+' 4. Положите .xlsm в папку с проверяемыми файлами и нажмите кнопку.
 '    Файл с макросом не изменяется; обрабатываются только соседние файлы.
+'
+' ОТЛАДКА: поставьте DEBUG_PROVERKA = True — появится колонка
+' «Отладка номер/дата» с причиной «да/нет» по номеру и дате.
 ' =============================================================================
 
 Option Explicit
@@ -23,47 +25,10 @@ Private Const COL_AD As Long = 30        ' содержание операции
 Private Const HDR_FIO As String = "ФИО совпадает"
 Private Const HDR_NUM_DATE As String = "Номер и Дата есть в содержании"
 Private Const HDR_BIK As String = "В БИК только цифры"
+Private Const HDR_DEBUG As String = "Отладка номер/дата"
 
-Private Const BTN_NAME As String = "btnZapustitProverku"
-Private Const BTN_CAPTION As String = "запустить проверку"
-
-' -----------------------------------------------------------------------------
-' При открытии книги — создать кнопку, если её ещё нет
-' -----------------------------------------------------------------------------
-Public Sub Auto_Open()
-    Call SozdatKnopku
-End Sub
-
-' -----------------------------------------------------------------------------
-' Создаёт / обновляет кнопку на первом листе. Запустите один раз через Alt+F8.
-' -----------------------------------------------------------------------------
-Public Sub SozdatKnopku()
-    Dim ws As Worksheet
-    Dim btn As Button
-    Dim b As Button
-
-    Set ws = ThisWorkbook.Worksheets(1)
-
-    On Error Resume Next
-    For Each b In ws.Buttons
-        If b.Name = BTN_NAME Or b.OnAction = "ZapustitProverku" Then
-            b.Delete
-        End If
-    Next b
-    On Error GoTo 0
-
-    Set btn = ws.Buttons.Add(Left:=24, Top:=24, Width:=200, Height:=40)
-    With btn
-        .Name = BTN_NAME
-        .OnAction = "ZapustitProverku"
-        .Characters.Text = BTN_CAPTION
-        .Font.Size = 12
-        .Font.Bold = True
-    End With
-
-    ws.Activate
-    MsgBox "Кнопка «запустить проверку» создана на листе «" & ws.Name & "».", vbInformation
-End Sub
+' True = писать колонку с причиной по проверке номера/даты
+Private Const DEBUG_PROVERKA As Boolean = False
 
 ' -----------------------------------------------------------------------------
 ' Точка входа для кнопки «запустить проверку»
@@ -102,7 +67,6 @@ Public Sub ProverkaFailov()
 
     On Error GoTo CleanFail
 
-    ' Обход .xlsx и .xlsm в той же папке
     fileName = Dir(folderPath & Application.PathSeparator & "*.xls*")
     Do While Len(fileName) > 0
         If Left$(fileName, 2) <> "~$" Then
@@ -166,6 +130,7 @@ Private Sub ProcessWorksheet(ByVal ws As Worksheet)
     Dim colFio As Long
     Dim colNumDate As Long
     Dim colBik As Long
+    Dim colDebug As Long
     Dim r As Long
     Dim fioO As String
     Dim fioW As String
@@ -173,6 +138,9 @@ Private Sub ProcessWorksheet(ByVal ws As Worksheet)
     Dim dateStr As String
     Dim content As String
     Dim bikRaw As String
+    Dim hasNum As Boolean
+    Dim hasDate As Boolean
+    Dim dbg As String
 
     lastRow = FindLastDataRow(ws)
     If lastRow < DATA_START_ROW Then Exit Sub
@@ -183,33 +151,61 @@ Private Sub ProcessWorksheet(ByVal ws As Worksheet)
     colNumDate = FindOrCreateResultCol(ws, lastCol, HDR_NUM_DATE)
     If colNumDate > lastCol Then lastCol = colNumDate
     colBik = FindOrCreateResultCol(ws, lastCol, HDR_BIK)
+    If colBik > lastCol Then lastCol = colBik
+
+    colDebug = 0
+    If DEBUG_PROVERKA Then
+        colDebug = FindOrCreateResultCol(ws, lastCol, HDR_DEBUG)
+    End If
 
     For r = DATA_START_ROW To lastRow
-        ' 1) ФИО: очистка только в памяти; сравнение без учёта регистра
+        ' 1) ФИО: кириллица в памяти; совпадение или вхождение O в W (адрес в W)
         fioO = KeepCyrillic(CStr(ws.Cells(r, COL_O).Value2))
         fioW = KeepCyrillic(CStr(ws.Cells(r, COL_W).Value2))
 
         If Len(fioO) > 0 And Len(fioW) > 0 And _
-           StrComp(fioO, fioW, vbTextCompare) = 0 Then
+           InStr(1, fioW, fioO, vbTextCompare) > 0 Then
             ws.Cells(r, colFio).Value = "да"
         Else
             ws.Cells(r, colFio).Value = "нет"
         End If
 
-        ' 2) номер (№ / б/н) и дата (в т.ч. с «г»/«г.») в содержании AD
-        contractNo = Trim$(CStr(ws.Cells(r, COL_H).Value2))
+        ' 2) номер + дата в AD (ячейки H/I/AD не меняем)
+        contractNo = NormalizeSpaces(CStr(ws.Cells(r, COL_H).Value2))
         dateStr = FormatCellDate(ws.Cells(r, COL_I))
-        content = CStr(ws.Cells(r, COL_AD).Value2)
+        content = NormalizeSpaces(CStr(ws.Cells(r, COL_AD).Value2))
 
-        If Len(contractNo) > 0 And Len(dateStr) > 0 And _
-           ContractInContent(content, contractNo) And _
-           DateInContent(content, dateStr) Then
+        hasNum = False
+        hasDate = False
+        dbg = ""
+
+        If Len(contractNo) = 0 Then
+            dbg = "H пусто"
+        ElseIf Len(dateStr) = 0 Then
+            dbg = "I пусто/дата не распознана"
+        Else
+            hasNum = ContractInContent(content, contractNo)
+            hasDate = DateInContent(content, dateStr)
+            If hasNum And hasDate Then
+                dbg = "ок (номер+дата)"
+            Else
+                If Not hasNum Then dbg = dbg & "номер не найден; "
+                If Not hasDate Then dbg = dbg & "дата не найдена; "
+                dbg = dbg & "[H=[" & contractNo & "] I=[" & dateStr & "]]"
+            End If
+        End If
+
+        If hasNum And hasDate Then
             ws.Cells(r, colNumDate).Value = "да"
         Else
             ws.Cells(r, colNumDate).Value = "нет"
         End If
 
-        ' 3) БИК: только цифры, допускается пробел в конце
+        If colDebug > 0 Then
+            ws.Cells(r, colDebug).Value = dbg
+        End If
+
+        ' 3) БИК
         bikRaw = CStr(ws.Cells(r, COL_Z).Value2)
         If IsBikDigitsOnly(bikRaw) Then
             ws.Cells(r, colBik).Value = "да"
@@ -222,13 +218,47 @@ End Sub
 ' -----------------------------------------------------------------------------
 ' Вспомогательные функции
 ' -----------------------------------------------------------------------------
-' H="БН" → в AD ищем "б/н"; иначе "№" + необязательные пробелы + номер
+
+' Обычные/неразрывные пробелы → " ", Trim по краям
+Private Function NormalizeSpaces(ByVal s As String) As String
+    Dim t As String
+    t = s
+    t = Replace(t, ChrW(160), " ")   ' NBSP
+    t = Replace(t, ChrW(8239), " ")  ' узкий NBSP
+    t = Replace(t, vbTab, " ")
+    t = Replace(t, vbCr, " ")
+    t = Replace(t, vbLf, " ")
+    Do While InStr(t, "  ") > 0
+        t = Replace(t, "  ", " ")
+    Loop
+    NormalizeSpaces = Trim$(t)
+End Function
+
+' H="БН" → в AD: «б/н», «бн», «б н», «Б Н» и т.п. (регистр не важен)
+' иначе «№» + пробелы + номер (сравнение без учёта регистра)
 Private Function ContractInContent(ByVal content As String, ByVal contractNo As String) As Boolean
     Dim p As Long
     Dim i As Long
+    Dim re As Object
+    Dim extracted As String
 
     If StrComp(contractNo, "БН", vbTextCompare) = 0 Then
-        ContractInContent = (InStr(1, content, "б/н", vbTextCompare) > 0)
+        On Error Resume Next
+        Set re = CreateObject("VBScript.RegExp")
+        If Not re Is Nothing Then
+            re.IgnoreCase = True
+            re.Global = False
+            ' б/н | бн | б н | Б Н | б / н
+            re.Pattern = "б\s*/?\s*н"
+            ContractInContent = re.Test(content)
+            If Err.Number = 0 Then Exit Function
+            Err.Clear
+        End If
+        On Error GoTo 0
+        ' запасной путь без RegExp
+        ContractInContent = (InStr(1, content, "б/н", vbTextCompare) > 0) Or _
+                            (InStr(1, content, "бн", vbTextCompare) > 0) Or _
+                            (InStr(1, content, "б н", vbTextCompare) > 0)
         Exit Function
     End If
 
@@ -238,13 +268,13 @@ Private Function ContractInContent(ByVal content As String, ByVal contractNo As 
         If p = 0 Then Exit Do
 
         i = p + Len("№")
-        ' допускаем пробелы между № и номером
         Do While i <= Len(content) And Mid$(content, i, 1) = " "
             i = i + 1
         Loop
 
         If i + Len(contractNo) - 1 <= Len(content) Then
-            If Mid$(content, i, Len(contractNo)) = contractNo Then
+            extracted = Mid$(content, i, Len(contractNo))
+            If StrComp(extracted, contractNo, vbTextCompare) = 0 Then
                 ContractInContent = True
                 Exit Function
             End If
@@ -255,16 +285,90 @@ Private Function ContractInContent(ByVal content As String, ByVal contractNo As 
     ContractInContent = False
 End Function
 
-' «от » + дата; «г»/«г.» после года допустимы (покрываются поиском подстроки)
+' Дата после «от»: точки/слэши/пробелы, без ведущего нуля, «г»/«г.»
+' Примеры: от 06.10.2025г | от 8/09 2025 г | от 08.09.2025
 Private Function DateInContent(ByVal content As String, ByVal dateStr As String) As Boolean
-    DateInContent = (InStr(1, content, "от " & dateStr, vbBinaryCompare) > 0)
+    Dim d As Long, m As Long, y As Long
+    Dim re As Object
+    Dim pat As String
+
+    dateStr = NormalizeSpaces(dateStr)
+
+    ' быстрый путь: точное вхождение
+    If InStr(1, content, "от " & dateStr, vbBinaryCompare) > 0 Then
+        DateInContent = True
+        Exit Function
+    End If
+
+    If Not ParseDateParts(dateStr, d, m, y) Then
+        DateInContent = False
+        Exit Function
+    End If
+
+    On Error Resume Next
+    Set re = CreateObject("VBScript.RegExp")
+    If re Is Nothing Or Err.Number <> 0 Then
+        Err.Clear
+        On Error GoTo 0
+        DateInContent = False
+        Exit Function
+    End If
+    On Error GoTo 0
+
+    re.IgnoreCase = True
+    re.Global = False
+    ' от + пробелы + день + разделитель + месяц + разделитель + год + опц. г/г.
+    pat = "от\s+0*" & CStr(d) & "[\.\/\s]+0*" & CStr(m) & "[\.\/\s]+" & CStr(y) & "\s*г?\.?"
+    re.Pattern = pat
+    DateInContent = re.Test(content)
+End Function
+
+Private Function ParseDateParts(ByVal dateStr As String, ByRef d As Long, ByRef m As Long, ByRef y As Long) As Boolean
+    Dim t As String
+    Dim i As Long
+    Dim ch As String
+    Dim buf As String
+    Dim arr As Collection
+
+    t = NormalizeSpaces(dateStr)
+    If Right$(LCase$(t), 2) = "г." Then t = Left$(t, Len(t) - 2)
+    If Right$(LCase$(t), 1) = "г" Then t = Left$(t, Len(t) - 1)
+    t = Trim$(t)
+
+    Set arr = New Collection
+    buf = ""
+    For i = 1 To Len(t)
+        ch = Mid$(t, i, 1)
+        If ch >= "0" And ch <= "9" Then
+            buf = buf & ch
+        Else
+            If Len(buf) > 0 Then
+                arr.Add CLng(buf)
+                buf = ""
+            End If
+        End If
+    Next i
+    If Len(buf) > 0 Then arr.Add CLng(buf)
+
+    If arr.Count < 3 Then
+        ParseDateParts = False
+        Exit Function
+    End If
+
+    d = CLng(arr(1))
+    m = CLng(arr(2))
+    y = CLng(arr(3))
+    If d < 1 Or d > 31 Or m < 1 Or m > 12 Or y < 1000 Then
+        ParseDateParts = False
+        Exit Function
+    End If
+    ParseDateParts = True
 End Function
 
 Private Function FindLastDataRow(ByVal ws As Worksheet) As Long
     Dim lr As Long
     lr = ws.Cells(ws.Rows.Count, COL_H).End(xlUp).Row
     If lr < DATA_START_ROW Then
-        ' запасной поиск по колонке O
         lr = ws.Cells(ws.Rows.Count, COL_O).End(xlUp).Row
     End If
     FindLastDataRow = lr
@@ -279,7 +383,6 @@ Private Function FindLastUsedCol(ByVal ws As Worksheet) As Long
     FindLastUsedCol = lc
 End Function
 
-' Ищет колонку по заголовку в строке 3; если нет — создаёт справа
 Private Function FindOrCreateResultCol(ByVal ws As Worksheet, ByVal lastCol As Long, ByVal headerText As String) As Long
     Dim c As Long
     Dim maxScan As Long
@@ -308,7 +411,6 @@ Private Function KeepCyrillic(ByVal s As String) As String
     For i = 1 To Len(s)
         ch = Mid$(s, i, 1)
         code = AscW(ch)
-        ' А-Я (1040-1071), а-я (1072-1103), Ё (1025), ё (1105)
         If (code >= 1040 And code <= 1103) Or code = 1025 Or code = 1105 Then
             result = result & ch
         End If
@@ -318,6 +420,7 @@ End Function
 
 Private Function FormatCellDate(ByVal cell As Range) As String
     Dim v As Variant
+    Dim t As String
     v = cell.Value2
     If IsEmpty(v) Or v = "" Then
         FormatCellDate = ""
@@ -326,23 +429,19 @@ Private Function FormatCellDate(ByVal cell As Range) As String
     If IsDate(cell.Value) Then
         FormatCellDate = Format$(CDate(cell.Value), "dd.mm.yyyy")
     Else
-        FormatCellDate = Trim$(CStr(v))
+        t = NormalizeSpaces(CStr(v))
+        If Right$(LCase$(t), 2) = "г." Then t = Trim$(Left$(t, Len(t) - 2))
+        If Right$(LCase$(t), 1) = "г" Then t = Trim$(Left$(t, Len(t) - 1))
+        FormatCellDate = t
     End If
 End Function
 
-' Допускается только пробел в конце; после RTrim — непустая строка из цифр
 Private Function IsBikDigitsOnly(ByVal s As String) As Boolean
     Dim t As String
     Dim i As Long
     Dim ch As String
 
-    If Len(s) = 0 Then
-        IsBikDigitsOnly = False
-        Exit Function
-    End If
-
-    ' Пробелы только в конце: после RTrim не должно остаться пробелов внутри
-    t = RTrim$(s)
+    t = NormalizeSpaces(s)
     If Len(t) = 0 Then
         IsBikDigitsOnly = False
         Exit Function
