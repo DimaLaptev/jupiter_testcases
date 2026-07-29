@@ -240,78 +240,189 @@ Private Function NormalizeSpaces(ByVal s As String) As String
     NormalizeSpaces = Trim$(t)
 End Function
 
-' H="БН" → «б/н», «бн», «б н»…;
-' иначе: «№»+номер, «договору »+номер (с границей токена)
+' H="БН" → «б/н»…, «ТД от…», «дог. от…» / «дог. б/н»;
+' иначе: «№»/«договору»/«ТД»/«дог.» + номер
 Private Function ContractInContent(ByVal content As String, ByVal contractNo As String) As Boolean
-    Dim p As Long
-    Dim i As Long
-    Dim re As Object
-    Dim extracted As String
-
     If StrComp(contractNo, "БН", vbTextCompare) = 0 Then
-        On Error Resume Next
-        Set re = CreateObject("VBScript.RegExp")
-        If Not re Is Nothing Then
-            re.IgnoreCase = True
-            re.Global = False
-            re.Pattern = "б\s*/?\s*н"
-            ContractInContent = re.Test(content)
-            If Err.Number = 0 Then Exit Function
-            Err.Clear
+        ' б/н-варианты, «ТД от», «дог. от», «дог. б/н»
+        If BnMarkerInContent(content) Then
+            ContractInContent = True
+            Exit Function
         End If
-        On Error GoTo 0
-        ContractInContent = (InStr(1, content, "б/н", vbTextCompare) > 0) Or _
-                            (InStr(1, content, "бн", vbTextCompare) > 0) Or _
-                            (InStr(1, content, "б н", vbTextCompare) > 0)
+        ContractInContent = False
         Exit Function
     End If
 
-    ' 1) № + пробелы + номер
-    p = 1
-    Do
-        p = InStr(p, content, "№", vbBinaryCompare)
-        If p = 0 Then Exit Do
-
-        i = p + Len("№")
-        Do While i <= Len(content) And Mid$(content, i, 1) = " "
-            i = i + 1
-        Loop
-
-        If HasTokenAt(content, i, contractNo) Then
-            ContractInContent = True
-            Exit Function
-        End If
-        p = p + 1
-    Loop
-
-    ' 2) «договору» + пробелы + номер
-    p = 1
-    Do
-        p = InStr(p, content, "договору", vbTextCompare)
-        If p = 0 Then Exit Do
-
-        i = p + Len("договору")
-        Do While i <= Len(content) And Mid$(content, i, 1) = " "
-            i = i + 1
-        Loop
-
-        If HasTokenAt(content, i, contractNo) Then
-            ContractInContent = True
-            Exit Function
-        End If
-        p = p + 1
-    Loop
+    If PrefixThenContract(content, "№", contractNo) Then
+        ContractInContent = True
+        Exit Function
+    End If
+    If PrefixThenContract(content, "договору", contractNo) Then
+        ContractInContent = True
+        Exit Function
+    End If
+    If PrefixThenContract(content, "ТД", contractNo) Then
+        ContractInContent = True
+        Exit Function
+    End If
+    If PrefixThenContract(content, "дог.", contractNo) Then
+        ContractInContent = True
+        Exit Function
+    End If
 
     ContractInContent = False
 End Function
 
-' Шаблон: «<номер> от <дата>» (дата — гибкий формат)
+' Маркеры договора без номера в AD
+Private Function BnMarkerInContent(ByVal content As String) As Boolean
+    Dim re As Object
+    Dim p As Long
+    Dim i As Long
+
+    On Error Resume Next
+    Set re = CreateObject("VBScript.RegExp")
+    If Not re Is Nothing And Err.Number = 0 Then
+        re.IgnoreCase = True
+        re.Global = False
+        re.Pattern = "б\s*/?\s*н"
+        If re.Test(content) Then
+            BnMarkerInContent = True
+            Exit Function
+        End If
+    End If
+    Err.Clear
+    On Error GoTo 0
+
+    If InStr(1, content, "б/н", vbTextCompare) > 0 Or _
+       InStr(1, content, "бн", vbTextCompare) > 0 Or _
+       InStr(1, content, "б н", vbTextCompare) > 0 Then
+        BnMarkerInContent = True
+        Exit Function
+    End If
+
+    ' «ТД от …» без номера между ТД и от
+    p = 1
+    Do
+        p = FindTokenPos(content, "ТД", p)
+        If p = 0 Then Exit Do
+        i = p + Len("ТД")
+        Do While i <= Len(content) And Mid$(content, i, 1) = " "
+            i = i + 1
+        Loop
+        If i + 1 <= Len(content) Then
+            If StrComp(Mid$(content, i, 2), "от", vbTextCompare) = 0 Then
+                BnMarkerInContent = True
+                Exit Function
+            End If
+        End If
+        p = p + 1
+    Loop
+
+    ' «дог. от …» или «дог. б/н»
+    p = 1
+    Do
+        p = InStr(p, content, "дог.", vbTextCompare)
+        If p = 0 Then Exit Do
+        i = p + Len("дог.")
+        Do While i <= Len(content) And Mid$(content, i, 1) = " "
+            i = i + 1
+        Loop
+        If i + 1 <= Len(content) Then
+            If StrComp(Mid$(content, i, 2), "от", vbTextCompare) = 0 Then
+                BnMarkerInContent = True
+                Exit Function
+            End If
+        End If
+        If HasTokenAt(content, i, "б/н") Or HasTokenAt(content, i, "бн") Or HasTokenAt(content, i, "БН") Then
+            BnMarkerInContent = True
+            Exit Function
+        End If
+        p = p + 1
+    Loop
+
+    BnMarkerInContent = False
+End Function
+
+' Префикс (№ / договору / ТД / дог.) + пробелы + опционально «№» + номер
+Private Function PrefixThenContract(ByVal content As String, ByVal prefix As String, ByVal contractNo As String) As Boolean
+    Dim p As Long
+    Dim i As Long
+    Dim needTokenBoundary As Boolean
+
+    needTokenBoundary = (StrComp(prefix, "ТД", vbTextCompare) = 0)
+
+    p = 1
+    Do
+        If needTokenBoundary Then
+            p = FindTokenPos(content, prefix, p)
+        Else
+            p = InStr(p, content, prefix, vbTextCompare)
+        End If
+        If p = 0 Then Exit Do
+
+        i = p + Len(prefix)
+        Do While i <= Len(content) And Mid$(content, i, 1) = " "
+            i = i + 1
+        Loop
+
+        ' «ТД № 22» / «дог. № 22» — пропускаем № между префиксом и номером
+        If Mid$(content, i, 1) = "№" Then
+            i = i + 1
+            Do While i <= Len(content) And Mid$(content, i, 1) = " "
+                i = i + 1
+            Loop
+        End If
+
+        If HasTokenAt(content, i, contractNo) Then
+            PrefixThenContract = True
+            Exit Function
+        End If
+        p = p + 1
+    Loop
+
+    PrefixThenContract = False
+End Function
+
+' Шаблон: «<номер> от <дата>»; для БН также «ТД от <дата>» / «дог. от <дата>»
 Private Function ContractDatePairInContent(ByVal content As String, ByVal contractNo As String, ByVal dateStr As String) As Boolean
     Dim p As Long
     Dim i As Long
     Dim after As String
+    Dim prefixes As Variant
+    Dim pref As Variant
 
     If StrComp(contractNo, "БН", vbTextCompare) = 0 Then
+        prefixes = Array("ТД", "дог.")
+        For Each pref In prefixes
+            p = 1
+            Do
+                If StrComp(CStr(pref), "ТД", vbTextCompare) = 0 Then
+                    p = FindTokenPos(content, CStr(pref), p)
+                Else
+                    p = InStr(p, content, CStr(pref), vbTextCompare)
+                End If
+                If p = 0 Then Exit Do
+
+                i = p + Len(CStr(pref))
+                Do While i <= Len(content) And Mid$(content, i, 1) = " "
+                    i = i + 1
+                Loop
+
+                If i + 1 <= Len(content) Then
+                    If StrComp(Mid$(content, i, 2), "от", vbTextCompare) = 0 Then
+                        i = i + 2
+                        Do While i <= Len(content) And Mid$(content, i, 1) = " "
+                            i = i + 1
+                        Loop
+                        If DateStartsAt(Mid$(content, i), dateStr) Then
+                            ContractDatePairInContent = True
+                            Exit Function
+                        End If
+                    End If
+                End If
+                p = p + 1
+            Loop
+        Next pref
         ContractDatePairInContent = False
         Exit Function
     End If
@@ -412,23 +523,33 @@ Private Function IsTokenBoundaryChar(ByVal ch As String) As Boolean
     IsTokenBoundaryChar = True
 End Function
 
-' Проверка, что строка s начинается с даты dateStr (гибкий формат)
+' Проверка, что строка s начинается с даты dateStr (дд.мм.гггг / дд.мм.гг / дд.мм.гг.)
 Private Function DateStartsAt(ByVal s As String, ByVal dateStr As String) As Boolean
     Dim d As Long, m As Long, y As Long
     Dim re As Object
     Dim pat As String
-    Dim head As String
+    Dim shortDt As String
 
     dateStr = NormalizeSpaces(dateStr)
     s = NormalizeSpaces(s)
 
-    If Left$(s, Len(dateStr)) = dateStr Then
+    If Len(dateStr) > 0 And Left$(s, Len(dateStr)) = dateStr Then
         DateStartsAt = True
         Exit Function
     End If
 
     If Not ParseDateParts(dateStr, d, m, y) Then
         DateStartsAt = False
+        Exit Function
+    End If
+
+    shortDt = DateShortDotted(d, m, y)
+    If Left$(s, Len(shortDt)) = shortDt Then
+        DateStartsAt = True
+        Exit Function
+    End If
+    If Left$(s, Len(shortDt) + 1) = shortDt & "." Then
+        DateStartsAt = True
         Exit Function
     End If
 
@@ -444,18 +565,18 @@ Private Function DateStartsAt(ByVal s As String, ByVal dateStr As String) As Boo
 
     re.IgnoreCase = True
     re.Global = False
-    pat = "^0*" & CStr(d) & "[\.\/\s]+0*" & CStr(m) & "[\.\/\s]+" & CStr(y) & "\s*г?\.?"
+    ' год: 2025 | 25; после года — точка, «г», пробел или конец (не цифра)
+    pat = "^0*" & CStr(d) & "[\.\/\s]+0*" & CStr(m) & "[\.\/\s]+" & YearPattern(y) & "(\.|г\.?|[\s,;)]|$)"
     re.Pattern = pat
-    ' достаточно начала строки (после «от »)
-    head = s
-    DateStartsAt = re.Test(head)
+    DateStartsAt = re.Test(s)
 End Function
 
-' Дата после «от»: точки/слэши/пробелы, без ведущего нуля, «г»/«г.»
+' Дата после «от»: дд.мм.гггг ↔ дд.мм.гг / дд.мм.гг.
 Private Function DateInContent(ByVal content As String, ByVal dateStr As String) As Boolean
     Dim d As Long, m As Long, y As Long
     Dim re As Object
     Dim pat As String
+    Dim shortDt As String
 
     dateStr = NormalizeSpaces(dateStr)
 
@@ -469,6 +590,13 @@ Private Function DateInContent(ByVal content As String, ByVal dateStr As String)
         Exit Function
     End If
 
+    ' явный короткий год: от 02.06.25 / от 02.06.25.
+    shortDt = DateShortDotted(d, m, y)
+    If InStr(1, content, "от " & shortDt, vbBinaryCompare) > 0 Then
+        DateInContent = True
+        Exit Function
+    End If
+
     On Error Resume Next
     Set re = CreateObject("VBScript.RegExp")
     If re Is Nothing Or Err.Number <> 0 Then
@@ -481,9 +609,21 @@ Private Function DateInContent(ByVal content As String, ByVal dateStr As String)
 
     re.IgnoreCase = True
     re.Global = False
-    pat = "от\s+0*" & CStr(d) & "[\.\/\s]+0*" & CStr(m) & "[\.\/\s]+" & CStr(y) & "\s*г?\.?"
+    pat = "от\s+0*" & CStr(d) & "[\.\/\s]+0*" & CStr(m) & "[\.\/\s]+" & YearPattern(y) & "(\.|г\.?|[\s,;)]|$)"
     re.Pattern = pat
     DateInContent = re.Test(content)
+End Function
+
+' 02.06.25
+Private Function DateShortDotted(ByVal d As Long, ByVal m As Long, ByVal y As Long) As String
+    DateShortDotted = Right$("0" & CStr(d), 2) & "." & _
+                      Right$("0" & CStr(m), 2) & "." & _
+                      Right$("0" & CStr(y Mod 100), 2)
+End Function
+
+' Полный год или две последние цифры: 2025 | 25
+Private Function YearPattern(ByVal y As Long) As String
+    YearPattern = "(" & CStr(y) & "|" & Right$("0" & CStr(y Mod 100), 2) & ")"
 End Function
 
 Private Function ParseDateParts(ByVal dateStr As String, ByRef d As Long, ByRef m As Long, ByRef y As Long) As Boolean
