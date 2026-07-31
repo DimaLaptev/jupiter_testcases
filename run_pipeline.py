@@ -13,9 +13,15 @@ sys.path.insert(0, str(PIPELINE_ROOT / "src"))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from assemble.builder import build_day_rows
+from assemble.route_ord import (
+    collect_svod_unknown_accounts,
+    route_ord_ops,
+    warn_unknown_accounts,
+)
 from config import load_config
 from extract.ord_quantity import iter_ord_op_rows
 from extract.svod_depo import iter_svod_depo_rows
+from references.spravochnik import Sprav1Lookup
 from write.excel_writer import write_day_workbooks
 
 
@@ -40,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--report-date", type=str, default=None)
     parser.add_argument("--ord", type=Path, default=None, dest="ord_path")
+    parser.add_argument("--sprav-workbook", type=Path, default=None)
     parser.add_argument("--svod-prev", type=Path, default=None)
     parser.add_argument("--svod-curr", type=Path, default=None)
     parser.add_argument("--svod-dom-prev", type=Path, default=None)
@@ -52,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     report_date = args.report_date or cfg.report_date
 
     ord_path = args.ord_path or cfg.ord_quantity
+    sprav_path = args.sprav_workbook or cfg.sprav_workbook
     svod_prev = args.svod_prev or cfg.svod_prev
     svod_curr = args.svod_curr or cfg.svod_curr
     svod_dom_prev = args.svod_dom_prev or cfg.svod_dom_prev
@@ -68,11 +76,19 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"report_date={report_date}")
     print(f"Ord: {ord_path}")
+    print(f"Справочник: {sprav_path}")
     print(f"СВОД prev/curr: {svod_prev.name} / {svod_curr.name}")
     print(f"СВОД_ДОМ prev/curr: {svod_dom_prev.name} / {svod_dom_curr.name}")
 
+    sprav = Sprav1Lookup.load(sprav_path)
+    if not sprav_path.is_file():
+        print(f"WARN: Справочник.xlsx не найден: {sprav_path}", file=sys.stdout)
+
     ord_ops = iter_ord_op_rows(ord_path, warn=sys.stdout)
     print(f"Ord поручений (фильтр): {len(ord_ops)}")
+
+    routed = route_ord_ops(ord_ops, sprav, source_file=ord_path.name)
+    print(f"Ord → IA: {len(routed.ia_ops)}, Ord → DOM: {len(routed.dom_ops)}")
 
     prev_ia = iter_svod_depo_rows(svod_prev, warn=sys.stdout)
     curr_ia = iter_svod_depo_rows(svod_curr, warn=sys.stdout)
@@ -82,8 +98,29 @@ def main(argv: list[str] | None = None) -> int:
     curr_dom = iter_svod_depo_rows(svod_dom_curr, warn=sys.stdout)
     print(f"СВОД DOM: prev={len(prev_dom)}, curr={len(curr_dom)}")
 
-    ia_rows = build_day_rows(prev_ia, curr_ia, ord_ops, report_date)
-    dom_rows = build_day_rows(prev_dom, curr_dom, ord_ops, report_date)
+    unknown = dict(routed.unknown_accounts)
+    for rows, path in (
+        (prev_ia, svod_prev),
+        (curr_ia, svod_curr),
+        (prev_dom, svod_dom_prev),
+        (curr_dom, svod_dom_curr),
+    ):
+        # ensure source_file set for warn (iter_svod already sets name)
+        collect_svod_unknown_accounts(rows, sprav, into=unknown)
+        _ = path
+    warn_unknown_accounts(
+        unknown,
+        out=sys.stdout,
+        unknown_sections=routed.unknown_sections,
+    )
+
+    depo_fn = sprav.depo_code
+    ia_rows = build_day_rows(
+        prev_ia, curr_ia, routed.ia_ops, report_date, depo_for_schet=depo_fn
+    )
+    dom_rows = build_day_rows(
+        prev_dom, curr_dom, routed.dom_ops, report_date, depo_for_schet=depo_fn
+    )
     print(f"Day_Quantity строк: {len(ia_rows)}")
     print(f"Day_Quantity_DOM строк: {len(dom_rows)}")
 

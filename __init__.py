@@ -1,1 +1,1 @@
-"""Write package."""
+"""Справочники DAY DEPO."""

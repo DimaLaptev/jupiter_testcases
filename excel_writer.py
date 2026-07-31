@@ -49,17 +49,18 @@ def _write_header(ws: Worksheet, report_date: str) -> None:
     start_dt = datetime.strptime(start, "%d.%m.%Y").date()
     prev_end = (start_dt - timedelta(days=1)).strftime("%d.%m.%Y")
 
-    _set_cell(ws, HEADER_META_ROW, 1, month_name)
-    ws.cell(row=HEADER_META_ROW, column=1).font = META_FONT
-    _set_cell(ws, HEADER_META_ROW, 2, "из свода депо")
-    _set_cell(ws, HEADER_META_ROW, 6, f"На начало месяца [{prev_end}]")
-    ws.cell(row=HEADER_META_ROW, column=6).fill = GROUP_FILL
-    ws.cell(row=HEADER_META_ROW, column=6).font = HEADER_FONT
-    _set_cell(ws, HEADER_META_ROW, 9, f"На конец месяца [{end}]")
-    ws.cell(row=HEADER_META_ROW, column=9).fill = GROUP_FILL
-    ws.cell(row=HEADER_META_ROW, column=9).font = META_FONT
-    _set_cell(ws, HEADER_META_ROW, 14, end)
-    ws.cell(row=HEADER_META_ROW, column=14).font = META_FONT
+    # A=ДЕПО; B=месяц; C=«из свода депо»; G–I начало; J–L конец; O=дата конца
+    _set_cell(ws, HEADER_META_ROW, 2, month_name)
+    ws.cell(row=HEADER_META_ROW, column=2).font = META_FONT
+    _set_cell(ws, HEADER_META_ROW, 3, "из свода депо")
+    _set_cell(ws, HEADER_META_ROW, 7, f"На начало месяца [{prev_end}]")
+    ws.cell(row=HEADER_META_ROW, column=7).fill = GROUP_FILL
+    ws.cell(row=HEADER_META_ROW, column=7).font = HEADER_FONT
+    _set_cell(ws, HEADER_META_ROW, 10, f"На конец месяца [{end}]")
+    ws.cell(row=HEADER_META_ROW, column=10).fill = GROUP_FILL
+    ws.cell(row=HEADER_META_ROW, column=10).font = META_FONT
+    _set_cell(ws, HEADER_META_ROW, 15, end)
+    ws.cell(row=HEADER_META_ROW, column=15).font = META_FONT
 
     for c, title in enumerate(DAY_HEADERS, start=1):
         cell = ws.cell(row=HEADER_ROW, column=c, value=title)
@@ -67,10 +68,9 @@ def _write_header(ws: Worksheet, report_date: str) -> None:
         cell.font = HEADER_FONT
         cell.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
 
-    # Подписи групп на строке 1 для F и I уже заданы; протянуть заливку F–H, I–K
-    for c in range(6, 9):
+    for c in range(7, 10):
         ws.cell(row=HEADER_META_ROW, column=c).fill = GROUP_FILL
-    for c in range(9, 12):
+    for c in range(10, 13):
         ws.cell(row=HEADER_META_ROW, column=c).fill = GROUP_FILL
 
 

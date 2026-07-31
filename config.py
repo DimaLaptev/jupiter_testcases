@@ -12,6 +12,7 @@ class PipelinePaths:
     source_root: Path
     output_dir: Path
     ord_quantity: Path
+    sprav_workbook: Path
     svod_prev: Path
     svod_curr: Path
     svod_dom_prev: Path
@@ -59,6 +60,7 @@ def load_config(pipeline_root: Path) -> PipelinePaths:
         source_root=resolve("source_root", "source"),
         output_dir=resolve("output_dir", "output"),
         ord_quantity=resolve("ord_quantity", "source/2026_05_Ord_Quantity.xlsx"),
+        sprav_workbook=resolve("sprav_workbook", "source/SPRAV/Справочник.xlsx"),
         svod_prev=resolve("svod_prev", "source/СВОД_поДЕПО_апрель.xlsx"),
         svod_curr=resolve("svod_curr", "source/СВОД_поДЕПО_май.xlsx"),
         svod_dom_prev=resolve("svod_dom_prev", "source/СВОД_поДЕПО_ДОМ_апрель.xlsx"),

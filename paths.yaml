@@ -5,6 +5,7 @@ paths:
   source_root: "source"
   output_dir: "output"
   ord_quantity: "source/2026_05_Ord_Quantity.xlsx"
+  sprav_workbook: "source/SPRAV/Справочник.xlsx"
   svod_prev: "source/СВОД_поДЕПО_апрель.xlsx"
   svod_curr: "source/СВОД_поДЕПО_май.xlsx"
   svod_dom_prev: "source/СВОД_поДЕПО_ДОМ_апрель.xlsx"

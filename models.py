@@ -58,8 +58,9 @@ class OrdOpRow:
 
 @dataclass
 class DayQuantityRow:
-    """Строка выходного Day_Quantity (колонки A–O)."""
+    """Строка выходного Day_Quantity (колонки A–P, ДЕПО первой)."""
 
+    depo: str | None = None
     ngri: str | None = None
     n_zakladnoy: str | None = None
     enc: str | None = None
@@ -78,6 +79,7 @@ class DayQuantityRow:
 
     def as_tuple(self) -> tuple[object, ...]:
         return (
+            self.depo,
             self.ngri,
             self.n_zakladnoy,
             self.enc,
@@ -97,6 +99,7 @@ class DayQuantityRow:
 
 
 DAY_HEADERS: tuple[str, ...] = (
+    "ДЕПО",
     "НГРИ",
     "№ закладной",
     "Признак ENC",
@@ -115,6 +118,7 @@ DAY_HEADERS: tuple[str, ...] = (
 )
 
 DAY_GROUP_HEADERS: tuple[str | None, ...] = (
+    None,
     None,
     None,
     None,

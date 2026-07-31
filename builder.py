@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date
+from typing import Callable
 
+from assemble.fill_zakladnoy import fill_zakladnoy_and_enc_by_ngri
+from assemble.region_merge import merge_region_quiet_with_e
 from assemble.storage_days import (
     compute_op_storage_days,
     validate_ops_path,
@@ -71,8 +74,13 @@ def _fill_end(row: DayQuantityRow, end: SvodDepoRow | None, *, show: bool) -> No
     row.end_razdel = _or_absent(end.razdel_scheta)
 
 
-def _identity_from_svod(svod: SvodDepoRow) -> DayQuantityRow:
+def _identity_from_svod(
+    svod: SvodDepoRow,
+    *,
+    depo: str | None,
+) -> DayQuantityRow:
     return DayQuantityRow(
+        depo=depo,
         ngri=svod.ngri,
         n_zakladnoy=svod.n_zakladnoy,
         enc=svod.enc,
@@ -81,8 +89,14 @@ def _identity_from_svod(svod: SvodDepoRow) -> DayQuantityRow:
     )
 
 
-def _identity_from_op(op: OrdOpRow, start: SvodDepoRow | None) -> DayQuantityRow:
+def _identity_from_op(
+    op: OrdOpRow,
+    start: SvodDepoRow | None,
+    *,
+    depo: str | None,
+) -> DayQuantityRow:
     return DayQuantityRow(
+        depo=depo,
         ngri=op.ngri,
         n_zakladnoy=start.n_zakladnoy if start else None,
         enc=start.enc if start else None,
@@ -101,6 +115,9 @@ def build_day_rows(
     curr_rows: list[SvodDepoRow],
     ord_ops: list[OrdOpRow],
     report_date: str,
+    *,
+    depo_for_schet: Callable[[str | None], str | None] | None = None,
+    apply_postprocess: bool = True,
 ) -> list[DayQuantityRow]:
     """
     Собрать строки Day_Quantity.
@@ -110,6 +127,11 @@ def build_day_rows(
     """
     period_start, period_end = report_month_bounds(report_date)
     month_days = days_in_month(report_date)
+
+    def resolve_depo(schet: str | None) -> str | None:
+        if depo_for_schet is None:
+            return None
+        return depo_for_schet(schet)
 
     start_idx = _index_svod(prev_rows)
     end_idx = _index_svod(curr_rows)
@@ -145,12 +167,18 @@ def build_day_rows(
         ops = ops_by_key.get(key, [])
         has_start = start is not None
         has_end = end is not None
+        schet_for_depo = (
+            (start.schet_depo if start else None)
+            or (end.schet_depo if end else None)
+            or (ops[0].schet_depo if ops else None)
+        )
+        depo = resolve_depo(schet_for_depo)
 
         if not ops:
             identity_src = start or end
             if identity_src is None:
                 continue
-            base = _identity_from_svod(identity_src)
+            base = _identity_from_svod(identity_src, depo=depo)
             _fill_start(base, start)
             _fill_end(base, end, show=True)
             if has_start and has_end:
@@ -171,7 +199,7 @@ def build_day_rows(
         # (не затираем из‑за последнего списания / debit).
 
         for op, (days, day_comment) in zip(ops, days_list):
-            row = _identity_from_op(op, start)
+            row = _identity_from_op(op, start, depo=resolve_depo(op.schet_depo) or depo)
             _fill_start(row, start)
             _fill_end(row, end, show=True)
             row.instruction_type = op.instruction_type
@@ -179,5 +207,9 @@ def build_day_rows(
             row.storage_days = days
             row.comment = _merge_comments(path_comment, day_comment)
             out.append(row)
+
+    if apply_postprocess:
+        out = fill_zakladnoy_and_enc_by_ngri(out)
+        out = merge_region_quiet_with_e(out, report_date)
 
     return out
