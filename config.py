@@ -46,7 +46,8 @@ class RegionLkConfig:
         timeout: float | None = None,
     ) -> RegionLkConfig:
         use_system = env_flag("REGION_LK_USE_SYSTEM_PROXY")
-        no_proxy = env_flag("REGION_LK_NO_PROXY", default=not use_system)
+        # Явный REGION_LK_NO_PROXY=1 имеет приоритет над REGION_LK_HTTP_PROXY.
+        force_no_proxy = env_flag("REGION_LK_NO_PROXY", default=False)
 
         proxy_url = (
             os.environ.get("REGION_LK_HTTP_PROXY", "").strip()
@@ -59,7 +60,7 @@ class RegionLkConfig:
         proxies: dict[str, str] | None
         trust_env: bool
 
-        if no_proxy and not proxy_url:
+        if force_no_proxy:
             proxies = {}
             trust_env = False
         elif proxy_url:
