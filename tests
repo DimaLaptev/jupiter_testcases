@@ -1,0 +1,5 @@
+curl -v -x http://127.0.0.1:3128 \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"Email":"ВАШ_EMAIL","Password":"ВАШ_ПАРОЛЬ"}' \
+  http://lk-test.region-dk.ru/API/UsersCP/Tokens
