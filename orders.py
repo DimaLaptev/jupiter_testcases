@@ -1,8 +1,9 @@
-"""Список подписанных заказов (orders) текущего пользователя."""
+"""Список заказов (orders) текущего пользователя."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from region_lk.client import CasdClient, CasdClientError
 
@@ -15,24 +16,39 @@ class OrderRef:
     num: str
 
 
-def fetch_signed_orders(client: CasdClient, *, page_size: int = PAGE_SIZE) -> list[OrderRef]:
+def fetch_orders(
+    client: CasdClient,
+    *,
+    page_size: int = PAGE_SIZE,
+    is_signed: bool | None = True,
+    is_current_user_created: bool | None = True,
+) -> list[OrderRef]:
     """
     GET /API/CASD/Users/Current/Orders с пагинацией (pagination).
-    Фильтры: isSigned=true, isCurrentUserCreated=true.
+
+    is_signed / is_current_user_created:
+      True/False — передать query-параметр;
+      None — не передавать фильтр (все значения).
     """
     orders: list[OrderRef] = []
     page = 0
 
     while True:
+        params: dict[str, Any] = {
+            "page": page,
+            "countToPage": page_size,
+        }
+        if is_signed is not None:
+            params["isSigned"] = "true" if is_signed else "false"
+        if is_current_user_created is not None:
+            params["isCurrentUserCreated"] = (
+                "true" if is_current_user_created else "false"
+            )
+
         response = client.request(
             "GET",
             "/API/CASD/Users/Current/Orders",
-            params={
-                "page": page,
-                "countToPage": page_size,
-                "isSigned": "true",
-                "isCurrentUserCreated": "true",
-            },
+            params=params,
         )
         if response.status_code != 200:
             raise CasdClientError(
@@ -64,6 +80,16 @@ def fetch_signed_orders(client: CasdClient, *, page_size: int = PAGE_SIZE) -> li
         page += 1
 
     return orders
+
+
+def fetch_signed_orders(client: CasdClient, *, page_size: int = PAGE_SIZE) -> list[OrderRef]:
+    """Обратная совместимость: только подписанные заказы текущего пользователя."""
+    return fetch_orders(
+        client,
+        page_size=page_size,
+        is_signed=True,
+        is_current_user_created=True,
+    )
 
 
 def find_order_by_num(orders: list[OrderRef], num: str) -> OrderRef | None:
