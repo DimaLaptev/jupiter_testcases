@@ -68,7 +68,8 @@ class CasdClient:
             headers=headers,
             timeout=self.config.timeout,
         )
-        if response.status_code in (401, 403):
+        # 401/403 на login (require_auth=False) обрабатывает auth.login — с телом ответа.
+        if require_auth and response.status_code in (401, 403):
             raise CasdAuthError(
                 f"Доступ запрещён (HTTP {response.status_code}) для {method} {path}"
             )
