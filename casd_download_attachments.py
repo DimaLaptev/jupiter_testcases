@@ -82,7 +82,12 @@ def run(out_dir: Path, base_url: str | None, timeout: float | None) -> int:
     errors = 0
 
     with CasdClient(config) as client:
+        proxy_view = config.proxies if config.proxies is not None else "(system/trust_env)"
         print(f"Base URL: {config.base_url}")
+        print(f"Email:    {config.email or '(пусто — задайте REGION_LK_EMAIL)'}")
+        print(f"Password: задан, длина {len(config.password)}" if config.password else "Password: (пусто)")
+        print(f"Proxies:  {proxy_view}")
+        print(f"trust_env:{config.trust_env}")
         print("Авторизация…")
         login(client)
         print("OK: AuthenticateToken получен")
