@@ -16,6 +16,19 @@ def extract_authenticate_token(headers: dict[str, str] | object) -> str | None:
     return None
 
 
+def extract_user_id(payload: object) -> int | None:
+    """Достаёт Id пользователя из модели данных логина."""
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("Id")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def login(client: CasdClient, email: str | None = None, password: str | None = None) -> str:
     """
     POST /API/UsersCP/Tokens → токен из response header AuthenticateToken.
@@ -45,4 +58,8 @@ def login(client: CasdClient, email: str | None = None, password: str | None = N
         )
 
     client.set_token(token)
+    try:
+        client.user_id = extract_user_id(response.json())
+    except (ValueError, TypeError):
+        client.user_id = None
     return token

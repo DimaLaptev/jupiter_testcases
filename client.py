@@ -30,6 +30,7 @@ class CasdClient:
         if not config.ssl_verify:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         self._token: str | None = None
+        self.user_id: int | None = None
 
     def close(self) -> None:
         self.session.close()
@@ -70,8 +71,11 @@ class CasdClient:
         )
         # 401/403 на login (require_auth=False) обрабатывает auth.login — с телом ответа.
         if require_auth and response.status_code in (401, 403):
+            body = (response.text or "")[:300]
             raise CasdAuthError(
                 f"Доступ запрещён (HTTP {response.status_code}) для {method} {path}"
+                f" (token_len={len(self._token or '')})"
+                + (f" body={body!r}" if body else "")
             )
         return response
 
