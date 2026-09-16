@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+import pandas as pd
 import psycopg2
 
 DB_HOST = "localhost"
@@ -26,6 +29,7 @@ DB_PASSWORD = "password"
 
 ANOMALY_RATIO = 3.0
 ANOMALY_YEARS = (2025, 2026)
+DEFAULT_XLSX_PATH = "anomaly_detection_result.xlsx"
 
 EXCLUDED_RESIST_IDS = [
     25, 26, 27, 29, 54, 57, 61, 63, 66, 68, 80, 81, 82, 83, 100, 101, 102, 103,
@@ -207,7 +211,73 @@ def process_resist_id(conn, resist_id: int):
     anomalies = find_anomalies(rows)
     n, max_x, mean_x, top = summarize(anomalies)
     print_resist_summary(resist_id, n, max_x, mean_x, top, anomalies)
-    return n, max_x, mean_x, None if top is None else top["operation_id"]
+    return {
+        "resist_id": resist_id,
+        "n": n,
+        "max_x": max_x,
+        "mean_x": mean_x,
+        "top": top,
+        "anomalies": anomalies,
+    }
+
+
+def _period_cell(value) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    return str(value)[:10]
+
+
+def write_xlsx(path: Path, results: Sequence[Dict[str, Any]]) -> None:
+    summary_rows = []
+    detail_rows = []
+    for item in results:
+        if item["n"] > 0:
+            top = item["top"]
+            summary_rows.append(
+                {
+                    "resist_id": item["resist_id"],
+                    "n": item["n"],
+                    "max_x": item["max_x"],
+                    "mean_x": item["mean_x"],
+                    "operation_id_max_x": top["operation_id"],
+                    "period_max_x": _period_cell(top["period"]),
+                }
+            )
+        for a in item["anomalies"]:
+            detail_rows.append(
+                {
+                    "resist_id": item["resist_id"],
+                    "operation_id": a["operation_id"],
+                    "period": _period_cell(a["period"]),
+                    "fact_value": a["fact_value"],
+                    "max_previous": a["max_previous"],
+                    "x": a["ratio"],
+                }
+            )
+
+    df_summary = pd.DataFrame(
+        summary_rows,
+        columns=[
+            "resist_id",
+            "n",
+            "max_x",
+            "mean_x",
+            "operation_id_max_x",
+            "period_max_x",
+        ],
+    )
+    df_detail = pd.DataFrame(
+        detail_rows,
+        columns=["resist_id", "operation_id", "period", "fact_value", "max_previous", "x"],
+    )
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        df_summary.to_excel(writer, sheet_name="Итог моделей с аномалиями", index=False)
+        df_detail.to_excel(writer, sheet_name="Подробности по resist_id", index=False)
 
 
 def parse_args() -> argparse.Namespace:
@@ -218,6 +288,12 @@ def parse_args() -> argparse.Namespace:
         action="append",
         dest="resist_ids",
         help="Обработать только этот resist_id (можно повторять). По умолчанию — все, кроме EXCLUDED.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path(DEFAULT_XLSX_PATH),
+        help=f"Путь к xlsx (по умолчанию {DEFAULT_XLSX_PATH}).",
     )
     return parser.parse_args()
 
@@ -239,19 +315,25 @@ def main() -> None:
         )
         print()
 
-        totals = []
+        results = []
         for resist_id in resist_ids:
-            n, max_x, mean_x, top_op = process_resist_id(conn, resist_id)
-            totals.append((resist_id, n, max_x, mean_x, top_op))
+            results.append(process_resist_id(conn, resist_id))
             print()
 
-        with_hits = [row for row in totals if row[1] > 0]
+        with_hits = [row for row in results if row["n"] > 0]
         print("=" * 60)
-        print(f"Итого моделей с аномалиями: {len(with_hits)} из {len(totals)}")
+        print(f"Итого моделей с аномалиями: {len(with_hits)} из {len(results)}")
         if with_hits:
             print(f"{'resist_id':>10} {'n':>6} {'max x':>10} {'mean x':>10}  operation_id (max x)")
-            for resist_id, n, max_x, mean_x, top_op in with_hits:
-                print(f"{resist_id:>10} {n:>6} {max_x:10.2f} {mean_x:10.2f}  {top_op}")
+            for row in with_hits:
+                print(
+                    f"{row['resist_id']:>10} {row['n']:>6} {row['max_x']:10.2f} "
+                    f"{row['mean_x']:10.2f}  {row['top']['operation_id']}"
+                )
+
+        write_xlsx(args.output, results)
+        print()
+        print(f"Сохранено: {Path(args.output).resolve()}")
     finally:
         conn.close()
 
