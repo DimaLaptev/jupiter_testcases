@@ -165,30 +165,49 @@ def find_anomalies(rows_all: Sequence[tuple]) -> List[Dict[str, Any]]:
     return anomalies
 
 
-def summarize(anomalies: Sequence[Dict[str, Any]]) -> Tuple[int, Optional[float], Optional[float]]:
+def summarize(
+    anomalies: Sequence[Dict[str, Any]],
+) -> Tuple[int, Optional[float], Optional[float], Optional[Dict[str, Any]]]:
     if not anomalies:
-        return 0, None, None
+        return 0, None, None, None
     ratios = [float(a["ratio"]) for a in anomalies]
-    return len(ratios), max(ratios), sum(ratios) / len(ratios)
+    top = max(anomalies, key=lambda a: float(a["ratio"]))
+    return len(ratios), max(ratios), sum(ratios) / len(ratios), top
 
 
-def print_resist_summary(resist_id: int, n: int, max_x: Optional[float], mean_x: Optional[float]) -> None:
+def print_resist_summary(
+    resist_id: int,
+    n: int,
+    max_x: Optional[float],
+    mean_x: Optional[float],
+    top: Optional[Dict[str, Any]],
+    anomalies: Sequence[Dict[str, Any]],
+) -> None:
     print(f"resist_id={resist_id}")
     print(f"  аномалий ({ANOMALY_YEARS[0]}-{ANOMALY_YEARS[-1]}, порог x{ANOMALY_RATIO:g}): {n}")
     if n == 0:
         print("  max x: —")
         print("  mean x: —")
         return
-    print(f"  max x: {max_x:.2f}")
+    print(
+        f"  max x: {max_x:.2f}  "
+        f"(operation_id={top['operation_id']}, period={top['period']})"
+    )
     print(f"  mean x: {mean_x:.2f}")
+    print("  аномалии:")
+    for a in anomalies:
+        print(
+            f"    operation_id={a['operation_id']}  period={a['period']}  "
+            f"fact={a['fact_value']:g}  max_prev={a['max_previous']:g}  x={a['ratio']:.2f}"
+        )
 
 
-def process_resist_id(conn, resist_id: int) -> Tuple[int, Optional[float], Optional[float]]:
+def process_resist_id(conn, resist_id: int):
     rows = fetch_rows_for_resist_id(conn, resist_id)
     anomalies = find_anomalies(rows)
-    n, max_x, mean_x = summarize(anomalies)
-    print_resist_summary(resist_id, n, max_x, mean_x)
-    return n, max_x, mean_x
+    n, max_x, mean_x, top = summarize(anomalies)
+    print_resist_summary(resist_id, n, max_x, mean_x, top, anomalies)
+    return n, max_x, mean_x, None if top is None else top["operation_id"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -222,17 +241,17 @@ def main() -> None:
 
         totals = []
         for resist_id in resist_ids:
-            n, max_x, mean_x = process_resist_id(conn, resist_id)
-            totals.append((resist_id, n, max_x, mean_x))
+            n, max_x, mean_x, top_op = process_resist_id(conn, resist_id)
+            totals.append((resist_id, n, max_x, mean_x, top_op))
             print()
 
         with_hits = [row for row in totals if row[1] > 0]
         print("=" * 60)
         print(f"Итого моделей с аномалиями: {len(with_hits)} из {len(totals)}")
         if with_hits:
-            print(f"{'resist_id':>10} {'n':>6} {'max x':>10} {'mean x':>10}")
-            for resist_id, n, max_x, mean_x in with_hits:
-                print(f"{resist_id:>10} {n:>6} {max_x:10.2f} {mean_x:10.2f}")
+            print(f"{'resist_id':>10} {'n':>6} {'max x':>10} {'mean x':>10}  operation_id (max x)")
+            for resist_id, n, max_x, mean_x, top_op in with_hits:
+                print(f"{resist_id:>10} {n:>6} {max_x:10.2f} {mean_x:10.2f}  {top_op}")
     finally:
         conn.close()
 
