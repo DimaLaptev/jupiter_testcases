@@ -7,6 +7,16 @@ import httpx
 from rvbcn_egrn.config import KeycloakConfig
 from rvbcn_egrn.exceptions import AdapterError
 
+keycloak_token_url = KeycloakConfig.token_url_for
+
+
+def bearer_authorization(token: str) -> str:
+    """Нормализовать значение заголовка Authorization."""
+    value = token.strip()
+    if value.lower().startswith("bearer "):
+        return value
+    return f"Bearer {value}"
+
 
 def fetch_keycloak_token(
     config: KeycloakConfig,
@@ -15,7 +25,7 @@ def fetch_keycloak_token(
 ) -> str:
     """POST application/x-www-form-urlencoded, возвращает access_token."""
     owns = client is None
-    http = client or httpx.Client(timeout=config.timeout_seconds)
+    http = client or httpx.Client(timeout=config.timeout_seconds, verify=config.verify)
     try:
         response = http.post(
             config.token_url,

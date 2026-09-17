@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import base64
 from enum import Enum
 from typing import Any
 
@@ -20,13 +21,23 @@ class BatchStatus(str, Enum):
     FAILED = "FAILED"
 
 
+class SyncSqlQuery(BaseModel):
+    """Вложенное поле sql из тела POST /query."""
+
+    sql: str
+
+
 class SyncExtractRequest(BaseModel):
-    """Тело HTTP POST /request-egrn (синхронный сценарий)."""
+    """Тело HTTP POST /query?async=false: {"sql": {"sql": "select ..."}}."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    sql: SyncSqlQuery
 
-    cadastral_number: str = Field(alias="cadastralNumber")
-    extract_type: str = Field(alias="extractType", default="extractbaseparams")
+
+class ColumnMeta(BaseModel):
+    """Описание колонки табличного ответа /query."""
+
+    name: str
+    type: str | None = None
 
 
 class AdapterErrorBody(BaseModel):
@@ -39,13 +50,55 @@ class AdapterErrorBody(BaseModel):
 
 
 class SyncExtractResponse(BaseModel):
-    """Успешный HTTP 200: UID + структурированные поля, без raw base64."""
+    """Успешный HTTP 200 от POST /query: query_id + таблица meta/rows."""
 
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
-    uid: str = Field(validation_alias=AliasChoices("uid", "UID"))
+    created_at: str | None = None
+    query_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("query_id", "queryId", "uid", "UID"),
+    )
+    meta: list[ColumnMeta] = Field(default_factory=list)
+    rows: list[list[Any]] = Field(default_factory=list)
     cadastral_number: str | None = Field(default=None, alias="cadastralNumber")
     data: dict[str, Any] | None = None
+
+    @property
+    def uid(self) -> str | None:
+        return self.query_id
+
+    def _cell(self, name: str, index: int) -> Any:
+        names = [column.name for column in self.meta]
+        if name in names and self.rows and self.rows[0]:
+            pos = names.index(name)
+            row = self.rows[0]
+            if pos < len(row):
+                return row[pos]
+        if self.rows and self.rows[0] and index < len(self.rows[0]):
+            return self.rows[0][index]
+        return None
+
+    @property
+    def doc_type(self) -> str | None:
+        value = self._cell("docType", 0)
+        return str(value) if value is not None else None
+
+    @property
+    def file_name(self) -> str | None:
+        value = self._cell("fileName", 1)
+        return str(value) if value is not None else None
+
+    @property
+    def content_base64(self) -> str | None:
+        value = self._cell("content", 2)
+        return str(value) if value is not None else None
+
+    def content_bytes(self) -> bytes | None:
+        raw = self.content_base64
+        if not raw:
+            return None
+        return base64.b64decode(raw)
 
 
 class AsyncBatchRequest(BaseModel):

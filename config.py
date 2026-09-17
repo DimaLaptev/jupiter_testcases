@@ -11,31 +11,68 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class SyncConfig:
-    """Конфиг (config) синхронного (synchronous) HTTP-клиента."""
+    """Конфиг (config) синхронного (synchronous) HTTP-клиента.
 
-    # ASSUMPTION: base URL адаптера без завершающего слэша (хост rr-rvbcn-service)
+    Контракт со скрина документации: POST /query?async=false,
+    заголовок Accept-Version: 1, тело SQL extractbaseparams.
+    """
+
     base_url: str
-    # ASSUMPTION: путь из диаграммы последовательности
-    path: str = "/request-egrn"
-    # ASSUMPTION: 30 с у адаптера до агента ПОДД + запас на сеть
+    path: str = "/query"
+    async_query: bool = False
+    # 30 с у адаптера до агента ПОДД + запас на сеть
     timeout_seconds: float = 35.0
-    # Bearer-токен Keycloak (если получен)
+    # Bearer-токен Keycloak (если уже получен снаружи)
     authorization: str | None = None
+    accept_version: str | None = "1"
+    # Тестовый контур часто с просроченным сертификатом — тогда False
+    verify: bool | str = True
     extra_headers: dict[str, str] = field(default_factory=dict)
 
     def request_url(self) -> str:
         return f"{self.base_url.rstrip('/')}{self.path}"
 
+    def request_params(self) -> dict[str, str] | None:
+        if "?" in self.path:
+            return None
+        return {"async": "true" if self.async_query else "false"}
+
 
 @dataclass(frozen=True)
 class KeycloakConfig:
-    """Конфиг (config) получения токена Keycloak. URL замазан — из env."""
+    """Конфиг (config) получения токена Keycloak."""
 
     token_url: str
     client_id: str
     client_secret: str
     grant_type: str = "client_credentials"
     timeout_seconds: float = 15.0
+    verify: bool | str = True
+
+    @staticmethod
+    def token_url_for(base_url: str, realm: str) -> str:
+        return f"{base_url.rstrip('/')}/realms/{realm}/protocol/openid-connect/token"
+
+    @classmethod
+    def from_parts(
+        cls,
+        base_url: str,
+        realm: str,
+        client_id: str,
+        client_secret: str,
+        *,
+        grant_type: str = "client_credentials",
+        timeout_seconds: float = 15.0,
+        verify: bool | str = True,
+    ) -> KeycloakConfig:
+        return cls(
+            token_url=cls.token_url_for(base_url, realm),
+            client_id=client_id,
+            client_secret=client_secret,
+            grant_type=grant_type,
+            timeout_seconds=timeout_seconds,
+            verify=verify,
+        )
 
 
 @dataclass(frozen=True)
