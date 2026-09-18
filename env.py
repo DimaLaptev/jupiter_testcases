@@ -49,18 +49,26 @@ def keycloak_from_env() -> KeycloakConfig | None:
         return None
 
     token_url = os.getenv("RVBCN_KK_TOKEN_URL", "").strip()
+    context_path = os.getenv("RVBCN_KK_CONTEXT_PATH", "/auth")
+    port_raw = os.getenv("RVBCN_KK_PORT", "").strip()
+    port = int(port_raw) if port_raw else None
     if not token_url:
         base = os.getenv("RVBCN_KK_BASE_URL", "").strip()
         realm = os.getenv("RVBCN_KK_REALM", "").strip()
         if not base or not realm:
             return None
-        token_url = KeycloakConfig.token_url_for(base, realm)
+        token_url = KeycloakConfig.token_url_for(
+            base, realm, context_path=context_path, port=port
+        )
 
+    scope_raw = os.getenv("RVBCN_KK_SCOPE", "openid")
+    scope = scope_raw.strip() or None
     verify = env_bool("RVBCN_KK_TLS_VERIFY", env_bool("RVBCN_TLS_VERIFY", False))
     return KeycloakConfig(
         token_url=token_url,
         client_id=client_id,
         client_secret=client_secret,
+        scope=scope,
         verify=verify,
     )
 

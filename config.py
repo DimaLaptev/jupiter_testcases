@@ -40,18 +40,38 @@ class SyncConfig:
 
 @dataclass(frozen=True)
 class KeycloakConfig:
-    """Конфиг (config) получения токена Keycloak."""
+    """Конфиг (config) получения токена Keycloak.
+
+    Рабочий контур: POST {host}:443/auth/realms/{realm}/protocol/openid-connect/token
+    с grant_type=client_credentials и scope=openid.
+    """
 
     token_url: str
     client_id: str
     client_secret: str
     grant_type: str = "client_credentials"
+    scope: str | None = "openid"
     timeout_seconds: float = 15.0
     verify: bool | str = True
 
     @staticmethod
-    def token_url_for(base_url: str, realm: str) -> str:
-        return f"{base_url.rstrip('/')}/realms/{realm}/protocol/openid-connect/token"
+    def token_url_for(
+        base_url: str,
+        realm: str,
+        *,
+        context_path: str = "/auth",
+        port: int | None = None,
+    ) -> str:
+        base = base_url.strip().rstrip("/")
+        if not base.startswith(("http://", "https://")):
+            base = f"https://{base}"
+        scheme, _, rest = base.partition("://")
+        host = rest
+        if port is not None and ":" not in host.rsplit("@", 1)[-1]:
+            host = f"{host}:{port}"
+        prefix = context_path.strip("/")
+        mid = f"/{prefix}" if prefix else ""
+        return f"{scheme}://{host}{mid}/realms/{realm}/protocol/openid-connect/token"
 
     @classmethod
     def from_parts(
@@ -62,14 +82,20 @@ class KeycloakConfig:
         client_secret: str,
         *,
         grant_type: str = "client_credentials",
+        scope: str | None = "openid",
+        context_path: str = "/auth",
+        port: int | None = None,
         timeout_seconds: float = 15.0,
         verify: bool | str = True,
     ) -> KeycloakConfig:
         return cls(
-            token_url=cls.token_url_for(base_url, realm),
+            token_url=cls.token_url_for(
+                base_url, realm, context_path=context_path, port=port
+            ),
             client_id=client_id,
             client_secret=client_secret,
             grant_type=grant_type,
+            scope=scope,
             timeout_seconds=timeout_seconds,
             verify=verify,
         )

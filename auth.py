@@ -26,14 +26,17 @@ def fetch_keycloak_token(
     """POST application/x-www-form-urlencoded, возвращает access_token."""
     owns = client is None
     http = client or httpx.Client(timeout=config.timeout_seconds, verify=config.verify)
+    data = {
+        "grant_type": config.grant_type,
+        "client_id": config.client_id,
+        "client_secret": config.client_secret,
+    }
+    if config.scope:
+        data["scope"] = config.scope
     try:
         response = http.post(
             config.token_url,
-            data={
-                "grant_type": config.grant_type,
-                "client_id": config.client_id,
-                "client_secret": config.client_secret,
-            },
+            data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
     except httpx.HTTPError as exc:
