@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Объект — демо ребрендинга</title>
+  <style>
+    @font-face {
+      font-family: "Object Sans";
+      src: url("source/ObjectSans-Medium.woff2") format("woff2"),
+           url("source/ObjectSans-Medium.woff") format("woff"),
+           url("source/ObjectSans-Medium.otf") format("opentype"),
+           url("source/ObjectSans-Medium.ttf") format("truetype");
+      font-weight: 500;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      background: #fff;
+      color: #1A1B1D;
+      font-family: "Object Sans", "Segoe UI", sans-serif;
+      font-weight: 500;
+      font-synthesis: none;
+    }
+
+    button, input, span {
+      font: inherit;
+      pointer-events: none;
+      cursor: default;
+    }
+
+    .top {
+      display: flex;
+      align-items: center;
+      gap: 32px;
+      min-height: 78px;
+      padding: 16px 22px 14px;
+    }
+
+    .logo {
+      display: block;
+      height: 36px;
+      width: auto;
+    }
+
+    .nav {
+      margin-left: auto;
+      width: 56%;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: #1A1B1D;
+      font-size: 14px;
+      letter-spacing: 0.04em;
+    }
+
+    .rule {
+      height: 1px;
+      background: #999999;
+      border: 0;
+    }
+
+    .page {
+      padding: 28px 18px 24px;
+    }
+
+    .summary {
+      margin: 0 0 18px;
+      font-size: 16px;
+    }
+
+    .excel {
+      color: #80E3FF;
+      margin-left: 6px;
+    }
+
+    .search {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      height: 72px;
+      padding: 12px 18px 12px 69px;
+      background: #999999;
+      border-radius: 12px;
+    }
+
+    .search input {
+      flex: 1;
+      height: 48px;
+      border: 0;
+      border-radius: 24px;
+      background: #fff;
+      color: #1A1B1D;
+      opacity: 1;
+      padding: 0 16px;
+    }
+
+    .search input:disabled {
+      background: #fff;
+      color: #1A1B1D;
+      opacity: 1;
+      -webkit-text-fill-color: #1A1B1D;
+    }
+
+    .search button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      flex: none;
+      height: 48px;
+      width: 175px;
+      padding: 0 18px;
+      border: 0;
+      border-radius: 24px;
+      background: #80E3FF;
+      color: #fff;
+      opacity: 1;
+      font-size: 16px;
+    }
+
+    .search button:disabled {
+      background: #80E3FF;
+      color: #fff;
+      opacity: 1;
+    }
+
+    .search svg {
+      display: block;
+    }
+
+    .pager {
+      margin: 14px 0 8px;
+      font-size: 13px;
+      letter-spacing: 0.02em;
+    }
+
+    .last {
+      color: #80E3FF;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      min-width: 1480px;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+
+    th, td {
+      border: 1px solid #999999;
+      text-align: center;
+      vertical-align: middle;
+    }
+
+    th {
+      background: #999999;
+      color: #012F42;
+      border-color: #fff #fff #999999;
+      font-weight: 500;
+      font-size: 14px;
+      line-height: 1.25;
+      height: 92px;
+      padding: 8px 6px;
+    }
+
+    .idx td {
+      height: 28px;
+      padding: 4px;
+      color: #1A1B1D;
+      font-size: 13px;
+      background: #fff;
+    }
+
+    .status td {
+      height: 36px;
+      padding: 6px 4px;
+      color: #1A1B1D;
+      font-size: 14px;
+    }
+
+    .ok { background: #39C182; }
+    .sale { background: #EEA20F; }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <img class="logo" src="source/bank-colored-1line@3x.png" alt="Банк">
+    <nav class="nav">
+      <span>ОТЧЕТЫ</span>
+      <span>ОБЪЕКТ</span>
+      <span>ОБРАЩЕНИЯ</span>
+      <span>ПЛАТЕЖИ</span>
+      <span>ADMIN</span>
+      <span>ВЫХОД</span>
+    </nav>
+  </header>
+  <hr class="rule">
+
+  <main class="page">
+    <p class="summary">
+      Объектов всего 4921 найдено по запросу: Все - 4921 объектов
+      <span class="excel">ВЫГРУЗИТЬ В EXCEL</span>
+    </p>
+
+    <div class="search">
+      <input type="text" disabled>
+      <button type="button" disabled>
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+          <circle cx="6.5" cy="6.5" r="4.25" fill="none" stroke="#fff" stroke-width="1.6"/>
+          <path d="M9.6 9.6 L13.2 13.2" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+        Найти
+      </button>
+    </div>
+
+    <p class="pager">СТР. 1 ИЗ 124. &gt; <span class="last">&gt;&gt;&gt; ПОСЛЕДНЯЯ</span></p>
+
+    <div class="table-wrap">
+      <table>
+        <colgroup>
+          <col style="width:3.1%">
+          <col style="width:5.5%">
+          <col style="width:8.7%">
+          <col style="width:7.8%">
+          <col style="width:11.2%">
+          <col style="width:8.4%">
+          <col style="width:7.8%">
+          <col style="width:21.5%">
+          <col style="width:8.4%">
+          <col style="width:6.3%">
+          <col style="width:6.2%">
+          <col style="width:5.1%">
+        </colgroup>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>ID НПА</th>
+            <th>ЕИС</th>
+            <th>Собственник</th>
+            <th>Кадастровый номер</th>
+            <th>Федеральный округ</th>
+            <th>Регион</th>
+            <th>Адрес НПА</th>
+            <th>Населенный пункт</th>
+            <th>Акт</th>
+            <th>Вид объекта</th>
+            <th>Категория на 31.12.20</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="idx">
+            <td>0</td>
+            <td>2</td>
+            <td>3</td>
+            <td>4</td>
+            <td>5</td>
+            <td>6</td>
+            <td>7</td>
+            <td>8</td>
+            <td>9</td>
+            <td>10</td>
+            <td>11</td>
+            <td>12</td>
+          </tr>
+          <tr class="status">
+            <td class="ok">ok</td>
+            <td class="ok">ok</td>
+            <td class="ok">ok</td>
+            <td class="sale">Sale table</td>
+            <td class="ok">ok</td>
+            <td class="ok">ok</td>
+            <td class="ok">ok</td>
+            <td class="ok">ok</td>
+            <td class="ok">ok</td>
+            <td class="ok">ok</td>
+            <td class="ok">ok</td>
+            <td class="ok">ok</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+</body>
+</html>
