@@ -75,7 +75,7 @@ def _run_file_handler() -> None:
 
 
 def _run_copy_I_msg_files() -> None:
-    """1.4 — ежедневно 11:00 — copy_I_msg_files.py."""
+    """1.4 — ежедневно 10:00 — copy_I_msg_files.py."""
     try:
         import copy_I_msg_files as m
 
@@ -85,7 +85,7 @@ def _run_copy_I_msg_files() -> None:
 
 
 def _run_copy_REP_xls_files() -> None:
-    """1.5 — ежедневно 11:10 — copy_REP_xls_files.py."""
+    """1.5 — ежедневно 10:10 — copy_REP_xls_files.py."""
     try:
         from copy_REP_xls_files import copy_REP_xls_files
 
@@ -95,7 +95,7 @@ def _run_copy_REP_xls_files() -> None:
 
 
 def _run_file_handler_2() -> None:
-    """1.6 — ежедневно 11:20 — file_handler_2.py."""
+    """1.6 — ежедневно 10:20 — file_handler_2.py."""
     try:
         from file_handler_2 import move_files_to_dir_struct
 
@@ -104,8 +104,18 @@ def _run_file_handler_2() -> None:
         logger.exception("file_handler_2: ошибка выполнения")
 
 
+def _run_vtb_download() -> None:
+    """Выгрузка VTB F750/F752 — по будням 12:30 — vtb_download.py."""
+    try:
+        from vtb_download import main as vtb_download_main
+
+        vtb_download_main()
+    except Exception:
+        logger.exception("vtb_download: ошибка выполнения")
+
+
 def _run_validate_gpb() -> None:
-    """1.6.1 — ежедневно 11:30 — validate_gpb_files.py."""
+    """1.6.1 — ежедневно 10:30 — validate_gpb_files.py."""
     try:
         from validate_gpb_files import main as validate_gpb_main
 
@@ -135,7 +145,7 @@ def _run_copy_I_msg_files_2() -> None:
 
 
 def _run_file_handler_3() -> None:
-    """1.7.3 — после 1.7.2; по расписанию 17:20 — file_handler_3.py."""
+    """1.7.3 — после 1.7.2; по расписанию 17:30 — file_handler_3.py."""
     try:
         from file_handler_3 import move_files_to_dir_struct_2
 
@@ -145,7 +155,7 @@ def _run_file_handler_3() -> None:
 
 
 def _run_validate_rsd() -> None:
-    """1.7.4 — после 1.7.3; по расписанию 17:30 — validate_rsd_files.py."""
+    """1.7.4 — после 1.7.3; по расписанию 17:10 — validate_rsd_files.py."""
     try:
         from validate_rsd_files import main as validate_rsd_main
 
@@ -197,6 +207,13 @@ def run_scheduler() -> None:
         replace_existing=True,
     )
     scheduler.add_job(
+        _run_validate_gpb,
+        CronTrigger(hour=7, minute=15, timezone=_TZ),
+        id="validate_gpb_files",
+        name="1.6.1 validate_gpb_files.py",
+        replace_existing=True,
+    )
+    scheduler.add_job(
         _run_file_handler,
         CronTrigger(hour=7, minute=30, timezone=_TZ),
         id="file_handler_daily",
@@ -205,30 +222,30 @@ def run_scheduler() -> None:
     )
     scheduler.add_job(
         _run_copy_I_msg_files,
-        CronTrigger(hour=11, minute=0, timezone=_TZ),
+        CronTrigger(hour=10, minute=0, timezone=_TZ),
         id="copy_I_msg_files",
         name="1.4 copy_I_msg_files.py",
         replace_existing=True,
     )
     scheduler.add_job(
         _run_copy_REP_xls_files,
-        CronTrigger(hour=11, minute=10, timezone=_TZ),
+        CronTrigger(hour=10, minute=10, timezone=_TZ),
         id="copy_REP_xls_files",
         name="1.5 copy_REP_xls_files.py",
         replace_existing=True,
     )
     scheduler.add_job(
         _run_file_handler_2,
-        CronTrigger(hour=11, minute=20, timezone=_TZ),
+        CronTrigger(hour=10, minute=20, timezone=_TZ),
         id="file_handler_2",
         name="1.6 file_handler_2.py",
         replace_existing=True,
     )
     scheduler.add_job(
-        _run_validate_gpb,
-        CronTrigger(hour=11, minute=30, timezone=_TZ),
-        id="validate_gpb_files",
-        name="1.6.1 validate_gpb_files.py",
+        _run_vtb_download,
+        CronTrigger(day_of_week="mon-fri", hour=12, minute=30, timezone=_TZ),
+        id="vtb_download",
+        name="vtb_download.py",
         replace_existing=True,
     )
     scheduler.add_job(
@@ -240,24 +257,24 @@ def run_scheduler() -> None:
     )
     # Цепочка RSD: фиксированные слоты после 1.7.1 (README: «по завершении предыдущего»)
     scheduler.add_job(
-        _run_copy_I_msg_files_2,
+        _run_validate_rsd,
         CronTrigger(hour=17, minute=10, timezone=_TZ),
+        id="validate_rsd_files",
+        name="1.7.4 validate_rsd_files.py",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_copy_I_msg_files_2,
+        CronTrigger(hour=17, minute=20, timezone=_TZ),
         id="copy_I_msg_files_2",
         name="1.7.2 copy_I_msg_files_2.py",
         replace_existing=True,
     )
     scheduler.add_job(
         _run_file_handler_3,
-        CronTrigger(hour=17, minute=20, timezone=_TZ),
+        CronTrigger(hour=17, minute=30, timezone=_TZ),
         id="file_handler_3",
         name="1.7.3 file_handler_3.py",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        _run_validate_rsd,
-        CronTrigger(hour=17, minute=30, timezone=_TZ),
-        id="validate_rsd_files",
-        name="1.7.4 validate_rsd_files.py",
         replace_existing=True,
     )
 
