@@ -114,6 +114,16 @@ def _run_vtb_download() -> None:
         logger.exception("vtb_download: ошибка выполнения")
 
 
+def _run_rsd_download() -> None:
+    """Выгрузка RSD DOM/IA INBOX — по будням 15:00 — rsd_download.py."""
+    try:
+        from rsd_download import main as rsd_download_main
+
+        rsd_download_main()
+    except Exception:
+        logger.exception("rsd_download: ошибка выполнения")
+
+
 def _run_validate_gpb() -> None:
     """1.6.1 — ежедневно 10:30 — validate_gpb_files.py."""
     try:
@@ -246,6 +256,13 @@ def run_scheduler() -> None:
         CronTrigger(day_of_week="mon-fri", hour=12, minute=30, timezone=_TZ),
         id="vtb_download",
         name="vtb_download.py",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_rsd_download,
+        CronTrigger(day_of_week="mon-fri", hour=15, minute=0, timezone=_TZ),
+        id="rsd_download",
+        name="rsd_download.py",
         replace_existing=True,
     )
     scheduler.add_job(
