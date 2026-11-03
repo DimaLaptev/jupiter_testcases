@@ -3,7 +3,7 @@
 
 По рабочим дням берётся папка предыдущего рабочего дня (календарь depo_validation):
 F750 → <YYYY_MM>/VTBSD/SPR, F752 → <YYYY_MM>/VTBSD/REP.
-Для папки 1-го числа дата в XML может переложить комплект в предыдущий месяц.
+Для первой рабочей папки месяца дата в XML может переложить комплект в предыдущий месяц.
 Скопированные zip распаковываются, файлам даётся имя архива, архив удаляется.
 
 Запуск: python vtb_download.py
@@ -102,6 +102,16 @@ def is_immediately_previous_month(value: date, source_day: date) -> bool:
     """value лежит в календарном месяце сразу перед месяцем source_day."""
     prev = previous_month(source_day)
     return value.year == prev.year and value.month == prev.month
+
+
+def is_first_working_day_of_month(day: date, is_non_working: Callable[[date], bool]) -> bool:
+    """В этом месяце нет рабочего дня раньше day. 1-е число, если оно рабочее, тоже подходит."""
+    current = date(day.year, day.month, 1)
+    while current < day:
+        if not is_non_working(current):
+            return False
+        current += timedelta(days=1)
+    return True
 
 
 def parse_date(value: str) -> Optional[date]:
@@ -247,10 +257,14 @@ def _copy_file(src: Path, dest_dir: Path) -> Path:
     return target
 
 
-def _destination_month(group: list[Path], source_day: date) -> str:
-    """Месяц назначения для комплекта. На 1-е число смотрит XML."""
+def _destination_month(
+    group: list[Path],
+    source_day: date,
+    is_non_working: Callable[[date], bool],
+) -> str:
+    """Месяц назначения. В первую рабочую папку месяца смотрит XML."""
     dest_month = month_dir_name(source_day)
-    if source_day.day != 1:
+    if not is_first_working_day_of_month(source_day, is_non_working):
         return dest_month
     xmls = [path for path in group if path.suffix.lower() == ".xml"]
     if not xmls:
@@ -290,6 +304,7 @@ def _download_branch(
     code: str,
     subfolder: str,
     source_day: date,
+    is_non_working: Callable[[date], bool],
 ) -> tuple[Optional[str], list[Path]]:
     """
     Скопировать одну ветку F750/F752.
@@ -310,7 +325,7 @@ def _download_branch(
 
     copied_zips: list[Path] = []
     for group in groups.values():
-        dest_month = _destination_month(group, source_day)
+        dest_month = _destination_month(group, source_day, is_non_working)
         dest_dir = reports_root / dest_month / "VTBSD" / subfolder
         for src in group:
             copied = _copy_file(src, dest_dir)
@@ -376,7 +391,9 @@ def run_vtb_download(
     archives: list[Path] = []
     for code, subfolder in _BRANCHES:
         try:
-            absent, zips = _download_branch(share, reports, code, subfolder, source_day)
+            absent, zips = _download_branch(
+                share, reports, code, subfolder, source_day, is_non_working
+            )
         except Exception:
             logger.exception("VTB: ошибка ветки %s", code)
             continue
