@@ -447,19 +447,19 @@ Private Function MapRegister(ByVal ws As Worksheet) As Object
     Set cols = CreateObject("Scripting.Dictionary")
     cols("header") = headerRow
     cols("code") = FindCol(ws, headerRow, "код ц/б", "")
-    cols("price") = FindCol(ws, headerRow, "цена", "приобрет|реализ|валют|рыноч")
-    cols("dealBuy") = FindCol(ws, headerRow, "номер сделки приобретения", "")
-    cols("dateBuy") = FindCol(ws, headerRow, "дата заключения|приобрет", "")
-    cols("dateRight") = FindCol(ws, headerRow, "перехода права|приобрет", "")
-    cols("datePay") = FindCol(ws, headerRow, "дата оплаты|приобрет", "")
-    cols("qtyInit") = FindCol(ws, headerRow, "первоначальное количество", "")
-    cols("qtyFact") = FindCol(ws, headerRow, "фактическое количество", "")
-    cols("priceBuy") = FindCol(ws, headerRow, "цена приобретения", "")
-    cols("curPrice") = FindCol(ws, headerRow, "валюта цены|приобрет", "")
-    cols("curSettle") = FindCol(ws, headerRow, "валюта расчетов|приобрет", "")
+    cols("price") = FindCol(ws, headerRow, "цена", "приобрет|реализ|валют|рыноч|сделк")
+    cols("dealBuy") = FindCol(ws, headerRow, "номер|сделк|приобрет", "реализац|погаш")
+    cols("dateBuy") = FindCol(ws, headerRow, "дата|заключен|приобрет", "")
+    cols("dateRight") = FindCol(ws, headerRow, "переход|права|приобрет", "")
+    cols("datePay") = FindCol(ws, headerRow, "дата|оплат|приобрет", "")
+    cols("qtyInit") = FindCol(ws, headerRow, "первоначальн|количеств", "")
+    cols("qtyFact") = FindCol(ws, headerRow, "фактическ|количеств", "")
+    cols("priceBuy") = FindCol(ws, headerRow, "цена|приобрет", "валют")
+    cols("curPrice") = FindCol(ws, headerRow, "валюта|цен|приобрет", "расчет")
+    cols("curSettle") = FindCol(ws, headerRow, "валюта|расчет|приобрет", "")
     cols("rateBuy") = FindCol(ws, headerRow, "курс|оплат", "выруч|купон")
-    cols("costNom") = FindCol(ws, headerRow, "стоимость приобретения|номинал", "")
-    cols("costRub") = FindColNth(ws, headerRow, "стоимость приобретения|руб", "купон", 1)
+    cols("costNom") = FindCol(ws, headerRow, "стоимость|приобрет|номинал", "")
+    cols("costRub") = FindColNth(ws, headerRow, "стоимость|приобрет|руб", "купон", 1)
     cols("nkd1") = FindColNth(ws, headerRow, "нкд уплачен", "", 1)
     cols("nkd2") = FindColNth(ws, headerRow, "нкд уплачен", "", 2)
     cols("nkd3") = FindColNth(ws, headerRow, "нкд уплачен", "", 3)
@@ -474,26 +474,26 @@ Private Function MapRegister(ByVal ws As Worksheet) As Object
     cols("nonmarket") = FindCol(ws, headerRow, "нерыночная", "")
     cols("matTax") = FindCol(ws, headerRow, "мат", "")
     cols("saleType") = FindCol(ws, headerRow, "тип операции", "")
-    cols("saleNo") = FindCol(ws, headerRow, "номер сделки реализации", "")
-    cols("saleDate") = FindCol(ws, headerRow, "дата заключения", "приобрет")
-    cols("saleRight") = FindCol(ws, headerRow, "перехода права", "приобрет")
-    cols("saleCash") = FindCol(ws, headerRow, "получения средств", "")
-    cols("saleQty") = FindCol(ws, headerRow, "количество бумаг", "первонач|фактическ")
-    cols("salePrice") = FindCol(ws, headerRow, "цена реализации", "")
+    cols("saleNo") = FindCol(ws, headerRow, "номер|сделк|реализац", "")
+    cols("saleDate") = FindCol(ws, headerRow, "дата|заключен", "приобрет")
+    cols("saleRight") = FindCol(ws, headerRow, "переход|права", "приобрет")
+    cols("saleCash") = FindCol(ws, headerRow, "получен|средств", "")
+    cols("saleQty") = FindCol(ws, headerRow, "количеств", "первоначальн|фактическ")
+    cols("salePrice") = FindCol(ws, headerRow, "цена|реализац", "")
     cols("saleCurPrice") = FindColNth(ws, headerRow, "валюта цены", "приобрет", 1)
     cols("saleCurSet") = FindColNth(ws, headerRow, "валюта расчетов", "приобрет", 1)
-    cols("saleRate") = FindCol(ws, headerRow, "получения выручки", "")
-    cols("saleAmt1") = FindColNth(ws, headerRow, "стоимость реализации", "", 1)
-    cols("saleAmt2") = FindColNth(ws, headerRow, "стоимость реализации|руб", "", 1)
-    cols("saleNkd") = FindCol(ws, headerRow, "нкд получен", "")
-    cols("saleComm") = FindCol(ws, headerRow, "комиссия брокера|реализ", "")
+    cols("saleRate") = FindCol(ws, headerRow, "курс|выруч", "")
+    cols("saleAmt1") = FindColNth(ws, headerRow, "стоимость|реализац", "руб", 1)
+    cols("saleAmt2") = FindColNth(ws, headerRow, "стоимость|реализац|руб", "", 1)
+    cols("saleNkd") = FindCol(ws, headerRow, "нкд|получен", "")
+    cols("saleComm") = FindCol(ws, headerRow, "комиссия|брокер|реализ", "")
     cols("saleSource") = FindColNth(ws, headerRow, "источник информации", "", 2)
     cols("saleQuote") = FindColNth(ws, headerRow, "дата котировки", "", 2)
     cols("taxSum") = FindCol(ws, headerRow, "сумма исчисленного налога", "")
 
     missing = RequiredMiss(cols)
     If Len(missing) > 0 Then
-        LogStop "в регистре не найдены колонки: " & missing
+        LogStop "в регистре не найдены колонки: " & missing & ". Шапка, строка " & CStr(headerRow) & ": " & HeaderSample(ws, headerRow)
         Exit Function
     End If
     cols("firstData") = FirstDataRow(ws, CLng(cols("code")), headerRow)
@@ -772,7 +772,7 @@ Private Function FindHeaderRow(ByVal ws As Worksheet, ByVal fragment As String) 
     Dim c As Long
     For r = 1 To 45
         For c = 1 To 40
-            If InStr(1, ColHeader(ws, r, c), fragment, vbTextCompare) > 0 Then
+            If InStr(1, Squash(CellMergeText(ws.Cells(r, c))), fragment, vbTextCompare) > 0 Then
                 FindHeaderRow = r
                 Exit Function
             End If
@@ -901,7 +901,33 @@ Private Function HeaderOk(ByVal text As String, ByVal mustHave As String, ByVal 
 End Function
 
 Private Function ColHeader(ByVal ws As Worksheet, ByVal headerRow As Long, ByVal col As Long) As String
-    ColHeader = LCase$(CellMergeText(ws.Cells(headerRow, col)) & " " & CellMergeText(ws.Cells(headerRow + 1, col)))
+    Dim i As Long
+    Dim text As String
+    For i = 0 To 2
+        text = text & " " & CellMergeText(ws.Cells(headerRow + i, col))
+    Next i
+    ColHeader = Squash(text)
+End Function
+
+Private Function Squash(ByVal text As String) As String
+    text = Replace$(text, vbCr, " ")
+    text = Replace$(text, vbLf, " ")
+    text = Replace$(text, ChrW(160), " ")
+    Do While InStr(text, "  ") > 0
+        text = Replace$(text, "  ", " ")
+    Loop
+    Squash = LCase$(Trim$(text))
+End Function
+
+Private Function HeaderSample(ByVal ws As Worksheet, ByVal headerRow As Long) As String
+    Dim c As Long
+    Dim text As String
+    Dim piece As String
+    For c = 1 To 20
+        piece = ColHeader(ws, headerRow, c)
+        If Len(piece) > 0 Then text = text & " [" & CStr(c) & "] " & Left$(piece, 40)
+    Next c
+    HeaderSample = text
 End Function
 
 Private Function CellMergeText(ByVal cell As Range) As String
