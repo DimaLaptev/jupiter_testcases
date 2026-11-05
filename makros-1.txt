@@ -174,8 +174,8 @@ Private Function ClientMatches(ByVal brokerWs As Worksheet, ByVal regWs As Works
     fioOk = (Len(brokerFio) > 0 And StrComp(brokerFio, regFio, vbTextCompare) = 0)
     codeOk = (Len(brokerCode) = 5 And StrComp(brokerCode, regCode, vbTextCompare) = 0)
 
-    If fioOk And codeOk Then
-        LogInfo "клиент", "совпали ФИО и код " & regCode
+    If fioOk Or codeOk Then
+        LogInfo "клиент", "достаточно одного совпадения. ФИО " & IIf(fioOk, "совпало", "не совпало") & ", код " & IIf(codeOk, "совпал (" & regCode & ")", "не совпал") & ". Отчет ФИО «" & brokerFio & "», код «" & brokerCode & "». Регистр ФИО «" & regFio & "», код «" & regCode & "»."
         ClientMatches = True
     Else
         LogStop "нет клиента. Отчет ФИО «" & brokerFio & "», код «" & brokerCode & "». Регистр ФИО «" & regFio & "», код «" & regCode & "»."
