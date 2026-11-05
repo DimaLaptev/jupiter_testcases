@@ -167,7 +167,7 @@ Private Function ClientMatches(ByVal brokerWs As Worksheet, ByVal regWs As Works
     Dim fioOk As Boolean
     Dim codeOk As Boolean
 
-    brokerFio = Norm(BrokerFio(brokerWs))
+    brokerFio = Norm(ReadBrokerFio(brokerWs))
     regFio = Norm(FindLabeled(regWs, "ФИО"))
     brokerCode = ReadBrokerCode(brokerWs)
     regCode = InvestorCode(regWs)
@@ -912,7 +912,7 @@ Private Function CellMergeText(ByVal cell As Range) As String
     End If
 End Function
 
-Private Function BrokerFio(ByVal ws As Worksheet) As String
+Private Function ReadBrokerFio(ByVal ws As Worksheet) As String
     Dim r As Long
     Dim c As Long
     Dim text As String
@@ -923,11 +923,11 @@ Private Function BrokerFio(ByVal ws As Worksheet) As String
             If InStr(1, text, "ФИО", vbTextCompare) = 0 Then GoTo NextFio
             nameFromCell = NameAfterCodeLabel(text)
             If Len(nameFromCell) > 0 Then
-                BrokerFio = nameFromCell
+                ReadBrokerFio = nameFromCell
                 Exit Function
             End If
-            BrokerFio = ValueToRight(ws, r, c, text, "ФИО")
-            If Len(BrokerFio) > 0 Then Exit Function
+            ReadBrokerFio = ValueToRight(ws, r, c, text, "ФИО")
+            If Len(ReadBrokerFio) > 0 Then Exit Function
 NextFio:
         Next c
     Next r
