@@ -2,7 +2,8 @@
 Выгрузка файлов RSD с /mnt/share_rsd в REPORS_DEPO_DIRECTORY.
 
 По рабочим дням копируются файлы с датой изменения предыдущего рабочего дня
-из DOM/INBOX и IA/INBOX в <YYYY_MM>/RSD/EDO. Архивы не распаковываются.
+из DOM/INBOX и IA/INBOX, включая вложенные папки, в <YYYY_MM>/RSD/EDO.
+Архивы не распаковываются.
 В первую рабочую дату месяца месяц назначения берётся из первой даты
 YYMMDD или YYYYMMDD в имени файла (у zip — внутри архива, не из его имени).
 Нет такой даты — файл остаётся в текущем месяце, на почту уходит письмо.
@@ -124,6 +125,22 @@ def route_date(path: Path) -> Optional[date]:
     return first_date_in_name(path.name)
 
 
+def _files_changed_on(inbox: Path, source_day: date) -> list[Path]:
+    """Файлы inbox и вложенных папок с датой изменения source_day."""
+    chosen: list[Path] = []
+    for path in inbox.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            changed = mtime_day(path)
+        except OSError:
+            logger.warning("RSD: не прочитана дата изменения %s", path)
+            continue
+        if changed == source_day:
+            chosen.append(path)
+    return sorted(chosen)
+
+
 def _copy_file(src: Path, dest_dir: Path) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
     target = dest_dir / src.name
@@ -151,9 +168,7 @@ def _download_inbox(
         logger.warning("RSD: нет каталога %s", missing)
         return missing, []
 
-    chosen = sorted(
-        path for path in inbox.iterdir() if path.is_file() and mtime_day(path) == source_day
-    )
+    chosen = _files_changed_on(inbox, source_day)
     logger.info("RSD: %s — файлов с датой изменения %s: %d", inbox, source_day.isoformat(), len(chosen))
     undated: list[str] = []
     current_month = month_dir_name(source_day)
@@ -162,7 +177,7 @@ def _download_inbox(
         if boundary:
             found = route_date(src)
             if found is None:
-                undated.append(src.name)
+                undated.append(str(src.relative_to(inbox)))
                 logger.warning("RSD: %s — нет даты в имени, остаётся в %s", src.name, current_month)
             elif is_immediately_previous_month(found, source_day):
                 dest_month = month_dir_name(previous_month(source_day))
