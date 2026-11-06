@@ -3,6 +3,7 @@
 
 По рабочим дням копируются файлы с датой изменения предыдущего рабочего дня
 из DOM/INBOX и IA/INBOX, включая вложенные папки, в <YYYY_MM>/RSD/EDO.
+Файл, в имени которого есть Rip без учёта регистра, кладётся в RSD/SPR.
 Архивы не распаковываются.
 В первую рабочую дату месяца месяц назначения берётся из первой даты
 YYMMDD или YYYYMMDD в имени файла (у zip — внутри архива, не из его имени).
@@ -141,6 +142,13 @@ def _files_changed_on(inbox: Path, source_day: date) -> list[Path]:
     return sorted(chosen)
 
 
+def _edo_or_spr(filename: str) -> str:
+    """SPR, если в имени есть Rip в любом регистре. Иначе EDO."""
+    if "rip" in filename.lower():
+        return "SPR"
+    return "EDO"
+
+
 def _copy_file(src: Path, dest_dir: Path) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
     target = dest_dir / src.name
@@ -184,7 +192,7 @@ def _download_inbox(
                 logger.info("RSD: %s дата %s → месяц %s", src.name, found.isoformat(), dest_month)
             else:
                 logger.info("RSD: %s дата %s остаётся в %s", src.name, found.isoformat(), current_month)
-        copied = _copy_file(src, reports_root / dest_month / "RSD" / "EDO")
+        copied = _copy_file(src, reports_root / dest_month / "RSD" / _edo_or_spr(src.name))
         logger.info("RSD: %s → %s", src, copied)
     return None, undated
 
