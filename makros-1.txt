@@ -447,7 +447,7 @@ Private Function MapRegister(ByVal ws As Worksheet) As Object
     Set cols = CreateObject("Scripting.Dictionary")
     cols("header") = headerRow
     cols("code") = FindCol(ws, headerRow, "код ц/б", "")
-    cols("price") = FindCol(ws, headerRow, "цена", "приобрет|реализ|валют|рыноч|сделк")
+    cols("price") = FindBarePrice(ws, headerRow)
     cols("dealBuy") = FindCol(ws, headerRow, "номер|сделк|приобрет", "реализац|погаш")
     cols("dateBuy") = FindCol(ws, headerRow, "дата|заключен|приобрет", "")
     cols("dateRight") = FindCol(ws, headerRow, "переход|права|приобрет", "")
@@ -497,6 +497,11 @@ Private Function MapRegister(ByVal ws As Worksheet) As Object
         Exit Function
     End If
     cols("firstData") = FirstDataRow(ws, CLng(cols("code")), headerRow)
+    If CLng(cols("price")) = 0 Then
+        LogInfo "цена", "отдельная колонка «Цена» не найдена, процент пишется в «Цену приобретения». " & PriceHints(ws, headerRow)
+    Else
+        LogInfo "цена", "колонка «Цена» найдена, столбец " & CStr(cols("price"))
+    End If
     Set MapRegister = cols
 End Function
 
@@ -504,7 +509,7 @@ Private Function RequiredMiss(ByVal cols As Object) As String
     Dim keys As Variant
     Dim i As Long
     Dim text As String
-    keys = Array("code", "price", "dealBuy", "dateBuy", "dateRight", "datePay", "qtyInit", "qtyFact", "priceBuy", "costNom", "costRub", "saleNo", "saleQty", "salePrice", "saleAmt1")
+    keys = Array("code", "dealBuy", "dateBuy", "dateRight", "datePay", "qtyInit", "qtyFact", "priceBuy", "costNom", "costRub", "saleNo", "saleQty", "salePrice", "saleAmt1")
     For i = LBound(keys) To UBound(keys)
         If CLng(cols(CStr(keys(i)))) = 0 Then
             If Len(text) > 0 Then text = text & ", "
@@ -898,6 +903,47 @@ Private Function HeaderOk(ByVal text As String, ByVal mustHave As String, ByVal 
         Next i
     End If
     HeaderOk = True
+End Function
+
+Private Function FindBarePrice(ByVal ws As Worksheet, ByVal headerRow As Long) As Long
+    Dim r As Long
+    Dim c As Long
+    Dim text As String
+    For r = headerRow To headerRow + 2
+        For c = 1 To 130
+            text = Squash(OwnCellText(ws.Cells(r, c)))
+            If text = "цена" Then
+                FindBarePrice = c
+                Exit Function
+            End If
+        Next c
+    Next r
+End Function
+
+Private Function PriceHints(ByVal ws As Worksheet, ByVal headerRow As Long) As String
+    Dim r As Long
+    Dim c As Long
+    Dim text As String
+    Dim hints As String
+    For r = headerRow To headerRow + 2
+        For c = 1 To 130
+            text = Squash(OwnCellText(ws.Cells(r, c)))
+            If InStr(text, "цен") > 0 Then hints = hints & " [" & CStr(c) & "] " & Left$(text, 30)
+        Next c
+    Next r
+    PriceHints = hints
+End Function
+
+Private Function OwnCellText(ByVal cell As Range) As String
+    If cell.MergeCells Then
+        If cell.MergeArea.Columns.Count > 1 And cell.Column <> cell.MergeArea.Column Then
+            OwnCellText = ""
+        Else
+            OwnCellText = CStr(cell.MergeArea.Cells(1, 1).Value)
+        End If
+    Else
+        OwnCellText = CStr(cell.Value)
+    End If
 End Function
 
 Private Function ColHeader(ByVal ws As Worksheet, ByVal headerRow As Long, ByVal col As Long) As String
