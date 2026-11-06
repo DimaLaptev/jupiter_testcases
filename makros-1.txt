@@ -7,6 +7,7 @@ Option Explicit
 
 Private Const LOG_SHEET As String = "Лог"
 Private Const START_SHEET As String = "Запуск"
+Private stepName As String
 
 Public Sub Запуск()
     Dim brokerPath As String
@@ -58,12 +59,15 @@ Public Sub ЗапускПоПутям(ByVal brokerPath As String, ByVal regPath 
     Application.ScreenUpdating = False
     Application.EnableEvents = False
 
+    stepName = "очистка лога"
     PrepareLog
+    stepName = "запись путей"
     LogInfo "путь", "отчет брокера: " & brokerPath
     LogInfo "путь", "обычный регистр: " & regPath
     LogInfo "путь", "регистр РЕПО: " & repoPath
     LogInfo "путь", "файл курсов: " & ratesPath
 
+    stepName = "открытие файлов"
     Set brokerWb = Workbooks.Open(brokerPath, 0, True)
     Set regWb = Workbooks.Open(regPath, 0, False)
     Set repoWb = Workbooks.Open(repoPath, 0, True)
@@ -83,6 +87,7 @@ Public Sub ЗапускПоПутям(ByVal brokerPath As String, ByVal regPath 
     LogInfo "курсы", DescribeRates(ratesWb)
     LogInfo "репо", "регистр РЕПО в этом прогоне не меняется"
 
+    stepName = "перенос сделок"
     changed = TransferDeals(brokerWs, regWs)
     If changed Then regWb.Save
 
@@ -97,7 +102,7 @@ Done:
     If Not silent Then MsgBox "Готово. Результат на листе «Лог».", vbInformation, "Макрос 1"
     Exit Sub
 Fail:
-    LogStop "сбой макроса: " & Err.Description
+    LogStop "сбой макроса на шаге «" & stepName & "»: " & Err.Description
     On Error Resume Next
     CloseBook ratesWb
     CloseBook repoWb
@@ -209,9 +214,9 @@ Private Function WritePurchase(ByVal ws As Worksheet, ByVal cols As Object, ByVa
     End If
 
     newRow = lastRow + 1
-    ws.Rows(newRow).Insert Shift:=xlDown
-    ws.Rows(lastRow).Copy Destination:=ws.Rows(newRow)
-    Application.CutCopyMode = False
+    stepName = "вставка строки покупки " & CStr(newRow)
+    InsertDataRow ws, newRow
+    CopyDataRow ws, lastRow, newRow
     FillPurchase ws, cols, newRow, deal
     LogDeal deal, ws.Name & "!" & ws.Cells(newRow, 1).Address(False, False), PurchaseNote(deal), "", "", ""
     WritePurchase = True
@@ -315,9 +320,9 @@ Private Function WriteSale(ByVal ws As Worksheet, ByVal cols As Object, ByVal de
     soldCost = CDbl(Application.WorksheetFunction.Round(oldCost * saleQty / oldQty, 2))
     tailCost = CDbl(Application.WorksheetFunction.Round(oldCost - soldCost, 2))
     tailRow = lot + 1
-    ws.Rows(tailRow).Insert Shift:=xlDown
-    ws.Rows(lot).Copy Destination:=ws.Rows(tailRow)
-    Application.CutCopyMode = False
+    stepName = "вставка хвоста продажи " & CStr(tailRow)
+    InsertDataRow ws, tailRow
+    CopyDataRow ws, lot, tailRow
 
     FillSale ws, cols, lot, deal, saleQty, soldCost
     ClearBuyComm ws, cols, lot
@@ -439,6 +444,7 @@ Private Function MapRegister(ByVal ws As Worksheet) As Object
     Dim cols As Object
     Dim missing As String
 
+    stepName = "карта колонок регистра"
     headerRow = FindHeaderRow(ws, "код ц/б")
     If headerRow = 0 Then
         LogStop "не найдена шапка «Код ц/б»"
@@ -447,6 +453,7 @@ Private Function MapRegister(ByVal ws As Worksheet) As Object
     Set cols = CreateObject("Scripting.Dictionary")
     cols("header") = headerRow
     cols("code") = FindCol(ws, headerRow, "код ц/б", "")
+    stepName = "поиск колонки Цена"
     cols("price") = FindBarePrice(ws, headerRow)
     cols("dealBuy") = FindCol(ws, headerRow, "номер|сделк|приобрет", "реализац|погаш")
     cols("dateBuy") = FindCol(ws, headerRow, "дата|заключен|приобрет", "")
@@ -935,16 +942,57 @@ Private Function PriceHints(ByVal ws As Worksheet, ByVal headerRow As Long) As S
 End Function
 
 Private Function OwnCellText(ByVal cell As Range) As String
+    Dim top As Range
+    On Error GoTo EmptyText
     If cell.MergeCells Then
-        If cell.MergeArea.Columns.Count > 1 And cell.Column <> cell.MergeArea.Column Then
+        Set top = cell.MergeArea.Cells(1, 1)
+        If cell.MergeArea.Columns.Count > 1 And cell.Column <> top.Column Then
+            OwnCellText = ""
+        ElseIf IsError(top.Value) Then
             OwnCellText = ""
         Else
-            OwnCellText = CStr(cell.MergeArea.Cells(1, 1).Value)
+            OwnCellText = CStr(top.Value)
         End If
+    ElseIf IsError(cell.Value) Then
+        OwnCellText = ""
     Else
         OwnCellText = CStr(cell.Value)
     End If
+    Exit Function
+EmptyText:
+    OwnCellText = ""
 End Function
+
+Private Sub InsertDataRow(ByVal ws As Worksheet, ByVal rowNum As Long)
+    On Error GoTo BadInsert
+    ws.Rows(rowNum).Insert Shift:=xlDown
+    Exit Sub
+BadInsert:
+    Err.Raise Err.Number, , "не вставилась строка " & CStr(rowNum) & ". " & Err.Description
+End Sub
+
+Private Sub CopyDataRow(ByVal ws As Worksheet, ByVal src As Long, ByVal dest As Long)
+    Dim c As Long
+    Dim source As Range
+    Dim top As Range
+    For c = 1 To 120
+        Set source = ws.Cells(src, c)
+        On Error GoTo NextCell
+        If source.MergeCells Then
+            Set top = source.MergeArea.Cells(1, 1)
+            If source.Row <> top.Row Or source.Column <> top.Column Then GoTo NextCell
+            If IsError(top.Value) Then GoTo NextCell
+            ws.Cells(dest, c).Value = top.Value
+        Else
+            If IsError(source.Value) Then GoTo NextCell
+            ws.Cells(dest, c).Value = source.Value
+        End If
+        ws.Cells(dest, c).NumberFormat = source.NumberFormat
+NextCell:
+        Err.Clear
+    Next c
+    On Error GoTo 0
+End Sub
 
 Private Function ColHeader(ByVal ws As Worksheet, ByVal headerRow As Long, ByVal col As Long) As String
     Dim i As Long
