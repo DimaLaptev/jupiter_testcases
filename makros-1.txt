@@ -134,7 +134,9 @@ Private Function TransferDeals(ByVal brokerWs As Worksheet, ByVal regWs As Works
     Set cols = MapRegister(regWs)
     If cols Is Nothing Then Exit Function
 
+    stepName = "чтение раздела 4"
     Set deals = ReadSection(brokerWs, "4.", "совершен", False)
+    stepName = "чтение раздела 5"
     Set sec5 = ReadSection(brokerWs, "5.", "заключен", True)
     SortDeals deals
 
@@ -189,6 +191,7 @@ End Function
 
 Private Function WritePurchase(ByVal ws As Worksheet, ByVal cols As Object, ByVal deal As Object) As Boolean
     Dim isin As String
+    stepName = "проверка покупки " & CStr(deal("dealNo"))
     Dim lastRow As Long
     Dim newRow As Long
     Dim priceCur As String
@@ -273,6 +276,7 @@ End Sub
 
 Private Function WriteSale(ByVal ws As Worksheet, ByVal cols As Object, ByVal deal As Object) As Boolean
     Dim isin As String
+    stepName = "проверка продажи " & CStr(deal("dealNo"))
     Dim lot As Long
     Dim oldQty As Double
     Dim saleQty As Double
@@ -598,22 +602,22 @@ Private Function ReadSection(ByVal ws As Worksheet, ByVal mark As String, ByVal 
         Set deal = NewDeal()
         deal("row") = r
         deal("section") = IIf(planned, "5", "4")
-        deal("dealNo") = IdText(ws.Cells(r, CLng(cols("deal"))).Value)
-        deal("direction") = Trim$(CStr(ws.Cells(r, CLng(cols("direction"))).Value))
-        deal("name") = Trim$(CStr(ws.Cells(r, CLng(cols("name"))).Value))
-        deal("code") = Trim$(CStr(ws.Cells(r, CLng(cols("code"))).Value))
-        deal("price") = NumVal(ws.Cells(r, CLng(cols("price"))).Value)
-        deal("priceCur") = Trim$(CStr(ws.Cells(r, CLng(cols("priceCur"))).Value))
-        deal("qty") = NumVal(ws.Cells(r, CLng(cols("qty"))).Value)
-        deal("amount") = NumVal(ws.Cells(r, CLng(cols("amount"))).Value)
-        deal("nkd") = NumVal(ws.Cells(r, CLng(cols("nkd"))).Value)
-        deal("settleCur") = Trim$(CStr(ws.Cells(r, CLng(cols("settle"))).Value))
-        deal("brokerComm") = NumVal(ws.Cells(r, CLng(cols("comm"))).Value)
-        deal("venue") = Trim$(CStr(ws.Cells(r, CLng(cols("venue"))).Value))
-        deal("kind") = Trim$(CStr(ws.Cells(r, CLng(cols("kind"))).Value))
-        ParseWhen ws.Cells(r, CLng(cols("when"))).Value, deal
-        deal("payDate") = DateVal(ws.Cells(r, CLng(cols("cash"))).Value)
-        deal("secDate") = DateVal(ws.Cells(r, CLng(cols("secs"))).Value)
+        deal("dealNo") = IdText(CellValue(ws, r, CLng(cols("deal"))))
+        deal("direction") = Trim$(CStr(CellValue(ws, r, CLng(cols("direction")))))
+        deal("name") = Trim$(CStr(CellValue(ws, r, CLng(cols("name")))))
+        deal("code") = Trim$(CStr(CellValue(ws, r, CLng(cols("code")))))
+        deal("price") = NumVal(CellValue(ws, r, CLng(cols("price"))))
+        deal("priceCur") = Trim$(CStr(CellValue(ws, r, CLng(cols("priceCur")))))
+        deal("qty") = NumVal(CellValue(ws, r, CLng(cols("qty"))))
+        deal("amount") = NumVal(CellValue(ws, r, CLng(cols("amount"))))
+        deal("nkd") = NumVal(CellValue(ws, r, CLng(cols("nkd"))))
+        deal("settleCur") = Trim$(CStr(CellValue(ws, r, CLng(cols("settle")))))
+        deal("brokerComm") = NumVal(CellValue(ws, r, CLng(cols("comm"))))
+        deal("venue") = Trim$(CStr(CellValue(ws, r, CLng(cols("venue")))))
+        deal("kind") = Trim$(CStr(CellValue(ws, r, CLng(cols("kind")))))
+        ParseWhen CellValue(ws, r, CLng(cols("when"))), deal
+        deal("payDate") = DateVal(CellValue(ws, r, CLng(cols("cash"))))
+        deal("secDate") = DateVal(CellValue(ws, r, CLng(cols("secs"))))
         result.Add deal
 NextDeal:
     Next r
@@ -641,6 +645,18 @@ Private Function BrokerCols(ByVal ws As Worksheet, ByVal headerRow As Long) As O
     cols("cash") = HeaderCol(ws, headerRow, "расчетов денежных")
     cols("secs") = HeaderCol(ws, headerRow, "расчетов ценных")
     Set BrokerCols = cols
+End Function
+
+Private Function CellValue(ByVal ws As Worksheet, ByVal rowNum As Long, ByVal col As Long) As Variant
+    On Error GoTo NoCell
+    If col < 1 Or rowNum < 1 Then
+        CellValue = Empty
+        Exit Function
+    End If
+    CellValue = ws.Cells(rowNum, col).Value
+    Exit Function
+NoCell:
+    CellValue = Empty
 End Function
 
 Private Function NewDeal() As Object
