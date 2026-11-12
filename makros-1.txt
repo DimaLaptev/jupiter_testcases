@@ -1,6 +1,7 @@
 ﻿Option Explicit
 
 ' Макрос 1. Перенос раздела 4 в обычный налоговый регистр.
+' Лист регистра: ФИО или пятизначный код совпали с отчётом.
 ' Новая бумага: строка из отчёта (ISIN, наименование, номинал раздела 2).
 ' «Режим торгов» и «ЦБ является обращающейся» не заполняются.
 ' На каждой записанной строке: формулы BS/BT/BU по заголовкам, CB=13,
@@ -76,15 +77,12 @@ Public Sub ЗапускПоПутям(ByVal brokerPath As String, ByVal regPath 
     Set ratesWb = Workbooks.Open(ratesPath, 0, True)
 
     Set brokerWs = FindBrokerSheet(brokerWb)
-    Set regWs = FindRegisterSheet(regWb)
     If brokerWs Is Nothing Then
         LogStop "в отчете брокера нет раздела 4"
         GoTo Done
     End If
-    If regWs Is Nothing Then
-        LogStop "в обычном регистре нет колонки «Код ц/б»"
-        GoTo Done
-    End If
+    Set regWs = FindRegisterSheet(regWb, brokerWs)
+    If regWs Is Nothing Then GoTo Done
 
     LogInfo "курсы", DescribeRates(ratesWb)
     LogInfo "репо", "регистр РЕПО в этом прогоне не меняется"
@@ -131,7 +129,6 @@ Private Function TransferDeals(ByVal brokerWs As Worksheet, ByVal regWs As Works
     Dim wrote As Boolean
 
     Set sec2 = ReadSection2(brokerWs)
-    If Not ClientMatches(brokerWs, regWs) Then Exit Function
 
     Set cols = MapRegister(regWs)
     If cols Is Nothing Then Exit Function
@@ -168,7 +165,7 @@ Private Function TransferDeals(ByVal brokerWs As Worksheet, ByVal regWs As Works
     TransferDeals = wrote
 End Function
 
-Private Function ClientMatches(ByVal brokerWs As Worksheet, ByVal regWs As Worksheet) As Boolean
+Private Function SheetMatchesClient(ByVal brokerWs As Worksheet, ByVal regWs As Worksheet, ByRef note As String) As Boolean
     Dim brokerFio As String
     Dim regFio As String
     Dim brokerCode As String
@@ -182,13 +179,8 @@ Private Function ClientMatches(ByVal brokerWs As Worksheet, ByVal regWs As Works
     regCode = InvestorCode(regWs)
     fioOk = (Len(brokerFio) > 0 And StrComp(brokerFio, regFio, vbTextCompare) = 0)
     codeOk = (Len(brokerCode) = 5 And StrComp(brokerCode, regCode, vbTextCompare) = 0)
-
-    If fioOk Or codeOk Then
-        LogInfo "клиент", "достаточно одного совпадения. ФИО " & IIf(fioOk, "совпало", "не совпало") & ", код " & IIf(codeOk, "совпал (" & regCode & ")", "не совпал") & ". Отчет ФИО «" & brokerFio & "», код «" & brokerCode & "». Регистр ФИО «" & regFio & "», код «" & regCode & "»."
-        ClientMatches = True
-    Else
-        LogStop "нет клиента. Отчет ФИО «" & brokerFio & "», код «" & brokerCode & "». Регистр ФИО «" & regFio & "», код «" & regCode & "»."
-    End If
+    note = "ФИО " & IIf(fioOk, "совпало", "не совпало") & ", код " & IIf(codeOk, "совпал (" & regCode & ")", "не совпал") & ". Отчет ФИО «" & brokerFio & "», код «" & brokerCode & "». Регистр ФИО «" & regFio & "», код «" & regCode & "»."
+    SheetMatchesClient = fioOk Or codeOk
 End Function
 
 Private Function WritePurchase(ByVal ws As Worksheet, ByVal cols As Object, ByVal deal As Object) As Boolean
@@ -1093,14 +1085,35 @@ Private Function FindBrokerSheet(ByVal wb As Workbook) As Worksheet
     Next ws
 End Function
 
-Private Function FindRegisterSheet(ByVal wb As Workbook) As Worksheet
+Private Function FindRegisterSheet(ByVal wb As Workbook, ByVal brokerWs As Worksheet) As Worksheet
     Dim ws As Worksheet
+    Dim note As String
+    Dim tried As String
+    Dim hadHeader As Boolean
+    Dim brokerFio As String
+    Dim brokerCode As String
+
+    stepName = "поиск листа регистра"
+    brokerFio = Norm(ReadBrokerFio(brokerWs))
+    brokerCode = ReadBrokerCode(brokerWs)
     For Each ws In wb.Worksheets
-        If FindHeaderRow(ws, "код ц/б") > 0 Then
+        If FindHeaderRow(ws, "код ц/б") = 0 Then GoTo NextRegSheet
+        hadHeader = True
+        If SheetMatchesClient(brokerWs, ws, note) Then
+            LogInfo "клиент", "лист «" & ws.Name & "». Достаточно одного совпадения. " & note
             Set FindRegisterSheet = ws
             Exit Function
         End If
+        LogInfo "лист", "лист «" & ws.Name & "» не совпал. " & note
+        If Len(tried) > 0 Then tried = tried & "; "
+        tried = tried & "«" & ws.Name & "»"
+NextRegSheet:
     Next ws
+    If Not hadHeader Then
+        LogStop "в обычном регистре нет колонки «Код ц/б»"
+    Else
+        LogStop "нет листа клиента. Отчет ФИО «" & brokerFio & "», код «" & brokerCode & "». Проверены листы: " & tried
+    End If
 End Function
 
 Private Function FindHeaderRow(ByVal ws As Worksheet, ByVal fragment As String) As Long
