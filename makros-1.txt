@@ -58,6 +58,7 @@ Public Sub ЗапускПоПутям(ByVal brokerPath As String, ByVal regPath 
     Dim oldAlerts As Boolean
     Dim oldScreen As Boolean
     Dim oldEvents As Boolean
+    Dim errText As String
 
     On Error GoTo Fail
     oldAlerts = Application.DisplayAlerts
@@ -114,7 +115,8 @@ Done:
     If Not silent Then MsgBox "Готово. Результат на листе «Лог».", vbInformation, "Макрос 1"
     Exit Sub
 Fail:
-    LogStop "сбой макроса на шаге «" & stepName & "»: " & Err.Description
+    errText = Err.Description
+    LogStop "сбой макроса на шаге «" & stepName & "»: " & errText
     On Error Resume Next
     CloseBook ratesWb
     CloseBook repoWb
@@ -123,12 +125,14 @@ Fail:
     Application.DisplayAlerts = oldAlerts
     Application.ScreenUpdating = oldScreen
     Application.EnableEvents = oldEvents
-    If Not silent Then MsgBox Err.Description, vbExclamation, "Макрос 1"
+    If Not silent Then MsgBox errText, vbExclamation, "Макрос 1"
 End Sub
 
 Private Sub CloseBook(ByVal wb As Workbook)
     On Error Resume Next
-    If Not wb Is Nothing Then wb.Close SaveChanges:=False
+    If wb Is Nothing Then Exit Sub
+    If wb Is ThisWorkbook Then Exit Sub
+    wb.Close SaveChanges:=False
 End Sub
 
 Private Function TransferDeals(ByVal brokerWs As Worksheet, ByVal regWs As Worksheet, ByVal cem As Object) As Boolean
@@ -141,9 +145,11 @@ Private Function TransferDeals(ByVal brokerWs As Worksheet, ByVal regWs As Works
     Dim wrote As Boolean
     Dim clientCode As String
 
+    stepName = "код клиента в отчете"
     clientCode = ReadBrokerCode(brokerWs)
+    stepName = "чтение раздела 2"
     Set sec2 = ReadSection2(brokerWs)
-
+    stepName = "шапка регистра"
     Set cols = MapRegister(regWs)
     If cols Is Nothing Then Exit Function
 
@@ -1012,12 +1018,33 @@ Private Function LoadCemFolder(ByVal folderPath As String) As Object
     End If
     Set folder = fso.GetFolder(folderPath)
     For Each f In folder.Files
+        If Not IsCemFileName(f.Name) Then GoTo NextCemFile
         ext = LCase$(fso.GetExtensionName(f.Name))
-        If ext <> "xml" And ext <> "xls" And ext <> "xlsx" And ext <> "xlsm" Then GoTo NextCemFile
+        If ext <> "xml" And ext <> "xls" And ext <> "xlsx" Then GoTo NextCemFile
         LoadCemFile cem, f.Path, f.Name, n03, n21
 NextCemFile:
     Next f
     LogInfo "cem", "прочитано файлов SEM03: " & CStr(n03) & ", SEM21: " & CStr(n21) & ", ключей сделок " & CStr(cem("sem03").Count) & ", ключей котировок " & CStr(cem("sem21").Count)
+End Function
+
+Private Function IsCemFileName(ByVal fileName As String) As Boolean
+    Dim n As String
+    n = UCase$(fileName)
+    IsCemFileName = (InStr(n, "SEM03") > 0 Or InStr(n, "SEM21") > 0 Or InStr(n, "CEM03") > 0 Or InStr(n, "CEM21") > 0)
+End Function
+
+Private Function WorkbookOpenByPath(ByVal filePath As String) As Workbook
+    Dim wb As Workbook
+    Dim full As String
+    For Each wb In Application.Workbooks
+        On Error Resume Next
+        full = wb.FullName
+        On Error GoTo 0
+        If StrComp(full, filePath, vbTextCompare) = 0 Then
+            Set WorkbookOpenByPath = wb
+            Exit Function
+        End If
+    Next wb
 End Function
 
 Private Sub LoadCemFile(ByVal cem As Object, ByVal filePath As String, ByVal fileName As String, ByRef n03 As Long, ByRef n21 As Long)
@@ -1026,23 +1053,29 @@ Private Sub LoadCemFile(ByVal cem As Object, ByVal filePath As String, ByVal fil
     Dim kind As String
     Dim typeCol As Long
     Dim typeText As String
+    Dim openedHere As Boolean
 
     stepName = "чтение CEM " & fileName
-    On Error Resume Next
-    Set wb = Workbooks.Open(filePath, 0, True)
-    If Err.Number <> 0 Then
-        LogInfo "cem", "не открылся: " & fileName & " (" & Err.Description & ")"
-        Err.Clear
-        Exit Sub
+    Set wb = WorkbookOpenByPath(filePath)
+    If wb Is Nothing Then
+        On Error Resume Next
+        Set wb = Workbooks.Open(filePath, 0, True)
+        If Err.Number <> 0 Then
+            LogInfo "cem", "не открылся: " & fileName & " (" & Err.Description & ")"
+            Err.Clear
+            Exit Sub
+        End If
+        On Error GoTo 0
+        openedHere = True
     End If
-    On Error GoTo 0
     If wb Is Nothing Then
         LogInfo "cem", "не открылся: " & fileName
         Exit Sub
     End If
+    If wb Is ThisWorkbook Then Exit Sub
     Set ws = wb.Worksheets(1)
-    If InStr(1, fileName, "SEM03", vbTextCompare) > 0 Then kind = "03"
-    If InStr(1, fileName, "SEM21", vbTextCompare) > 0 Then kind = "21"
+    If InStr(1, fileName, "SEM03", vbTextCompare) > 0 Or InStr(1, fileName, "CEM03", vbTextCompare) > 0 Then kind = "03"
+    If InStr(1, fileName, "SEM21", vbTextCompare) > 0 Or InStr(1, fileName, "CEM21", vbTextCompare) > 0 Then kind = "21"
     If Len(kind) = 0 Then
         typeCol = HeaderCol(ws, 1, "DOC_TYPE_ID")
         If typeCol = 0 Then typeCol = HeaderCol(ws, 1, "DOC_TYPE")
@@ -1061,7 +1094,7 @@ Private Sub LoadCemFile(ByVal cem As Object, ByVal filePath As String, ByVal fil
     Else
         LogInfo "cem", "пропущен, нет SEM03/SEM21: " & fileName
     End If
-    CloseBook wb
+    If openedHere Then CloseBook wb
 End Sub
 
 Private Sub ReadSem03(ByVal dict As Object, ByVal ws As Worksheet)
