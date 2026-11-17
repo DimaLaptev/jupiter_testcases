@@ -1,12 +1,12 @@
-"""Слияние тихой строки с поручением E для ДЕПО=РЕГИОН."""
+"""Слияние тихой строки с поручением E для депозитария РЕГИОН."""
 
 from __future__ import annotations
 
 from assemble.storage_days import days_exclusive_end
 from date_format import parse_date, report_month_bounds
 from models import ABSENT, DayQuantityRow
+from references.spravochnik import is_region_depository
 
-REGION_DEPO = "РЕГИОН"
 MERGE_COMMENT = "есть на начало, нет на конец, есть списание (тип поручения E)"
 
 
@@ -44,7 +44,7 @@ def _merge_one(
     days = days_exclusive_end(period_start, op_date) if op_date is not None else None
 
     return DayQuantityRow(
-        depo=quiet.depo or e_row.depo or REGION_DEPO,
+        depo=quiet.depo or e_row.depo,
         ngri=quiet.ngri or e_row.ngri,
         n_zakladnoy=quiet.n_zakladnoy or e_row.n_zakladnoy,
         enc=quiet.enc or e_row.enc,
@@ -68,7 +68,8 @@ def merge_region_quiet_with_e(
     report_date: str,
 ) -> list[DayQuantityRow]:
     """
-    Для ДЕПО=РЕГИОН: тихая (есть начало, нет конца) + строки E →
+    Для депозитария РЕГИОН (название из справочника содержит «регион»):
+    тихая (есть начало, нет конца) + строки E →
     одна строка на каждое E с общим контекстом start; тихую убрать.
     """
     period_start, _period_end = report_month_bounds(report_date)
@@ -77,7 +78,7 @@ def merge_region_quiet_with_e(
     e_by_ngri: dict[str, list[int]] = {}
 
     for i, row in enumerate(rows):
-        if (row.depo or "").strip() != REGION_DEPO:
+        if not is_region_depository(row.depo):
             continue
         key = _ngri_key(row.ngri)
         if not key:

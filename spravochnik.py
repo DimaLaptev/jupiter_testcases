@@ -33,7 +33,7 @@ def normalize_account(s: str | None) -> str:
 
 
 def depo_code_from_depository(depository: str | None) -> str | None:
-    """Краткий код для колонки ДЕПО."""
+    """Классификатор депозитария (РЕГИОН / ГПБ / VTBSD / RSD) по названию."""
     if not depository:
         return None
     folded = depository.strip().casefold()
@@ -48,6 +48,10 @@ def depo_code_from_depository(depository: str | None) -> str | None:
     if "рсд" in folded or "rsd" in folded:
         return "RSD"
     return depository.strip()
+
+
+def is_region_depository(depository: str | None) -> bool:
+    return depo_code_from_depository(depository) == "РЕГИОН"
 
 
 def workbook_target_from_portfolio(section: str | None) -> WorkbookTarget | None:
@@ -118,10 +122,12 @@ class Sprav1Lookup:
         return rec.portfolio_section if rec else None
 
     def depo_code(self, schet_depo: str | None) -> str | None:
+        """Название депозитария из справочника (колонка B) для колонки ДЕПО."""
         rec = self.get(schet_depo)
         if rec is None:
             return None
-        return depo_code_from_depository(rec.depository)
+        name = (rec.depository or "").strip()
+        return name or None
 
     def workbook_target(self, schet_depo: str | None) -> WorkbookTarget | None:
         rec = self.get(schet_depo)

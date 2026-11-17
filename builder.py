@@ -74,16 +74,44 @@ def _fill_end(row: DayQuantityRow, end: SvodDepoRow | None, *, show: bool) -> No
     row.end_razdel = _or_absent(end.razdel_scheta)
 
 
+def _first_filled(*values: str | None) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        s = str(value).strip()
+        if s:
+            return s
+    return None
+
+
+def _zakladnoy_enc(
+    end: SvodDepoRow | None,
+    start: SvodDepoRow | None,
+) -> tuple[str | None, str | None]:
+    """№ закладной и ENC: текущий СВОД, иначе прошлый."""
+    n_zakladnoy = _first_filled(
+        end.n_zakladnoy if end else None,
+        start.n_zakladnoy if start else None,
+    )
+    enc = _first_filled(
+        end.enc if end else None,
+        start.enc if start else None,
+    )
+    return n_zakladnoy, enc
+
+
 def _identity_from_svod(
     svod: SvodDepoRow,
     *,
     depo: str | None,
+    n_zakladnoy: str | None = None,
+    enc: str | None = None,
 ) -> DayQuantityRow:
     return DayQuantityRow(
         depo=depo,
         ngri=svod.ngri,
-        n_zakladnoy=svod.n_zakladnoy,
-        enc=svod.enc,
+        n_zakladnoy=n_zakladnoy if n_zakladnoy is not None else svod.n_zakladnoy,
+        enc=enc if enc is not None else svod.enc,
         schet_depo=svod.schet_depo,
         razdel_scheta=svod.razdel_scheta,
     )
@@ -92,14 +120,16 @@ def _identity_from_svod(
 def _identity_from_op(
     op: OrdOpRow,
     start: SvodDepoRow | None,
+    end: SvodDepoRow | None,
     *,
     depo: str | None,
 ) -> DayQuantityRow:
+    n_zakladnoy, enc = _zakladnoy_enc(end, start)
     return DayQuantityRow(
         depo=depo,
         ngri=op.ngri,
-        n_zakladnoy=start.n_zakladnoy if start else None,
-        enc=start.enc if start else None,
+        n_zakladnoy=n_zakladnoy,
+        enc=enc,
         schet_depo=op.schet_depo,
         razdel_scheta=op.razdel_scheta,
     )
@@ -178,7 +208,10 @@ def build_day_rows(
             identity_src = start or end
             if identity_src is None:
                 continue
-            base = _identity_from_svod(identity_src, depo=depo)
+            n_zakladnoy, enc = _zakladnoy_enc(end, start)
+            base = _identity_from_svod(
+                identity_src, depo=depo, n_zakladnoy=n_zakladnoy, enc=enc
+            )
             _fill_start(base, start)
             _fill_end(base, end, show=True)
             if has_start and has_end:
@@ -199,7 +232,9 @@ def build_day_rows(
         # (не затираем из‑за последнего списания / debit).
 
         for op, (days, day_comment) in zip(ops, days_list):
-            row = _identity_from_op(op, start, depo=resolve_depo(op.schet_depo) or depo)
+            row = _identity_from_op(
+                op, start, end, depo=resolve_depo(op.schet_depo) or depo
+            )
             _fill_start(row, start)
             _fill_end(row, end, show=True)
             row.instruction_type = op.instruction_type
@@ -209,7 +244,7 @@ def build_day_rows(
             out.append(row)
 
     if apply_postprocess:
-        out = fill_zakladnoy_and_enc_by_ngri(out)
+        out = fill_zakladnoy_and_enc_by_ngri(out, curr_svod=curr_rows)
         out = merge_region_quiet_with_e(out, report_date)
 
     return out
