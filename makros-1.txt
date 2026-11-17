@@ -54,6 +54,7 @@ Public Sub ЗапускПоПутям(ByVal brokerPath As String, ByVal regPath 
     Dim brokerWs As Worksheet
     Dim regWs As Worksheet
     Dim cem As Object
+    Dim rates As Object
     Dim changed As Boolean
     Dim oldAlerts As Boolean
     Dim oldScreen As Boolean
@@ -96,12 +97,14 @@ Public Sub ЗапускПоПутям(ByVal brokerPath As String, ByVal regPath 
     If regWs Is Nothing Then GoTo Done
 
     LogInfo "курсы", DescribeRates(ratesWb)
+    stepName = "чтение курсов"
+    Set rates = LoadRates(ratesWb)
     LogInfo "репо", "регистр РЕПО в этом прогоне не меняется"
     stepName = "чтение CEM"
     Set cem = LoadCemFolder(cemFolder)
 
     stepName = "перенос сделок"
-    changed = TransferDeals(brokerWs, regWs, cem)
+    changed = TransferDeals(brokerWs, regWs, cem, rates)
     If changed Then regWb.Save
 
 Done:
@@ -135,7 +138,7 @@ Private Sub CloseBook(ByVal wb As Workbook)
     wb.Close SaveChanges:=False
 End Sub
 
-Private Function TransferDeals(ByVal brokerWs As Worksheet, ByVal regWs As Worksheet, ByVal cem As Object) As Boolean
+Private Function TransferDeals(ByVal brokerWs As Worksheet, ByVal regWs As Worksheet, ByVal cem As Object, ByVal rates As Object) As Boolean
     Dim sec2 As Object
     Dim deals As Collection
     Dim sec5 As Collection
@@ -152,6 +155,10 @@ Private Function TransferDeals(ByVal brokerWs As Worksheet, ByVal regWs As Works
     stepName = "шапка регистра"
     Set cols = MapRegister(regWs)
     If cols Is Nothing Then Exit Function
+    On Error Resume Next
+    regWs.AutoFilterMode = False
+    Err.Clear
+    On Error GoTo 0
 
     stepName = "чтение раздела 4"
     Set deals = ReadSection(brokerWs, "4.", "совершен", False)
@@ -164,8 +171,7 @@ Private Function TransferDeals(ByVal brokerWs As Worksheet, ByVal regWs As Works
         ResolvePaper deal, sec2
         If IsReverse(deal) Then
             LogDeal deal, "", "", "error", "продажа с обратным выкупом или РЕПО", "секция отчета для ног РЕПО не названа, в обычный регистр не пишется"
-        ElseIf Not IsRuble(CStr(deal("settleCur"))) Then
-            LogDeal deal, "", "", "error", "валюта расчетов не рубль: " & CStr(deal("settleCur")), "какую дату курса подставлять, не выбрано"
+        ElseIf Not ApplyFx(deal, rates) Then
         ElseIf IsPurchase(deal) Then
             If WritePurchase(regWs, cols, deal, cem, clientCode) Then wrote = True
         ElseIf IsSale(deal) Then
@@ -181,7 +187,8 @@ Private Function TransferDeals(ByVal brokerWs As Worksheet, ByVal regWs As Works
         LogDeal deal, "", "", "error", "раздел 5, сделка заключена и еще не рассчитана", "на примере 85 и 15 штук фактическое количество и стоимость разошлись, раздел 5 не записывается"
     Next item
 
-    LogInfo "итог", "строка «Всего» не пересчитана"
+    stepName = "строка Всего"
+    ExpandTotals regWs, cols
     TransferDeals = wrote
 End Function
 
@@ -236,19 +243,23 @@ Private Function WritePurchase(ByVal ws As Worksheet, ByVal cols As Object, ByVa
     End If
 
     stepName = "вставка строки покупки " & CStr(newRow)
-    InsertDataRow ws, newRow
-    If tmpl > 0 Then
+    If Not RowIsBlank(ws, cols, newRow) Then
+        InsertDataRow ws, newRow
         If tmpl >= newRow Then tmpl = tmpl + 1
-        CopyDataRow ws, tmpl, newRow
     End If
+    If tmpl > 0 Then CopyDataRow ws, tmpl, newRow
+    ClearCoupons ws, cols, newRow
     ClearModeCirc ws, cols, newRow
     FillPurchase ws, cols, newRow, deal, isNew, cem, clientCode, cemMiss
+    StyleDataRow ws, cols, newRow, tmpl
+    FillZerosExceptCoupons ws, cols, newRow
     If Len(cemMiss) > 0 Then
         errFlag = "error"
         errText = cemMiss
         question = "можно прогрузить повторно после правки CEM"
     End If
     LogDeal deal, ws.Name & "!" & ws.Cells(newRow, 1).Address(False, False), PurchaseNote(deal, isNew), errFlag, errText, question
+    RedistributePaperComm ws, cols, isin
     WritePurchase = True
 End Function
 
@@ -289,31 +300,29 @@ Private Sub FillPurchase(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowN
     PutNum ws, cols, rowNum, "qtyInit", CDbl(deal("qty"))
     PutNum ws, cols, rowNum, "qtyFact", CDbl(deal("qty"))
     PutNum ws, cols, rowNum, "priceBuy", price
-    PutNum ws, cols, rowNum, "curPrice", 643
-    PutNum ws, cols, rowNum, "curSettle", 643
-    PutNum ws, cols, rowNum, "rateBuy", 1
+    PutNum ws, cols, rowNum, "curPrice", CurCode(CStr(deal("priceCur")), CStr(deal("settleCur")))
+    PutNum ws, cols, rowNum, "curSettle", CurCode(CStr(deal("settleCur")), CStr(deal("settleCur")))
+    PutNum ws, cols, rowNum, "rateBuy", DealFx(deal)
     PutNum ws, cols, rowNum, "costNom", cost
-    PutNum ws, cols, rowNum, "costRub", cost
+    PutNum ws, cols, rowNum, "costRub", Rub(cost, DealFx(deal))
     PutNum ws, cols, rowNum, "nkd1", nkd
     PutNum ws, cols, rowNum, "nkd2", nkd
-    PutNum ws, cols, rowNum, "nkd3", nkd
+    WriteRateProduct ws, cols, rowNum, "nkd3", "nkd2", "rateBuy"
     PutNum ws, cols, rowNum, "nkdCoup1", 0
     PutNum ws, cols, rowNum, "nkdCoup2", 0
-    PutNum ws, cols, rowNum, "nkdCoup3", 0
+    WriteRateProduct ws, cols, rowNum, "nkdCoup3", "nkdCoup2", "rateBuy"
     PutCell ws, cols, rowNum, "source", CStr(deal("venue"))
     PutDate ws, cols, rowNum, "quote", deal("concl")
-    PutNum ws, cols, rowNum, "commBuy", comm
+    PutNum ws, cols, rowNum, "commBuy", Rub(comm, DealFx(deal))
     If ColOf(cols, "commBuy2") > 0 And ColOf(cols, "commBuy2") <> ColOf(cols, "commBuy") Then
-        PutNum ws, cols, rowNum, "commBuy2", comm
+        PutNum ws, cols, rowNum, "commBuy2", Rub(comm, DealFx(deal))
     End If
-    PutNum ws, cols, rowNum, "counterBuy", comm
-    If CDbl(deal("exchComm")) <> 0 Then PutNum ws, cols, rowNum, "commExchBuy", CDbl(deal("exchComm"))
-    PutNum ws, cols, rowNum, "nonmarket", -cost
-    PutCell ws, cols, rowNum, "saleType", "S"
+    PutNum ws, cols, rowNum, "counterBuy", 0
+    PutNum ws, cols, rowNum, "nonmarket", 0
     ClearSale ws, cols, rowNum
-    PutNum ws, cols, rowNum, "saleCurPrice", 643
-    PutNum ws, cols, rowNum, "saleCurSet", 643
-    PutNum ws, cols, rowNum, "saleRate", 1
+    PutNum ws, cols, rowNum, "saleCurPrice", CurCode(CStr(deal("priceCur")), CStr(deal("settleCur")))
+    PutNum ws, cols, rowNum, "saleCurSet", CurCode(CStr(deal("settleCur")), CStr(deal("settleCur")))
+    PutNum ws, cols, rowNum, "saleRate", DealFx(deal)
     PutNum ws, cols, rowNum, "saleAmt1", 0
     PutNum ws, cols, rowNum, "saleAmt2", 0
     PutNum ws, cols, rowNum, "saleNkd", 0
@@ -324,16 +333,28 @@ End Sub
 
 Private Function WriteSale(ByVal ws As Worksheet, ByVal cols As Object, ByVal deal As Object) As Boolean
     Dim isin As String
-    stepName = "проверка продажи " & CStr(deal("dealNo"))
     Dim lot As Long
     Dim oldQty As Double
     Dim saleQty As Double
+    Dim qtyLeft As Double
+    Dim take As Double
     Dim oldCost As Double
     Dim soldCost As Double
     Dim tailCost As Double
     Dim tailRow As Long
+    Dim partAmt As Double
+    Dim partNkd As Double
+    Dim partComm As Double
+    Dim assignedAmt As Double
+    Dim assignedNkd As Double
+    Dim assignedComm As Double
+    Dim dealAmt As Double
+    Dim dealNkd As Double
+    Dim dealComm As Double
     Dim note As String
+    Dim parts As Long
 
+    stepName = "проверка продажи " & CStr(deal("dealNo"))
     isin = CStr(deal("isin"))
     If Len(isin) = 0 Then
         LogDeal deal, "", "", "error", "в разделе 2 нет пары для кода актива " & CStr(deal("code")), "без ISIN строка регистра не ищется"
@@ -343,83 +364,102 @@ Private Function WriteSale(ByVal ws As Worksheet, ByVal cols As Object, ByVal de
         LogDeal deal, "", "", "error", "номер продажи уже есть в регистре", "повтор номера: остановить прогон или пропустить строку, не выбрано"
         Exit Function
     End If
-    lot = EarliestOpenLot(ws, cols, isin)
-    If lot = 0 Then
-        LogDeal deal, "", "", "error", "нет открытого остатка бумаги " & isin, ""
-        Exit Function
-    End If
-
-    oldQty = NumVal(ws.Cells(lot, CLng(cols("qtyFact"))).Value)
     saleQty = CDbl(deal("qty"))
     If saleQty <= 0 Then
         LogDeal deal, "", "", "error", "количество продажи не заполнено", ""
         Exit Function
     End If
-    If saleQty > oldQty + 0.0000001 Then
-        LogDeal deal, "", "", "error", "продажа " & NumText(saleQty) & " больше открытого остатка " & NumText(oldQty), "следующий лот этой продажей не закрывается: такое правило на примере не разобрано"
-        Exit Function
-    End If
-
-    oldCost = CostOf(ws, cols, lot)
-    If Abs(saleQty - oldQty) <= 0.0000001 Then
-        FillSale ws, cols, lot, deal, oldQty, oldCost
-        note = "остаток закрыт целиком, стоимость не делилась"
-        LogDeal deal, ws.Name & "!" & ws.Cells(lot, 1).Address(False, False), note, "", "", ""
-        WriteSale = True
-        Exit Function
-    End If
-
-    soldCost = CDbl(Application.WorksheetFunction.Round(oldCost * saleQty / oldQty, 2))
-    tailCost = CDbl(Application.WorksheetFunction.Round(oldCost - soldCost, 2))
-    tailRow = lot + 1
-    stepName = "вставка хвоста продажи " & CStr(tailRow)
-    InsertDataRow ws, tailRow
-    CopyDataRow ws, lot, tailRow
-
-    FillSale ws, cols, lot, deal, saleQty, soldCost
-    ClearBuyComm ws, cols, lot
-    PutNum ws, cols, tailRow, "qtyFact", oldQty - saleQty
-    PutNum ws, cols, tailRow, "costNom", tailCost
-    PutNum ws, cols, tailRow, "costRub", tailCost
-    PutNum ws, cols, tailRow, "nonmarket", -tailCost
-    ClearSale ws, cols, tailRow
-    WriteFinFormulas ws, cols, tailRow, deal, False
-
-    note = "фактическое " & NumText(saleQty) & " из " & NumText(oldQty) & ", стоимость продажи " & NumText(soldCost) & ", хвост " & NumText(tailCost) & ". Копейка остатка оставлена на хвосте."
-    LogDeal deal, ws.Name & "!" & ws.Cells(lot, 1).Address(False, False), note, "", "", "комиссия брокера покупки и комиссия контрагента на проданную часть не делились и оставлены на хвосте"
+    dealAmt = CDbl(deal("amount"))
+    dealNkd = CDbl(deal("nkd"))
+    dealComm = CDbl(deal("brokerComm"))
+    qtyLeft = saleQty
+    Do While qtyLeft > 0.0000001
+        lot = EarliestOpenLot(ws, cols, isin)
+        If lot = 0 Then
+            LogDeal deal, "", "", "error", "продажа " & NumText(saleQty) & ", не закрыто " & NumText(qtyLeft) & " — нет открытого остатка " & isin, ""
+            Exit Function
+        End If
+        oldQty = NumVal(ws.Cells(lot, CLng(cols("qtyFact"))).Value)
+        If oldQty <= 0 Then
+            LogDeal deal, "", "", "error", "нулевой остаток на строке " & CStr(lot), ""
+            Exit Function
+        End If
+        take = oldQty
+        If take > qtyLeft Then take = qtyLeft
+        If qtyLeft - take <= 0.0000001 Then
+            partAmt = CDbl(Application.WorksheetFunction.Round(dealAmt - assignedAmt, 2))
+            partNkd = CDbl(Application.WorksheetFunction.Round(dealNkd - assignedNkd, 2))
+            partComm = CDbl(Application.WorksheetFunction.Round(dealComm - assignedComm, 2))
+        Else
+            partAmt = CDbl(Application.WorksheetFunction.Round(dealAmt * take / saleQty, 2))
+            partNkd = CDbl(Application.WorksheetFunction.Round(dealNkd * take / saleQty, 2))
+            partComm = CDbl(Application.WorksheetFunction.Round(dealComm * take / saleQty, 2))
+        End If
+        oldCost = CostOf(ws, cols, lot)
+        If Abs(take - oldQty) <= 0.0000001 Then
+            FillSale ws, cols, lot, deal, take, oldCost, partAmt, partNkd, partComm
+            StyleDataRow ws, cols, lot, lot
+        Else
+            soldCost = CDbl(Application.WorksheetFunction.Round(oldCost * take / oldQty, 2))
+            tailCost = CDbl(Application.WorksheetFunction.Round(oldCost - soldCost, 2))
+            tailRow = lot + 1
+            stepName = "вставка хвоста продажи " & CStr(tailRow)
+            If Not RowIsBlank(ws, cols, tailRow) Then InsertDataRow ws, tailRow
+            CopyDataRow ws, lot, tailRow
+            FillSale ws, cols, lot, deal, take, soldCost, partAmt, partNkd, partComm
+            SplitBuyComm ws, cols, lot, tailRow, take, oldQty
+            PutNum ws, cols, tailRow, "qtyFact", oldQty - take
+            PutNum ws, cols, tailRow, "costNom", tailCost
+            PutNum ws, cols, tailRow, "costRub", tailCost
+            PutNum ws, cols, tailRow, "nonmarket", 0
+            ClearSale ws, cols, tailRow
+            WriteFinFormulas ws, cols, tailRow, deal, False
+            StyleDataRow ws, cols, lot, lot
+            StyleDataRow ws, cols, tailRow, lot
+        End If
+        assignedAmt = assignedAmt + partAmt
+        assignedNkd = assignedNkd + partNkd
+        assignedComm = assignedComm + partComm
+        qtyLeft = qtyLeft - take
+        parts = parts + 1
+        note = note & IIf(Len(note) > 0, "; ", "") & "лот " & CStr(lot) & " " & NumText(take)
+    Loop
+    LogDeal deal, ws.Name & "!" & ws.Cells(lot, 1).Address(False, False), "продажа разложена на " & CStr(parts) & " стр.: " & note, "", "", ""
+    RedistributePaperComm ws, cols, isin
     WriteSale = True
 End Function
 
-Private Sub FillSale(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowNum As Long, ByVal deal As Object, ByVal qty As Double, ByVal cost As Double)
+Private Sub FillSale(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowNum As Long, ByVal deal As Object, ByVal qty As Double, ByVal cost As Double, ByVal partAmt As Double, ByVal partNkd As Double, ByVal partComm As Double)
     PutNum ws, cols, rowNum, "qtyFact", qty
     PutNum ws, cols, rowNum, "costNom", cost
     PutNum ws, cols, rowNum, "costRub", cost
-    PutNum ws, cols, rowNum, "nonmarket", -cost
+    PutNum ws, cols, rowNum, "nonmarket", 0
     PutCell ws, cols, rowNum, "saleNo", CStr(deal("dealNo"))
     PutCell ws, cols, rowNum, "saleType", "S"
     PutDate ws, cols, rowNum, "saleDate", deal("concl")
     PutDate ws, cols, rowNum, "saleRight", deal("secDate")
     PutDate ws, cols, rowNum, "saleCash", deal("payDate")
-    PutNum ws, cols, rowNum, "saleQty", CDbl(deal("qty"))
+    PutNum ws, cols, rowNum, "saleQty", qty
     PutNum ws, cols, rowNum, "salePrice", CDbl(deal("price"))
-    PutNum ws, cols, rowNum, "saleCurPrice", 643
-    PutNum ws, cols, rowNum, "saleCurSet", 643
-    PutNum ws, cols, rowNum, "saleRate", 1
-    PutNum ws, cols, rowNum, "saleAmt1", CDbl(deal("amount"))
-    PutNum ws, cols, rowNum, "saleAmt2", CDbl(deal("amount"))
-    PutNum ws, cols, rowNum, "saleNkd", CDbl(deal("nkd"))
-    If ColOf(cols, "saleNkd2") > 0 Then PutNum ws, cols, rowNum, "saleNkd2", CDbl(deal("nkd"))
-    PutNum ws, cols, rowNum, "saleComm", CDbl(deal("brokerComm"))
-    PutNum ws, cols, rowNum, "saleCounter", CDbl(deal("brokerComm"))
-    If CDbl(deal("exchComm")) <> 0 Then PutNum ws, cols, rowNum, "commExchSale", CDbl(deal("exchComm"))
+    PutNum ws, cols, rowNum, "saleCurPrice", CurCode(CStr(deal("priceCur")), CStr(deal("settleCur")))
+    PutNum ws, cols, rowNum, "saleCurSet", CurCode(CStr(deal("settleCur")), CStr(deal("settleCur")))
+    PutNum ws, cols, rowNum, "saleRate", DealFx(deal)
+    PutNum ws, cols, rowNum, "saleAmt1", partAmt
+    PutNum ws, cols, rowNum, "saleAmt2", Rub(partAmt, DealFx(deal))
+    PutNum ws, cols, rowNum, "saleNkd", partNkd
+    If ColOf(cols, "saleNkd2") > 0 Then PutNum ws, cols, rowNum, "saleNkd2", Rub(partNkd, DealFx(deal))
+    PutNum ws, cols, rowNum, "saleComm", Rub(partComm, DealFx(deal))
+    PutNum ws, cols, rowNum, "saleCounter", 0
     PutCell ws, cols, rowNum, "saleSource", CStr(deal("venue"))
     PutDate ws, cols, rowNum, "saleQuote", deal("concl")
     PutCell ws, cols, rowNum, "circSale", "да"
     WriteFinFormulas ws, cols, rowNum, deal, True
+    FillZerosExceptCoupons ws, cols, rowNum
 End Sub
 
 Private Sub ClearSale(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowNum As Long)
     PutCell ws, cols, rowNum, "saleNo", ""
+    PutCell ws, cols, rowNum, "saleType", ""
     PutCell ws, cols, rowNum, "saleDate", ""
     PutCell ws, cols, rowNum, "saleRight", ""
     PutCell ws, cols, rowNum, "saleCash", ""
@@ -429,19 +469,326 @@ Private Sub ClearSale(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowNum 
     PutCell ws, cols, rowNum, "saleAmt2", 0
     PutCell ws, cols, rowNum, "saleNkd", 0
     PutCell ws, cols, rowNum, "saleNkd2", 0
-    PutCell ws, cols, rowNum, "saleComm", ""
-    PutCell ws, cols, rowNum, "saleCounter", ""
-    PutCell ws, cols, rowNum, "commExchSale", ""
-    PutCell ws, cols, rowNum, "saleMarketLow", ""
-    PutCell ws, cols, rowNum, "saleMarketHigh", ""
+    PutNum ws, cols, rowNum, "saleComm", 0
+    PutNum ws, cols, rowNum, "saleCounter", 0
+    PutNum ws, cols, rowNum, "saleMarketLow", 0
+    PutNum ws, cols, rowNum, "saleMarketHigh", 0
 End Sub
 
-Private Sub ClearBuyComm(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowNum As Long)
-    PutCell ws, cols, rowNum, "commBuy", ""
-    If ColOf(cols, "commBuy2") <> ColOf(cols, "commBuy") Then PutCell ws, cols, rowNum, "commBuy2", ""
-    PutCell ws, cols, rowNum, "counterBuy", ""
-    PutCell ws, cols, rowNum, "commExchBuy", ""
+Private Sub SplitBuyComm(ByVal ws As Worksheet, ByVal cols As Object, ByVal soldRow As Long, ByVal tailRow As Long, ByVal take As Double, ByVal oldQty As Double)
+    Dim full As Double
+    Dim mQty As Double
+    Dim soldC As Double
+    Dim tailC As Double
+    If ColOf(cols, "qtyInit") > 0 Then mQty = NumVal(ws.Cells(soldRow, ColOf(cols, "qtyInit")).Value)
+    If mQty <= 0 Then mQty = oldQty
+    full = CommOf(ws, cols, soldRow)
+    If oldQty > 0 And Abs(oldQty - mQty) > 0.0000001 Then
+        full = CDbl(Application.WorksheetFunction.Round(full * mQty / oldQty, 2))
+    End If
+    soldC = CDbl(Application.WorksheetFunction.Round(full * take / mQty, 2))
+    tailC = CDbl(Application.WorksheetFunction.Round(full * (oldQty - take) / mQty, 2))
+    PutNum ws, cols, soldRow, "commBuy", soldC
+    If ColOf(cols, "commBuy2") > 0 And ColOf(cols, "commBuy2") <> ColOf(cols, "commBuy") Then PutNum ws, cols, soldRow, "commBuy2", soldC
+    PutNum ws, cols, soldRow, "counterBuy", 0
+    PutNum ws, cols, tailRow, "commBuy", tailC
+    If ColOf(cols, "commBuy2") > 0 And ColOf(cols, "commBuy2") <> ColOf(cols, "commBuy") Then PutNum ws, cols, tailRow, "commBuy2", tailC
+    PutNum ws, cols, tailRow, "counterBuy", 0
+    SplitNkdRow ws, cols, soldRow, tailRow, take, oldQty, mQty
 End Sub
+
+Private Sub SplitNkdRow(ByVal ws As Worksheet, ByVal cols As Object, ByVal soldRow As Long, ByVal tailRow As Long, ByVal take As Double, ByVal oldQty As Double, ByVal mQty As Double)
+    Dim orig As Double
+    If mQty <= 0 Then Exit Sub
+    If ColOf(cols, "nkd1") > 0 Then
+        orig = NumVal(ws.Cells(soldRow, ColOf(cols, "nkd1")).Value)
+    ElseIf ColOf(cols, "nkd2") > 0 Then
+        orig = NumVal(ws.Cells(soldRow, ColOf(cols, "nkd2")).Value)
+        If oldQty > 0 Then orig = CDbl(Application.WorksheetFunction.Round(orig * mQty / oldQty, 2))
+    End If
+    PutNum ws, cols, soldRow, "nkd2", CDbl(Application.WorksheetFunction.Round(orig * take / mQty, 2))
+    PutNum ws, cols, tailRow, "nkd2", CDbl(Application.WorksheetFunction.Round(orig * (oldQty - take) / mQty, 2))
+    WriteRateProduct ws, cols, soldRow, "nkd3", "nkd2", "rateBuy"
+    WriteRateProduct ws, cols, tailRow, "nkd3", "nkd2", "rateBuy"
+End Sub
+
+Private Sub RedistributePaperComm(ByVal ws As Worksheet, ByVal cols As Object, ByVal isin As String)
+    Dim groups As Object
+    Dim rows As Object
+    Dim r As Long
+    Dim lastRow As Long
+    Dim codeCol As Long
+    Dim key As String
+    Dim i As Long
+    Dim k As Variant
+    Dim mQty As Double
+    Dim nQty As Double
+    Dim comm As Double
+    Dim orig As Double
+    Dim cand As Double
+    Dim same As Boolean
+    Dim qtyDiff As Boolean
+    Dim firstC As Double
+    Dim firstN As Double
+    Dim sumComm As Double
+    Dim assigned As Double
+    Dim rowNum As Long
+    Dim arr As Variant
+    If Len(isin) = 0 Then Exit Sub
+    If ColOf(cols, "code") = 0 Or ColOf(cols, "qtyInit") = 0 Or ColOf(cols, "qtyFact") = 0 Then Exit Sub
+    Set groups = CreateObject("Scripting.Dictionary")
+    codeCol = ColOf(cols, "code")
+    lastRow = ws.Cells(ws.Rows.Count, codeCol).End(xlUp).Row
+    For r = CLng(cols("firstData")) To lastRow
+        If StrComp(Trim$(CStr(ws.Cells(r, codeCol).Value)), isin, vbTextCompare) <> 0 Then GoTo NextRedist
+        key = Trim$(CStr(CellByKey(ws, cols, r, "dealBuy")))
+        If Len(key) = 0 Then GoTo NextRedist
+        If Not groups.Exists(key) Then groups.Add key, CreateObject("Scripting.Dictionary")
+        Set rows = groups(key)
+        rows.Add CStr(r), r
+NextRedist:
+    Next r
+    For Each k In groups.Keys
+        Set rows = groups(k)
+        If rows.Count = 0 Then GoTo NextGrp
+        arr = rows.Items
+        rowNum = CLng(arr(LBound(arr)))
+        mQty = NumVal(CellByKey(ws, cols, rowNum, "qtyInit"))
+        If mQty <= 0 Then GoTo NextGrp
+        orig = 0
+        sumComm = 0
+        same = True
+        qtyDiff = False
+        firstC = -1
+        firstN = -1
+        For i = LBound(arr) To UBound(arr)
+            rowNum = CLng(arr(i))
+            nQty = NumVal(CellByKey(ws, cols, rowNum, "qtyFact"))
+            comm = CommOf(ws, cols, rowNum)
+            sumComm = sumComm + comm
+            If Abs(nQty - mQty) <= 0.0000001 And comm > 0 Then orig = comm
+            If firstC < 0 And comm > 0 Then firstC = comm
+            If comm > 0 And firstC >= 0 And Abs(comm - firstC) > 0.02 Then same = False
+            If firstN < 0 Then
+                firstN = nQty
+            ElseIf Abs(nQty - firstN) > 0.0000001 Then
+                qtyDiff = True
+            End If
+        Next i
+        If orig <= 0 Then
+            If same And firstC > 0 And qtyDiff And rows.Count > 1 Then
+                orig = firstC
+            Else
+                orig = sumComm
+            End If
+        End If
+        If orig <= 0 Then GoTo NextGrp
+        assigned = 0
+        For i = LBound(arr) To UBound(arr)
+            rowNum = CLng(arr(i))
+            nQty = NumVal(CellByKey(ws, cols, rowNum, "qtyFact"))
+            If i = UBound(arr) Then
+                comm = CDbl(Application.WorksheetFunction.Round(orig - assigned, 2))
+            Else
+                comm = CDbl(Application.WorksheetFunction.Round(orig * nQty / mQty, 2))
+                assigned = assigned + comm
+            End If
+            PutNum ws, cols, rowNum, "commBuy", comm
+            If ColOf(cols, "commBuy2") > 0 And ColOf(cols, "commBuy2") <> ColOf(cols, "commBuy") Then PutNum ws, cols, rowNum, "commBuy2", comm
+            PutNum ws, cols, rowNum, "counterBuy", 0
+        Next i
+NextGrp:
+    Next k
+End Sub
+
+Private Function CommOf(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowNum As Long) As Double
+    If ColOf(cols, "commBuy") > 0 Then CommOf = NumVal(ws.Cells(rowNum, ColOf(cols, "commBuy")).Value)
+    If CommOf = 0 And ColOf(cols, "commBuy2") > 0 Then CommOf = NumVal(ws.Cells(rowNum, ColOf(cols, "commBuy2")).Value)
+End Function
+
+Private Function RowIsBlank(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowNum As Long) As Boolean
+    Dim codeCol As Long
+    Dim a As String
+    Dim c As String
+    If rowNum < 1 Then Exit Function
+    codeCol = ColOf(cols, "code")
+    a = Trim$(CStr(ws.Cells(rowNum, 1).Value))
+    If codeCol > 0 Then c = Trim$(CStr(ws.Cells(rowNum, codeCol).Value))
+    If Len(a) > 0 Then
+        If InStr(1, a, "всего", vbTextCompare) > 0 Or InStr(1, a, "итого", vbTextCompare) > 0 Then Exit Function
+    End If
+    RowIsBlank = (Len(a) = 0 And Len(c) = 0)
+End Function
+
+Private Sub ClearCoupons(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowNum As Long)
+    Dim c As Long
+    Dim headerRow As Long
+    Dim text As String
+    headerRow = ColOf(cols, "headerRow")
+    If headerRow = 0 Then headerRow = 19
+    For c = 1 To 120
+        text = ColHeader(ws, headerRow, c)
+        If InStr(text, "купон") > 0 Then
+            On Error Resume Next
+            ws.Cells(rowNum, c).ClearContents
+            On Error GoTo 0
+        End If
+    Next c
+End Sub
+
+Private Sub FillZerosExceptCoupons(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowNum As Long)
+    Dim c As Long
+    Dim headerRow As Long
+    Dim text As String
+    Dim v As Variant
+    headerRow = ColOf(cols, "headerRow")
+    If headerRow = 0 Then headerRow = ColOf(cols, "header")
+    If headerRow = 0 Then headerRow = 19
+    For c = 1 To 120
+        text = ColHeader(ws, headerRow, c)
+        If Len(text) = 0 Then GoTo NextZero
+        If InStr(text, "купон") > 0 Then GoTo NextZero
+        If InStr(text, "дата") > 0 Then GoTo NextZero
+        If InStr(text, "номер") > 0 Then GoTo NextZero
+        If InStr(text, "код") > 0 Then GoTo NextZero
+        If InStr(text, "наименован") > 0 Then GoTo NextZero
+        If InStr(text, "выпуск") > 0 Then GoTo NextZero
+        If InStr(text, "инвестор") > 0 Then GoTo NextZero
+        If InStr(text, "статус") > 0 Then GoTo NextZero
+        If InStr(text, "режим") > 0 Then GoTo NextZero
+        If InStr(text, "тип") > 0 Then GoTo NextZero
+        If InStr(text, "источник") > 0 Then GoTo NextZero
+        If InStr(text, "площад") > 0 Then GoTo NextZero
+        If InStr(text, "буквенн") > 0 Then GoTo NextZero
+        If InStr(text, "биржа") > 0 Then GoTo NextZero
+        If InStr(text, "границ") > 0 Then GoTo NextZero
+        If InStr(text, "иная комиссия") > 0 Then GoTo NextZero
+        If InStr(text, "финансовый результат") > 0 Then GoTo NextZero
+        If InStr(text, "доход") > 0 And InStr(text, "1530") > 0 Then GoTo NextZero
+        If InStr(text, "исчисленного налога") > 0 Then GoTo NextZero
+        v = ws.Cells(rowNum, c).Value
+        If IsEmpty(v) Or (VarType(v) = vbString And Len(Trim$(CStr(v))) = 0) Then
+            If Left$(CStr(ws.Cells(rowNum, c).Formula), 1) = "=" Then GoTo NextZero
+            On Error Resume Next
+            ws.Cells(rowNum, c).Value = 0
+            On Error GoTo 0
+        End If
+NextZero:
+    Next c
+End Sub
+
+Private Sub StyleDataRow(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowNum As Long, ByVal tmpl As Long)
+    Dim lastCol As Long
+    Dim rng As Range
+    Dim fill As Long
+    lastCol = 120
+    On Error Resume Next
+    Set rng = ws.Range(ws.Cells(rowNum, 1), ws.Cells(rowNum, lastCol))
+    rng.Font.Name = "Times New Roman"
+    rng.Font.Size = 8
+    rng.Borders.LineStyle = 1
+    rng.Borders.Weight = 2
+    fill = 0
+    If tmpl > 0 Then fill = ws.Cells(tmpl, 1).Interior.Color
+    If fill = 0 Or fill = 16777215 Then
+        If rowNum Mod 2 = 0 Then rng.Interior.Color = RGB(221, 235, 247) Else rng.Interior.Color = RGB(255, 255, 255)
+    Else
+        rng.Interior.Color = fill
+    End If
+    On Error GoTo 0
+End Sub
+
+Private Sub WriteRateProduct(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowNum As Long, ByVal destKey As String, ByVal srcKey As String, ByVal rateKey As String)
+    Dim srcRef As String
+    Dim rateRef As String
+    srcRef = CellRef(cols, srcKey, rowNum)
+    rateRef = CellRef(cols, rateKey, rowNum)
+    If Len(srcRef) = 0 Or Len(rateRef) = 0 Then
+        PutNum ws, cols, rowNum, destKey, 0
+        Exit Sub
+    End If
+    PutFormulaLocal ws, cols, rowNum, destKey, "=" & srcRef & "*" & rateRef
+End Sub
+
+Private Sub ExpandTotals(ByVal ws As Worksheet, ByVal cols As Object)
+    Dim totalRow As Long
+    Dim lastData As Long
+    Dim c As Long
+    Dim f As String
+    Dim codeCol As Long
+    codeCol = ColOf(cols, "code")
+    If codeCol = 0 Then codeCol = 1
+    totalRow = NewPaperRow(ws, cols)
+    If InStr(1, CStr(ws.Cells(totalRow, 1).Value) & CStr(ws.Cells(totalRow, codeCol).Value), "всего", vbTextCompare) = 0 Then
+        If InStr(1, CStr(ws.Cells(totalRow, 1).Value), "итого", vbTextCompare) = 0 Then Exit Sub
+    End If
+    lastData = totalRow - 1
+    Do While lastData > 1 And RowIsBlank(ws, cols, lastData)
+        lastData = lastData - 1
+    Loop
+    For c = 1 To 120
+        f = ""
+        On Error Resume Next
+        f = CStr(ws.Cells(totalRow, c).FormulaLocal)
+        If Len(f) = 0 Then f = CStr(ws.Cells(totalRow, c).Formula)
+        On Error GoTo 0
+        If InStr(f, "=") = 0 Then GoTo NextTotCol
+        f = StretchFormulaRows(f, lastData)
+        On Error Resume Next
+        ws.Cells(totalRow, c).FormulaLocal = f
+        On Error GoTo 0
+NextTotCol:
+    Next c
+    LogInfo "итог", "строка «Всего» " & CStr(totalRow) & ", диапазоны до " & CStr(lastData)
+End Sub
+
+Private Function StretchFormulaRows(ByVal formulaText As String, ByVal lastData As Long) As String
+    Dim i As Long
+    Dim ch As String
+    Dim acc As String
+    Dim num As String
+    Dim out As String
+    Dim afterColon As Boolean
+    Dim n As Long
+    out = ""
+    i = 1
+    Do While i <= Len(formulaText)
+        ch = Mid$(formulaText, i, 1)
+        If ch = ":" Then
+            If Len(num) > 0 Then
+                out = out & acc & num
+                acc = ""
+                num = ""
+            End If
+            out = out & acc & ch
+            acc = ""
+            afterColon = True
+        ElseIf (ch >= "A" And ch <= "Z") Or (ch >= "a" And ch <= "z") Then
+            acc = acc & ch
+        ElseIf ch >= "0" And ch <= "9" And Len(acc) > 0 Then
+            num = num & ch
+        Else
+            If Len(num) > 0 Then
+                n = CLng(num)
+                If afterColon And n > 1 And n < lastData Then num = CStr(lastData)
+                out = out & acc & num
+                acc = ""
+                num = ""
+            Else
+                out = out & acc
+                acc = ""
+            End If
+            out = out & ch
+            afterColon = False
+        End If
+        i = i + 1
+    Loop
+    If Len(num) > 0 Then
+        n = CLng(num)
+        If afterColon And n > 1 And n < lastData Then num = CStr(lastData)
+    End If
+    StretchFormulaRows = out & acc & num
+End Function
 
 Private Function EarliestOpenLot(ByVal ws As Worksheet, ByVal cols As Object, ByVal isin As String) As Long
     Dim r As Long
@@ -527,7 +874,7 @@ Private Function MapRegister(ByVal ws As Worksheet) As Object
     cols("qtyInit") = FindCol(ws, headerRow, "первоначальн|количеств", "")
     cols("qtyFact") = FindCol(ws, headerRow, "фактическ|количеств", "")
     cols("priceBuy") = FindCol(ws, headerRow, "цена|приобрет", "рыноч|реализ|купон")
-    cols("curPrice") = FindCol(ws, headerRow, "валюта|цен|приобрет", "расчет|цена приобрет")
+    cols("curPrice") = FindCol(ws, headerRow, "валюта|цен|приобрет", "расчет|цена приобрет|буквенн|или")
     cols("curSettle") = FindCol(ws, headerRow, "валюта|расчет|приобрет", "")
     cols("rateBuy") = FindCol(ws, headerRow, "курс|оплат", "выруч|купон")
     cols("costNom") = FindCol(ws, headerRow, "стоимость|приобрет|номинал", "")
@@ -595,6 +942,7 @@ Private Function MapRegister(ByVal ws As Worksheet) As Object
         LogStop "в регистре не найдены колонки: " & missing & ". Шапка, строка " & CStr(headerRow) & ": " & HeaderSample(ws, headerRow)
         Exit Function
     End If
+    cols("headerRow") = headerRow
     cols("firstData") = FirstDataRow(ws, CLng(cols("code")), headerRow)
     If CLng(cols("price")) = 0 Then
         LogInfo "цена", "отдельная колонка «Цена» не найдена, процент пишется в «Цену приобретения». " & PriceHints(ws, headerRow)
@@ -651,7 +999,7 @@ Private Function ReadSection2(ByVal ws As Worksheet) As Object
         Set ReadSection2 = map
         Exit Function
     End If
-    For r = headerRow + 1 To titleRow + 500
+    For r = headerRow + 1 To titleRow + 8000
         If IsLaterSection(ws, r, titleRow) Then Exit For
         code = Trim$(CStr(ws.Cells(r, codeCol).Value))
         If Len(code) = 0 Then GoTo NextSec2
@@ -686,11 +1034,11 @@ Private Function ReadSection(ByVal ws As Worksheet, ByVal mark As String, ByVal 
         Set ReadSection = result
         Exit Function
     End If
-    For r = headerRow + 1 To titleRow + 500
+    For r = headerRow + 1 To titleRow + 8000
         If IsLaterSection(ws, r, titleRow) Then Exit For
         If Len(IdText(ws.Cells(r, CLng(cols("deal"))).Value)) = 0 Then
             emptyRun = emptyRun + 1
-            If emptyRun >= 5 Then Exit For
+            If emptyRun >= 20 Then Exit For
             GoTo NextDeal
         End If
         emptyRun = 0
@@ -777,6 +1125,7 @@ Private Function NewDeal() As Object
     d("settleCur") = ""
     d("brokerComm") = 0
     d("exchComm") = 0
+    d("fx") = 1
     d("venue") = ""
     d("kind") = ""
     d("concl") = Empty
@@ -831,17 +1180,127 @@ Private Function DealLess(ByVal a As Object, ByVal b As Object) As Boolean
 End Function
 
 Private Function IsPurchase(ByVal deal As Object) As Boolean
-    IsPurchase = (StrComp(CStr(deal("direction")), "покупка", vbTextCompare) = 0)
+    Dim d As String
+    d = LCase$(CStr(deal("direction")))
+    IsPurchase = (InStr(d, "покуп") > 0 And InStr(d, "прода") = 0)
 End Function
 
 Private Function IsSale(ByVal deal As Object) As Boolean
-    IsSale = (StrComp(CStr(deal("direction")), "продажа", vbTextCompare) = 0)
+    Dim d As String
+    d = LCase$(CStr(deal("direction")))
+    IsSale = (InStr(d, "прода") > 0 And InStr(d, "покуп") = 0)
 End Function
 
 Private Function IsReverse(ByVal deal As Object) As Boolean
     Dim kind As String
     kind = LCase$(CStr(deal("kind")) & " " & CStr(deal("direction")) & " " & CStr(deal("name")))
     IsReverse = (InStr(kind, "обратн") > 0 Or InStr(kind, "репо") > 0)
+End Function
+
+Private Function ApplyFx(ByVal deal As Object, ByVal rates As Object) As Boolean
+    Dim cur As String
+    Dim rate As Double
+    cur = UCase$(Trim$(CStr(deal("settleCur"))))
+    If Len(cur) = 0 Or IsRuble(cur) Then
+        deal("fx") = 1
+        ApplyFx = True
+        Exit Function
+    End If
+    rate = LookupRate(rates, cur, deal("concl"))
+    If rate <= 0 Then
+        LogDeal deal, "", "", "error", "нет курса " & cur & " на дату заключения", "в файле курсов нет строки на эту дату, сделка не записана"
+        Exit Function
+    End If
+    deal("fx") = rate
+    ApplyFx = True
+End Function
+
+Private Function DealFx(ByVal deal As Object) As Double
+    If deal Is Nothing Then
+        DealFx = 1
+    ElseIf Not deal.Exists("fx") Then
+        DealFx = 1
+    Else
+        DealFx = CDbl(deal("fx"))
+        If DealFx <= 0 Then DealFx = 1
+    End If
+End Function
+
+Private Function Rub(ByVal amount As Double, ByVal fx As Double) As Double
+    If fx <= 0 Then fx = 1
+    Rub = CDbl(Application.WorksheetFunction.Round(amount * fx, 2))
+End Function
+
+Private Function CurCode(ByVal cur As String, ByVal fallback As String) As Long
+    Dim t As String
+    t = UCase$(Trim$(cur))
+    If t = "%" Or Len(t) = 0 Then t = UCase$(Trim$(fallback))
+    Select Case t
+        Case "RUR", "RUB", "РУБ", "РУБ.", "643": CurCode = 643
+        Case "USD", "840": CurCode = 840
+        Case "EUR", "978": CurCode = 978
+        Case "CNY", "156": CurCode = 156
+        Case "GBP", "826": CurCode = 826
+        Case "CHF", "756": CurCode = 756
+        Case "JPY", "392": CurCode = 392
+        Case "NOK", "578": CurCode = 578
+        Case Else: CurCode = 0
+    End Select
+End Function
+
+Private Function LoadRates(ByVal wb As Workbook) As Object
+    Dim ws As Worksheet
+    Dim dict As Object
+    Dim r As Long
+    Dim lastRow As Long
+    Dim text As String
+    Dim parts() As String
+    Dim d As Variant
+    Dim n As Long
+    Set dict = CreateObject("Scripting.Dictionary")
+    Set LoadRates = dict
+    If wb Is Nothing Then Exit Function
+    Set ws = wb.Worksheets(1)
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    For r = 1 To lastRow
+        text = Trim$(CStr(ws.Cells(r, 1).Value))
+        If Len(text) = 0 Then GoTo NextRateRow
+        parts = Split(text, " ")
+        If UBound(parts) < 2 Then GoTo NextRateRow
+        d = DateFromSlash(parts(0))
+        If Not IsDate(d) Then GoTo NextRateRow
+        dict(DateKey(d) & "|" & UCase$(Trim$(parts(1)))) = RateNum(parts(2))
+        n = n + 1
+NextRateRow:
+    Next r
+    LogInfo "курсы", "разобрано курсов " & CStr(n) & ". Для не рубля курс на дату заключения."
+End Function
+
+Private Function LookupRate(ByVal rates As Object, ByVal cur As String, ByVal concl As Variant) As Double
+    Dim key As String
+    If rates Is Nothing Then Exit Function
+    If Not IsDate(concl) Then Exit Function
+    key = DateKey(concl) & "|" & UCase$(Trim$(cur))
+    If rates.Exists(key) Then LookupRate = CDbl(rates(key))
+End Function
+
+Private Function DateFromSlash(ByVal text As String) As Variant
+    Dim p() As String
+    text = Trim$(text)
+    p = Split(text, "/")
+    If UBound(p) <> 2 Then
+        DateFromSlash = DateVal(text)
+        Exit Function
+    End If
+    On Error Resume Next
+    DateFromSlash = DateSerial(CInt(p(2)), CInt(p(1)), CInt(p(0)))
+    If Err.Number <> 0 Then DateFromSlash = Empty
+    On Error GoTo 0
+End Function
+
+Private Function RateNum(ByVal text As String) As Double
+    text = Replace$(Trim$(CStr(text)), ",", ".")
+    RateNum = Val(text)
 End Function
 
 Private Function IsRuble(ByVal cur As String) As Boolean
@@ -856,7 +1315,7 @@ Private Function PurchaseNote(ByVal deal As Object, ByVal isNew As Boolean) As S
         text = "новая бумага из отчёта, ISIN " & CStr(deal("isin"))
         If CDbl(deal("nominal")) > 0 Then text = text & ", номинал " & NumText(CDbl(deal("nominal")))
     Else
-        text = "покупка под существующий блок, цена " & NumText(CDbl(deal("price"))) & ", валюта 643, курс 1"
+        text = "покупка под существующий блок, цена " & NumText(CDbl(deal("price"))) & ", валюта " & CStr(deal("settleCur")) & ", курс " & NumText(DealFx(deal))
     End If
     If IsPercent(deal) Then
         text = text & ", валюта цены %, номинал покупки из раздела 2"
@@ -887,11 +1346,14 @@ Private Sub ApplyCemPurchase(ByVal ws As Worksheet, ByVal cols As Object, ByVal 
     Dim price As Double
     Dim benefit As Double
     Dim miss As String
+    Dim eqmBoard As String
 
     PutCell ws, cols, rowNum, "circ", "да"
     PutCell ws, cols, rowNum, "circSale", "да"
     board = CemBoardName(cem, CStr(deal("dealNo")), clientCode, deal("concl"))
     If Len(board) > 0 Then
+        eqmBoard = CemEqmBoard(cem, CStr(deal("dealNo")), clientCode, deal("concl"))
+        If Len(eqmBoard) > 0 Then board = eqmBoard
         PutCell ws, cols, rowNum, "mode", board
     Else
         miss = AppendMiss(miss, "режим торгов")
@@ -918,6 +1380,18 @@ Private Sub ApplyCemPurchase(ByVal ws As Worksheet, ByVal cols As Object, ByVal 
             Else
                 miss = "материальная выгода положительная " & NumText(benefit)
             End If
+        End If
+    End If
+    If Len(miss) > 0 Then
+        miss = miss & ". Поиск SEM03: сделка «" & IdText(deal("dealNo")) & "», код клиента «" & IdText(clientCode) & "», TradeDate «" & DateKey(deal("concl")) & "»"
+        If Not cem Is Nothing Then
+            If cem.Exists("sem03") Then miss = miss & ", загружено сделок SEM03: " & CStr(cem("sem03").Count)
+            If cem.Exists("sem21") Then miss = miss & ", котировок SEM21: " & CStr(cem("sem21").Count)
+        End If
+        If cem Is Nothing Then
+            miss = miss & ". Память CEM пустая"
+        ElseIf cem.Exists("sem03") Then
+            If cem("sem03").Count = 0 Then miss = miss & ". Файлы SEM03 не прочитались — проверьте папку и имена (*SEM03*, *SEM21*)"
         End If
     End If
     cemMiss = miss
@@ -959,7 +1433,27 @@ Private Function CemBoardName(ByVal cem As Object, ByVal dealNo As String, ByVal
     Set sem03 = cem("sem03")
     key = UCase$(IdText(dealNo)) & "|" & IdText(clientCode) & "|" & DateKey(concl)
     If Len(key) < 5 Then Exit Function
+    If sem03.Exists(key) Then
+        CemBoardName = CStr(sem03(key))
+        Exit Function
+    End If
+    key = UCase$(IdText(dealNo)) & "||" & DateKey(concl)
     If sem03.Exists(key) Then CemBoardName = CStr(sem03(key))
+End Function
+
+Private Function CemEqmBoard(ByVal cem As Object, ByVal dealNo As String, ByVal clientCode As String, ByVal concl As Variant) As String
+    Dim key As String
+    Dim eqm As Object
+    If cem Is Nothing Then Exit Function
+    If Not cem.Exists("eqm3t") Then Exit Function
+    Set eqm = cem("eqm3t")
+    key = UCase$(IdText(dealNo)) & "|" & IdText(clientCode) & "|" & DateKey(concl)
+    If eqm.Exists(key) Then
+        CemEqmBoard = CStr(eqm(key))
+        Exit Function
+    End If
+    key = UCase$(IdText(dealNo)) & "||" & DateKey(concl)
+    If eqm.Exists(key) Then CemEqmBoard = CStr(eqm(key))
 End Function
 
 Private Sub CemBounds(ByVal cem As Object, ByVal assetCode As String, ByVal isin As String, ByVal board As String, ByVal concl As Variant, ByRef lo As Double, ByRef hi As Double, ByRef hasLo As Boolean, ByRef hasHi As Boolean)
@@ -996,6 +1490,7 @@ Private Function EmptyCem() As Object
     Set d = CreateObject("Scripting.Dictionary")
     d.Add "sem03", CreateObject("Scripting.Dictionary")
     d.Add "sem21", CreateObject("Scripting.Dictionary")
+    d.Add "eqm3t", CreateObject("Scripting.Dictionary")
     Set EmptyCem = d
 End Function
 
@@ -1024,13 +1519,162 @@ Private Function LoadCemFolder(ByVal folderPath As String) As Object
         LoadCemFile cem, f.Path, f.Name, n03, n21
 NextCemFile:
     Next f
-    LogInfo "cem", "прочитано файлов SEM03: " & CStr(n03) & ", SEM21: " & CStr(n21) & ", ключей сделок " & CStr(cem("sem03").Count) & ", ключей котировок " & CStr(cem("sem21").Count)
+    LogInfo "cem", "Итог CEM: файлов сделок " & CStr(n03) & ", файлов котировок " & CStr(n21) & ". Прочитано номеров сделок: " & CStr(cem("sem03").Count) & ", котировок: " & CStr(cem("sem21").Count) & ", EQM3T: " & CStr(cem("eqm3t").Count) & ". Если номеров сделок 0 — xml не разобрался, пришлите эти строки лога."
 End Function
 
 Private Function IsCemFileName(ByVal fileName As String) As Boolean
     Dim n As String
     n = UCase$(fileName)
-    IsCemFileName = (InStr(n, "SEM03") > 0 Or InStr(n, "SEM21") > 0 Or InStr(n, "CEM03") > 0 Or InStr(n, "CEM21") > 0)
+    IsCemFileName = (InStr(n, "SEM03") > 0 Or InStr(n, "SEM21") > 0 Or InStr(n, "CEM03") > 0 Or InStr(n, "CEM21") > 0 Or InStr(n, "EQM3T") > 0)
+End Function
+
+Private Function ParseCemXml(ByVal cem As Object, ByVal filePath As String, ByVal fileName As String) As Boolean
+    Dim xml As Object
+    Dim recs As Object
+    Dim rec As Object
+    Dim i As Long
+    Dim dealNo As String
+    Dim code As String
+    Dim board As String
+    Dim dt As String
+    Dim sec As String
+    Dim key As String
+    Dim n As Long
+    Dim kind As String
+    Dim lo As Double
+    Dim hi As Double
+    Dim hasLo As Boolean
+    Dim hasHi As Boolean
+    Dim packed As String
+    Dim oldLo As Double
+    Dim oldHi As Double
+    Dim oldHasLo As Boolean
+    Dim oldHasHi As Boolean
+    Dim dict As Object
+
+    On Error Resume Next
+    Set xml = CreateObject("MSXML2.DOMDocument.6.0")
+    If xml Is Nothing Then Set xml = CreateObject("MSXML2.DOMDocument")
+    On Error GoTo 0
+    If xml Is Nothing Then Exit Function
+    xml.async = False
+    xml.validateOnParse = False
+    On Error Resume Next
+    xml.setProperty "SelectionLanguage", "XPath"
+    On Error GoTo 0
+    If xml.Load(filePath) = False Then
+        LogInfo "cem", "Файл " & fileName & ": XML не разобрался (" & xml.parseError.reason & "). Пробую открыть как таблицу Excel."
+        Exit Function
+    End If
+    If InStr(1, fileName, "SEM21", vbTextCompare) > 0 Or InStr(1, fileName, "CEM21", vbTextCompare) > 0 Then
+        kind = "21"
+    ElseIf InStr(1, fileName, "EQM3T", vbTextCompare) > 0 Then
+        kind = "eqm"
+    Else
+        kind = "03"
+    End If
+    Set recs = xml.selectNodes("//*[local-name()='RECORDS']")
+    If recs Is Nothing Then Set recs = xml.selectNodes("//RECORDS")
+    If recs Is Nothing Then
+        LogInfo "cem", "Файл " & fileName & ": в XML нет узлов RECORDS"
+        Exit Function
+    End If
+    If kind = "21" Then
+        Set dict = cem("sem21")
+    ElseIf kind = "eqm" Then
+        Set dict = cem("eqm3t")
+    Else
+        Set dict = cem("sem03")
+    End If
+    For i = 0 To recs.Length - 1
+        Set rec = recs.Item(i)
+        board = XmlAncestorField(rec, "BOARD", "BoardName")
+        If kind = "21" Then
+            dt = XmlAncestorField(rec, "SEM21", "TradeDate")
+            sec = XmlLocalText(rec, "SecurityId")
+            If Len(sec) = 0 Then sec = XmlAncestorField(rec, "SECURITY", "SecurityId")
+            If Len(sec) = 0 Or Len(board) = 0 Or Len(DateKey(DateVal(dt))) = 0 Then GoTo NextXmlRec
+            key = UCase$(Trim$(sec)) & "|" & Trim$(board) & "|" & DateKey(DateVal(dt))
+            hasLo = (Len(Trim$(XmlLocalText(rec, "Low"))) > 0)
+            hasHi = (Len(Trim$(XmlLocalText(rec, "High"))) > 0)
+            If hasLo Then lo = NumVal(XmlLocalText(rec, "Low"))
+            If hasHi Then hi = NumVal(XmlLocalText(rec, "High"))
+            If dict.Exists(key) Then
+                UnpackBounds CStr(dict(key)), oldLo, oldHi, oldHasLo, oldHasHi
+                If hasLo Then
+                    If oldHasLo Then
+                        If lo < oldLo Then oldLo = lo
+                    Else
+                        oldLo = lo
+                    End If
+                    oldHasLo = True
+                End If
+                If hasHi Then
+                    If oldHasHi Then
+                        If hi > oldHi Then oldHi = hi
+                    Else
+                        oldHi = hi
+                    End If
+                    oldHasHi = True
+                End If
+                dict(key) = BoundPacked(oldLo, oldHi, oldHasLo, oldHasHi)
+            Else
+                dict.Add key, BoundPacked(lo, hi, hasLo, hasHi)
+            End If
+            n = n + 1
+        Else
+            dt = XmlAncestorField(rec, "SEM03", "TradeDate")
+            If Len(dt) = 0 Then dt = XmlAncestorField(rec, "EQM3T", "TradeDate")
+            dealNo = IdText(XmlLocalText(rec, "TradeNo"))
+            code = ClientCodeDigits(XmlLocalText(rec, "ClientCode"))
+            If Len(code) = 0 Then code = ClientCodeDigits(XmlLocalText(rec, "BrokerRef"))
+            If Len(dealNo) = 0 Or Len(board) = 0 Or Len(DateKey(DateVal(dt))) = 0 Then GoTo NextXmlRec
+            key = UCase$(dealNo) & "|" & code & "|" & DateKey(DateVal(dt))
+            If Not dict.Exists(key) Then dict.Add key, Trim$(board)
+            If Len(code) > 0 Then
+                key = UCase$(dealNo) & "||" & DateKey(DateVal(dt))
+                If Not dict.Exists(key) Then dict.Add key, Trim$(board)
+            End If
+            n = n + 1
+        End If
+NextXmlRec:
+    Next i
+    LogInfo "cem", "Файл " & fileName & ": XML, узлов RECORDS " & CStr(recs.Length) & ", взято строк " & CStr(n)
+    ParseCemXml = (n > 0)
+End Function
+
+Private Function XmlLocalName(ByVal node As Object) As String
+    Dim t As String
+    Dim p As Long
+    If node Is Nothing Then Exit Function
+    t = CStr(node.nodeName)
+    p = InStrRev(t, ":")
+    If p > 0 Then XmlLocalName = Mid$(t, p + 1) Else XmlLocalName = t
+End Function
+
+Private Function XmlLocalText(ByVal node As Object, ByVal tag As String) As String
+    Dim ch As Object
+    If node Is Nothing Then Exit Function
+    For Each ch In node.childNodes
+        If StrComp(XmlLocalName(ch), tag, vbTextCompare) = 0 Then
+            XmlLocalText = Trim$(CStr(ch.Text))
+            Exit Function
+        End If
+    Next ch
+End Function
+
+Private Function XmlAncestorField(ByVal node As Object, ByVal ancestorName As String, ByVal fieldName As String) As String
+    Dim p As Object
+    Set p = node
+    Do While Not p Is Nothing
+        If StrComp(XmlLocalName(p), ancestorName, vbTextCompare) = 0 Then
+            XmlAncestorField = XmlLocalText(p, fieldName)
+            Exit Function
+        End If
+        On Error Resume Next
+        Set p = p.parentNode
+        On Error GoTo 0
+    Loop
 End Function
 
 Private Function WorkbookOpenByPath(ByVal filePath As String) As Workbook
@@ -1051,20 +1695,30 @@ Private Sub LoadCemFile(ByVal cem As Object, ByVal filePath As String, ByVal fil
     Dim wb As Workbook
     Dim ws As Worksheet
     Dim kind As String
-    Dim typeCol As Long
-    Dim typeText As String
     Dim openedHere As Boolean
 
     stepName = "чтение CEM " & fileName
+    If LCase$(Right$(fileName, 4)) = ".xml" Then
+        If ParseCemXml(cem, filePath, fileName) Then
+            If InStr(1, fileName, "SEM21", vbTextCompare) > 0 Or InStr(1, fileName, "CEM21", vbTextCompare) > 0 Then
+                n21 = n21 + 1
+            Else
+                n03 = n03 + 1
+            End If
+            Exit Sub
+        End If
+    End If
     Set wb = WorkbookOpenByPath(filePath)
     If wb Is Nothing Then
         On Error Resume Next
-        Set wb = Workbooks.Open(filePath, 0, True)
-        If Err.Number <> 0 Then
+        Set wb = Application.Workbooks.OpenXML(filePath, , 2)
+        If wb Is Nothing Then Set wb = Workbooks.Open(filePath, 0, True)
+        If Err.Number <> 0 And wb Is Nothing Then
             LogInfo "cem", "не открылся: " & fileName & " (" & Err.Description & ")"
             Err.Clear
             Exit Sub
         End If
+        Err.Clear
         On Error GoTo 0
         openedHere = True
     End If
@@ -1073,31 +1727,36 @@ Private Sub LoadCemFile(ByVal cem As Object, ByVal filePath As String, ByVal fil
         Exit Sub
     End If
     If wb Is ThisWorkbook Then Exit Sub
-    Set ws = wb.Worksheets(1)
-    If InStr(1, fileName, "SEM03", vbTextCompare) > 0 Or InStr(1, fileName, "CEM03", vbTextCompare) > 0 Then kind = "03"
-    If InStr(1, fileName, "SEM21", vbTextCompare) > 0 Or InStr(1, fileName, "CEM21", vbTextCompare) > 0 Then kind = "21"
-    If Len(kind) = 0 Then
-        typeCol = HeaderCol(ws, 1, "DOC_TYPE_ID")
-        If typeCol = 0 Then typeCol = HeaderCol(ws, 1, "DOC_TYPE")
-        If typeCol > 0 Then
-            typeText = UCase$(CStr(ws.Cells(2, typeCol).Value))
-            If InStr(typeText, "SEM03") > 0 Then kind = "03"
-            If InStr(typeText, "SEM21") > 0 Then kind = "21"
-        End If
+    If InStr(1, fileName, "SEM21", vbTextCompare) > 0 Or InStr(1, fileName, "CEM21", vbTextCompare) > 0 Then
+        kind = "21"
+    ElseIf InStr(1, fileName, "EQM3T", vbTextCompare) > 0 Then
+        kind = "eqm"
+    ElseIf InStr(1, fileName, "SEM03", vbTextCompare) > 0 Or InStr(1, fileName, "CEM03", vbTextCompare) > 0 Then
+        kind = "03"
     End If
-    If kind = "03" Then
-        ReadSem03 cem("sem03"), ws
-        n03 = n03 + 1
-    ElseIf kind = "21" Then
-        ReadSem21 cem("sem21"), ws
+    If kind = "21" Then
+        For Each ws In wb.Worksheets
+            ReadSem21 cem("sem21"), ws, fileName
+        Next ws
         n21 = n21 + 1
+    ElseIf kind = "eqm" Then
+        For Each ws In wb.Worksheets
+            ReadSem03 cem("eqm3t"), ws, fileName
+        Next ws
+        n03 = n03 + 1
+    ElseIf kind = "03" Then
+        For Each ws In wb.Worksheets
+            ReadSem03 cem("sem03"), ws, fileName
+        Next ws
+        n03 = n03 + 1
     Else
-        LogInfo "cem", "пропущен, нет SEM03/SEM21: " & fileName
+        LogInfo "cem", "пропущен, нет SEM03/SEM21/EQM3T: " & fileName
     End If
     If openedHere Then CloseBook wb
 End Sub
 
-Private Sub ReadSem03(ByVal dict As Object, ByVal ws As Worksheet)
+Private Sub ReadSem03(ByVal dict As Object, ByVal ws As Worksheet, ByVal fileName As String)
+    Dim headerRow As Long
     Dim tradeCol As Long
     Dim codeCol As Long
     Dim dateCol As Long
@@ -1106,28 +1765,92 @@ Private Sub ReadSem03(ByVal dict As Object, ByVal ws As Worksheet)
     Dim lastRow As Long
     Dim key As String
     Dim board As String
+    Dim dealNo As String
+    Dim code As String
 
-    tradeCol = HeaderCol(ws, 1, "TradeNo")
-    codeCol = HeaderCol(ws, 1, "ClientCode")
-    dateCol = HeaderCol(ws, 1, "TradeDate")
-    boardCol = HeaderCol(ws, 1, "BoardName")
-    If tradeCol = 0 Or codeCol = 0 Or dateCol = 0 Or boardCol = 0 Then
-        LogInfo "cem", "в SEM03 нет TradeNo/ClientCode/TradeDate/BoardName"
+    headerRow = CemFindHeaderRow(ws, "TradeNo", "TradeDate", "BoardName")
+    If headerRow = 0 Then
+        LogInfo "cem", "Файл " & fileName & ", лист «" & ws.Name & "»: не нашёл заголовки TradeNo, TradeDate, BoardName. Сделки из этого файла не прочитаны."
         Exit Sub
     End If
+    tradeCol = HeaderCol(ws, headerRow, "TradeNo")
+    dateCol = HeaderCol(ws, headerRow, "TradeDate")
+    boardCol = HeaderCol(ws, headerRow, "BoardName")
+    codeCol = HeaderCol(ws, headerRow, "ClientCode")
+    If codeCol = 0 Then codeCol = HeaderCol(ws, headerRow, "BrokerRef")
+    If tradeCol = 0 Or dateCol = 0 Or boardCol = 0 Then
+        LogInfo "cem", "Файл " & fileName & ", лист «" & ws.Name & "», строка " & CStr(headerRow) & ": нет колонок TradeNo/TradeDate/BoardName. Сделки не прочитаны."
+        Exit Sub
+    End If
+    LogInfo "cem", "Файл " & fileName & ": заголовки нашлись, лист «" & ws.Name & "», строка " & CStr(headerRow) & ", номер сделки в колонке " & CStr(tradeCol)
     lastRow = ws.Cells(ws.Rows.Count, tradeCol).End(xlUp).Row
-    For r = 2 To lastRow
-        key = UCase$(IdText(ws.Cells(r, tradeCol).Value)) & "|" & IdText(ws.Cells(r, codeCol).Value) & "|" & DateKey(DateVal(ws.Cells(r, dateCol).Value))
+    For r = headerRow + 1 To lastRow
+        dealNo = IdText(ws.Cells(r, tradeCol).Value)
+        If Len(dealNo) = 0 Then GoTo NextSem03
+        If codeCol > 0 Then code = ClientCodeDigits(ws.Cells(r, codeCol).Value) Else code = ""
         board = Trim$(CStr(ws.Cells(r, boardCol).Value))
-        If Len(IdText(ws.Cells(r, tradeCol).Value)) = 0 Then GoTo NextSem03
         If Len(DateKey(DateVal(ws.Cells(r, dateCol).Value))) = 0 Then GoTo NextSem03
         If Len(board) = 0 Then GoTo NextSem03
+        key = UCase$(dealNo) & "|" & code & "|" & DateKey(DateVal(ws.Cells(r, dateCol).Value))
         If Not dict.Exists(key) Then dict.Add key, board
+        If Len(code) > 0 Then
+            key = UCase$(dealNo) & "||" & DateKey(DateVal(ws.Cells(r, dateCol).Value))
+            If Not dict.Exists(key) Then dict.Add key, board
+        End If
 NextSem03:
     Next r
 End Sub
 
-Private Sub ReadSem21(ByVal dict As Object, ByVal ws As Worksheet)
+Private Function CemFindHeaderRow(ByVal ws As Worksheet, ByVal a As String, ByVal b As String, ByVal c As String) As Long
+    Dim r As Long
+    Dim col As Long
+    Dim line As String
+    Dim lo As ListObject
+    On Error Resume Next
+    For Each lo In ws.ListObjects
+        If Not lo.HeaderRowRange Is Nothing Then
+            line = ""
+            For col = 1 To lo.ListColumns.Count
+                line = line & "|" & UCase$(CStr(lo.HeaderRowRange.Cells(1, col).Value))
+            Next col
+            If InStr(line, UCase$(a)) > 0 And InStr(line, UCase$(b)) > 0 And InStr(line, UCase$(c)) > 0 Then
+                CemFindHeaderRow = lo.HeaderRowRange.Row
+                Exit Function
+            End If
+        End If
+    Next lo
+    On Error GoTo 0
+    For r = 1 To 40
+        line = ""
+        For col = 1 To 90
+            line = line & "|" & UCase$(CStr(ws.Cells(r, col).Value))
+        Next col
+        If InStr(line, UCase$(a)) > 0 And InStr(line, UCase$(b)) > 0 And InStr(line, UCase$(c)) > 0 Then
+            CemFindHeaderRow = r
+            Exit Function
+        End If
+    Next r
+End Function
+
+Private Function ClientCodeDigits(ByVal raw As Variant) As String
+    Dim text As String
+    Dim i As Long
+    Dim ch As String
+    Dim digits As String
+    text = IdText(raw)
+    For i = 1 To Len(text)
+        ch = Mid$(text, i, 1)
+        If ch >= "0" And ch <= "9" Then digits = digits & ch
+    Next i
+    If Len(digits) >= 5 Then
+        ClientCodeDigits = Left$(digits, 5)
+    Else
+        ClientCodeDigits = digits
+    End If
+End Function
+
+Private Sub ReadSem21(ByVal dict As Object, ByVal ws As Worksheet, ByVal fileName As String)
+    Dim headerRow As Long
     Dim secCol As Long
     Dim boardCol As Long
     Dim dateCol As Long
@@ -1147,19 +1870,25 @@ Private Sub ReadSem21(ByVal dict As Object, ByVal ws As Worksheet)
     Dim oldHasLo As Boolean
     Dim oldHasHi As Boolean
 
-    secCol = HeaderCol(ws, 1, "SecurityId")
-    boardCol = HeaderCol(ws, 1, "BoardName")
-    dateCol = HeaderCol(ws, 1, "TradeDate")
-    lowCol = HeaderColExact(ws, 1, "Low")
-    If lowCol = 0 Then lowCol = HeaderCol(ws, 1, "Low")
-    highCol = HeaderColExact(ws, 1, "High")
-    If highCol = 0 Then highCol = HeaderCol(ws, 1, "High")
-    If secCol = 0 Or boardCol = 0 Or dateCol = 0 Then
-        LogInfo "cem", "в SEM21 нет SecurityId/BoardName/TradeDate"
+    headerRow = CemFindHeaderRow(ws, "SecurityId", "BoardName", "TradeDate")
+    If headerRow = 0 Then
+        LogInfo "cem", "Файл " & fileName & ", лист «" & ws.Name & "»: не нашёл заголовки SecurityId, BoardName, TradeDate. Котировки из этого файла не прочитаны."
         Exit Sub
     End If
+    secCol = HeaderCol(ws, headerRow, "SecurityId")
+    boardCol = HeaderCol(ws, headerRow, "BoardName")
+    dateCol = HeaderCol(ws, headerRow, "TradeDate")
+    lowCol = HeaderColExact(ws, headerRow, "Low")
+    If lowCol = 0 Then lowCol = HeaderCol(ws, headerRow, "Low")
+    highCol = HeaderColExact(ws, headerRow, "High")
+    If highCol = 0 Then highCol = HeaderCol(ws, headerRow, "High")
+    If secCol = 0 Or boardCol = 0 Or dateCol = 0 Then
+        LogInfo "cem", "Файл " & fileName & ", лист «" & ws.Name & "»: нет колонок SecurityId/BoardName/TradeDate. Котировки не прочитаны."
+        Exit Sub
+    End If
+    LogInfo "cem", "Файл " & fileName & ": заголовки котировок нашлись, лист «" & ws.Name & "», строка " & CStr(headerRow)
     lastRow = ws.Cells(ws.Rows.Count, secCol).End(xlUp).Row
-    For r = 2 To lastRow
+    For r = headerRow + 1 To lastRow
         sec = Trim$(CStr(ws.Cells(r, secCol).Value))
         board = Trim$(CStr(ws.Cells(r, boardCol).Value))
         If Len(sec) = 0 Or Len(board) = 0 Then GoTo NextSem21
@@ -1294,11 +2023,16 @@ Private Sub WriteFinFormulas(ByVal ws As Worksheet, ByVal cols As Object, ByVal 
         If sold Then PutNum ws, cols, rowNum, "nomSale", CDbl(deal("nominal"))
     End If
 
-    income = PlusRefs(rowNum, cols, "saleAmt2", "saleNkd2")
-    If Len(income) > 0 Then PutFormulaLocal ws, cols, rowNum, "income1530", "=" & income
-
     expense = PlusRefs(rowNum, cols, "costRub", "nkd3", "commExchBuy", "commBuy2", "counterBuy", "commExchSale", "saleComm", "saleCounter")
     If Len(expense) > 0 Then PutFormulaLocal ws, cols, rowNum, "expense201", "=" & expense
+
+    If Not sold Then
+        ClearFinrezBlock ws, cols, rowNum
+        Exit Sub
+    End If
+
+    income = PlusRefs(rowNum, cols, "saleAmt2", "saleNkd2")
+    If Len(income) > 0 Then PutFormulaLocal ws, cols, rowNum, "income1530", "=" & income
 
     If IsPercent(deal) Then
         incSum = SumRefs(rowNum, cols, "saleAmt2", "saleNkd2")
@@ -1328,12 +2062,36 @@ Private Sub WriteFinFormulas(ByVal ws As Worksheet, ByVal cols As Object, ByVal 
     End If
 End Sub
 
+Private Sub ClearFinrezBlock(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowNum As Long)
+    Dim keys As Variant
+    Dim i As Long
+    Dim col As Long
+    keys = Array("income1530", "finrez", "taxSum")
+    For i = LBound(keys) To UBound(keys)
+        col = ColOf(cols, CStr(keys(i)))
+        If col > 0 Then
+            On Error Resume Next
+            ws.Cells(rowNum, col).ClearContents
+            On Error GoTo 0
+        End If
+    Next i
+End Sub
+
 Private Sub PutFormulaLocal(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowNum As Long, ByVal key As String, ByVal formulaText As String)
     Dim col As Long
+    Dim eng As String
     col = ColOf(cols, key)
     If col = 0 Or Len(formulaText) = 0 Then Exit Sub
     On Error Resume Next
+    ws.Cells(rowNum, col).ClearContents
     ws.Cells(rowNum, col).FormulaLocal = formulaText
+    If Left$(CStr(ws.Cells(rowNum, col).Formula), 1) <> "=" And Left$(CStr(ws.Cells(rowNum, col).FormulaLocal), 1) <> "=" Then
+        eng = formulaText
+        eng = Replace(eng, "СУММ", "SUM")
+        eng = Replace(eng, "ОКРУГЛ", "ROUND")
+        eng = Replace(eng, ";", ",")
+        ws.Cells(rowNum, col).Formula = eng
+    End If
     On Error GoTo 0
 End Sub
 
@@ -2043,7 +2801,7 @@ Private Sub LogDeal(ByVal deal As Object, ByVal whereText As String, ByVal whatT
     ws.Cells(r, 9).Value = deal("regno")
     If IsDate(deal("concl")) Then ws.Cells(r, 10).Value = deal("concl")
     ws.Cells(r, 11).Value = deal("settleCur")
-    If IsRuble(CStr(deal("settleCur"))) Then ws.Cells(r, 12).Value = "1"
+    If deal.Exists("fx") Then ws.Cells(r, 12).Value = deal("fx")
     ws.Cells(r, 13).Value = whereText
     ws.Cells(r, 14).Value = whatText
     ws.Cells(r, 15).Value = errFlag
