@@ -22,7 +22,13 @@ from config import load_config
 from extract.ord_quantity import iter_ord_op_rows
 from extract.svod_depo import iter_svod_depo_rows
 from references.spravochnik import Sprav1Lookup
-from write.excel_writer import write_day_workbooks
+from write.excel_writer import group_rows_by_depo_sheet, write_day_workbooks
+
+
+def _print_sheet_counts(label: str, rows: list) -> None:
+    grouped = group_rows_by_depo_sheet(rows)
+    parts = [f"{name}={len(grouped[name])}" for name in grouped if grouped[name] or name != "Прочие"]
+    print(f"  листы {label}: {', '.join(parts)}")
 
 
 def _default_output_name(report_date: str, *, dom: bool) -> str:
@@ -122,7 +128,9 @@ def main(argv: list[str] | None = None) -> int:
         prev_dom, curr_dom, routed.dom_ops, report_date, depo_for_schet=depo_fn
     )
     print(f"Day_Quantity строк: {len(ia_rows)}")
+    _print_sheet_counts("Day_Quantity", ia_rows)
     print(f"Day_Quantity_DOM строк: {len(dom_rows)}")
+    _print_sheet_counts("Day_Quantity_DOM", dom_rows)
 
     write_day_workbooks(day_path, day_dom_path, ia_rows, dom_rows, report_date)
     print(f"OK: {day_path}")

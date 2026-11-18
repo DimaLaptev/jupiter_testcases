@@ -14,11 +14,15 @@ from date_format import (
     russian_month_name,
 )
 from models import DAY_HEADERS, DayQuantityRow
+from references.spravochnik import depo_code_from_depository
 
 HEADER_META_ROW = 1
 HEADER_ROW = 2
 DATA_START_ROW = 3
-SHEET_NAME = "Day_Quantity"
+# Лимит строки xlsx. Шапка занимает 1–2, данные с 3.
+EXCEL_MAX_ROW = 1_048_576
+DEPO_SHEET_ORDER: tuple[str, ...] = ("РЕГИОН", "ГПБ", "VTBSD", "RSD")
+OTHER_SHEET = "Прочие"
 
 HEADER_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
 HEADER_FONT = Font(bold=True)
@@ -74,24 +78,63 @@ def _write_header(ws: Worksheet, report_date: str) -> None:
         ws.cell(row=HEADER_META_ROW, column=c).fill = GROUP_FILL
 
 
+def max_data_rows() -> int:
+    """Сколько строк данных влезает на лист под шапкой."""
+    return EXCEL_MAX_ROW - DATA_START_ROW + 1
+
+
+def sheet_name_for_depo(depo: str | None) -> str:
+    """Лист по названию депозитария. Нераспознанное — «Прочие», строка не теряется."""
+    code = depo_code_from_depository(depo)
+    if code in DEPO_SHEET_ORDER:
+        return code
+    return OTHER_SHEET
+
+
+def group_rows_by_depo_sheet(
+    rows: list[DayQuantityRow],
+) -> dict[str, list[DayQuantityRow]]:
+    grouped: dict[str, list[DayQuantityRow]] = {name: [] for name in DEPO_SHEET_ORDER}
+    grouped[OTHER_SHEET] = []
+    for row in rows:
+        grouped[sheet_name_for_depo(row.depo)].append(row)
+    return grouped
+
+
+def ensure_sheet_fits(sheet_name: str, count: int) -> None:
+    limit = max_data_rows()
+    if count > limit:
+        raise ValueError(
+            f"Лист {sheet_name!r}: {count} строк данных, в xlsx помещается {limit} "
+            f"(лимит Excel {EXCEL_MAX_ROW} с учётом двух строк шапки)."
+        )
+
+
 def write_day_workbook(
     path: Path,
     rows: list[DayQuantityRow],
     report_date: str,
-    *,
-    sheet_name: str = SHEET_NAME,
 ) -> Path:
+    """Четыре листа по депозитарию. «Прочие» — только если такие строки есть."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = sheet_name
-    _write_header(ws, report_date)
+    grouped = group_rows_by_depo_sheet(rows)
+    sheet_names = list(DEPO_SHEET_ORDER)
+    if grouped[OTHER_SHEET]:
+        sheet_names.append(OTHER_SHEET)
+    for name in sheet_names:
+        ensure_sheet_fits(name, len(grouped[name]))
 
-    r = DATA_START_ROW
-    for row in rows:
-        for c, value in enumerate(row.as_tuple(), start=1):
-            _set_cell(ws, r, c, value)
-        r += 1
+    wb = Workbook()
+    default = wb.active
+    wb.remove(default)
+    for name in sheet_names:
+        ws = wb.create_sheet(name)
+        _write_header(ws, report_date)
+        r = DATA_START_ROW
+        for row in grouped[name]:
+            for c, value in enumerate(row.as_tuple(), start=1):
+                _set_cell(ws, r, c, value)
+            r += 1
 
     wb.save(path)
     wb.close()
@@ -105,6 +148,6 @@ def write_day_workbooks(
     dom_rows: list[DayQuantityRow],
     report_date: str,
 ) -> tuple[Path, Path]:
-    write_day_workbook(day_path, ia_rows, report_date, sheet_name="Day_Quantity")
-    write_day_workbook(day_dom_path, dom_rows, report_date, sheet_name="Day_Quantity_DOM")
+    write_day_workbook(day_path, ia_rows, report_date)
+    write_day_workbook(day_dom_path, dom_rows, report_date)
     return day_path, day_dom_path
