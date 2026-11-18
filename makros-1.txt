@@ -471,8 +471,8 @@ Private Sub ClearSale(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowNum 
     PutCell ws, cols, rowNum, "saleNkd2", 0
     PutNum ws, cols, rowNum, "saleComm", 0
     PutNum ws, cols, rowNum, "saleCounter", 0
-    PutNum ws, cols, rowNum, "saleMarketLow", 0
-    PutNum ws, cols, rowNum, "saleMarketHigh", 0
+    PutCell ws, cols, rowNum, "saleMarketLow", ""
+    PutCell ws, cols, rowNum, "saleMarketHigh", ""
 End Sub
 
 Private Sub SplitBuyComm(ByVal ws As Worksheet, ByVal cols As Object, ByVal soldRow As Long, ByVal tailRow As Long, ByVal take As Double, ByVal oldQty As Double)
@@ -1362,11 +1362,13 @@ Private Sub ApplyCemPurchase(ByVal ws As Worksheet, ByVal cols As Object, ByVal 
     If hasLo Then
         PutNum ws, cols, rowNum, "marketLow", lo
     Else
+        PutCell ws, cols, rowNum, "marketLow", ""
         miss = AppendMiss(miss, "нижняя граница")
     End If
     If hasHi Then
         PutNum ws, cols, rowNum, "marketHigh", hi
     Else
+        PutCell ws, cols, rowNum, "marketHigh", ""
         miss = AppendMiss(miss, "верхняя граница")
     End If
     WriteMatBenefitFormula ws, cols, rowNum
@@ -1947,14 +1949,13 @@ Private Function NewPaperRow(ByVal ws As Worksheet, ByVal cols As Object) As Lon
         NewPaperRow = CLng(cols("firstData"))
         Exit Function
     End If
-    For r = CLng(cols("firstData")) To lastRow + 30
-        text = LCase$(Trim$(CStr(ws.Cells(r, 1).Value) & " " & CStr(ws.Cells(r, codeCol).Value)))
-        If InStr(text, "всего") > 0 Or InStr(text, "итого") > 0 Then
-            NewPaperRow = r
-            Exit Function
-        End If
-    Next r
-    NewPaperRow = lastRow + 1
+    r = lastRow + 1
+    Do While RowIsBlank(ws, cols, r)
+        NewPaperRow = r
+        Exit Function
+    Loop
+    text = LCase$(Trim$(CStr(ws.Cells(r, 1).Value) & " " & CStr(ws.Cells(r, codeCol).Value)))
+    NewPaperRow = r
 End Function
 
 Private Function TemplateRow(ByVal ws As Worksheet, ByVal cols As Object) As Long
