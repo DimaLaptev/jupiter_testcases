@@ -711,38 +711,341 @@ Private Sub WriteRateProduct(ByVal ws As Worksheet, ByVal cols As Object, ByVal 
 End Sub
 
 Private Sub ExpandTotals(ByVal ws As Worksheet, ByVal cols As Object)
+    Dim formulas(1 To 120) As String
+    Dim formats(1 To 120) As String
+    Dim held(1 To 120) As Variant
+    Dim hasHeld(1 To 120) As Boolean
+    Dim label As String
+    Dim fillColor As Long
+    Dim donorRow As Long
+    Dim nForm As Long
+    Dim removed As Long
+    Dim lastSec As Long
     Dim totalRow As Long
     Dim lastData As Long
-    Dim c As Long
-    Dim f As String
-    Dim codeCol As Long
-    codeCol = ColOf(cols, "code")
-    If codeCol = 0 Then codeCol = 1
-    totalRow = NewPaperRow(ws, cols)
-    If InStr(1, CStr(ws.Cells(totalRow, 1).Value) & CStr(ws.Cells(totalRow, codeCol).Value), "всего", vbTextCompare) = 0 Then
-        If InStr(1, CStr(ws.Cells(totalRow, 1).Value), "итого", vbTextCompare) = 0 Then Exit Sub
+    Dim firstData As Long
+    Dim note As String
+
+    firstData = CLng(cols("firstData"))
+    donorRow = CaptureTotalDonor(ws, cols, label, fillColor, formulas, formats, held, hasHeld, nForm)
+    removed = RemoveTotalRows(ws, cols, firstData)
+    lastSec = LastSecurityRow(ws, cols)
+    If lastSec < firstData Then
+        LogInfo "итог", "бумаг нет, строку «Всего» не ставлю"
+        Exit Sub
+    End If
+    totalRow = PlaceTotalRow(ws, cols, lastSec)
+    If totalRow = 0 Then
+        LogInfo "итог", "не удалось поставить строку «Всего» под последней бумагой"
+        Exit Sub
     End If
     lastData = totalRow - 1
-    Do While lastData > 1 And RowIsBlank(ws, cols, lastData)
+    Do While lastData > lastSec And RowIsEmpty(ws, lastData)
         lastData = lastData - 1
     Loop
-    For c = 1 To 120
-        f = ""
-        On Error Resume Next
-        f = CStr(ws.Cells(totalRow, c).FormulaLocal)
-        If Len(f) = 0 Then f = CStr(ws.Cells(totalRow, c).Formula)
-        On Error GoTo 0
-        If InStr(f, "=") = 0 Then GoTo NextTotCol
-        f = StretchFormulaRows(f, lastData)
-        On Error Resume Next
-        ws.Cells(totalRow, c).FormulaLocal = f
-        On Error GoTo 0
-NextTotCol:
-    Next c
-    LogInfo "итог", "строка «Всего» " & CStr(totalRow) & ", диапазоны до " & CStr(lastData)
+    If lastData < firstData Then lastData = lastSec
+    ApplyTotalRow ws, cols, totalRow, donorRow, lastData, firstData, label, fillColor, formulas, formats, held, hasHeld, nForm
+    note = "строка «Всего» " & CStr(totalRow) & ", диапазоны до " & CStr(lastData)
+    If removed > 0 Then note = note & ". Убраны прежние строки «Всего»: " & CStr(removed)
+    If nForm = 0 Then note = note & ". Формул на прежней строке не было, в суммовые колонки поставлен СУММ"
+    LogInfo "итог", note
 End Sub
 
-Private Function StretchFormulaRows(ByVal formulaText As String, ByVal lastData As Long) As String
+Private Function CaptureTotalDonor(ByVal ws As Worksheet, ByVal cols As Object, ByRef label As String, ByRef fillColor As Long, ByRef formulas() As String, ByRef formats() As String, ByRef held() As Variant, ByRef hasHeld() As Boolean, ByRef nForm As Long) As Long
+    Dim r As Long
+    Dim c As Long
+    Dim lastScan As Long
+    Dim firstData As Long
+    Dim n As Long
+    Dim bestN As Long
+    Dim bestR As Long
+    Dim f As String
+    Dim cell As Range
+    firstData = CLng(cols("firstData"))
+    lastScan = ScanLimit(ws, cols, firstData)
+    bestN = -1
+    For r = firstData To lastScan
+        If Not RowIsTotal(ws, cols, r) Then GoTo NextDonor
+        n = 0
+        For c = 1 To 120
+            If Len(FormulaOf(ws, r, c)) > 0 Then n = n + 1
+        Next c
+        If n > bestN Then
+            bestN = n
+            bestR = r
+        End If
+NextDonor:
+    Next r
+    nForm = 0
+    If bestR = 0 Then Exit Function
+    CaptureTotalDonor = bestR
+    label = Trim$(OwnCellText(ws.Cells(bestR, 1)))
+    On Error Resume Next
+    fillColor = ws.Cells(bestR, 1).Interior.Color
+    On Error GoTo 0
+    For c = 1 To 120
+        f = FormulaOf(ws, bestR, c)
+        formulas(c) = f
+        On Error Resume Next
+        Set cell = TopCell(ws.Cells(bestR, c))
+        If Not cell Is Nothing Then formats(c) = cell.NumberFormat
+        On Error GoTo 0
+        If Len(f) > 0 Then
+            nForm = nForm + 1
+        ElseIf Not cell Is Nothing Then
+            If Not IsError(cell.Value) Then
+                If IsNumeric(cell.Value) And Len(Trim$(CStr(cell.Value))) > 0 Then
+                    If c > 1 Then
+                        held(c) = cell.Value
+                        hasHeld(c) = True
+                    End If
+                End If
+            End If
+        End If
+    Next c
+End Function
+
+Private Function RemoveTotalRows(ByVal ws As Worksheet, ByVal cols As Object, ByVal firstData As Long) As Long
+    Dim marked() As Long
+    Dim n As Long
+    Dim r As Long
+    Dim i As Long
+    Dim lastScan As Long
+    Dim pass As Long
+    Dim best As Long
+    lastScan = ScanLimit(ws, cols, firstData)
+    n = 0
+    For r = firstData To lastScan
+        If Not RowIsTotal(ws, cols, r) Then GoTo NextMark
+        i = r - 1
+        Do While i >= firstData And RowIsEmpty(ws, i)
+            n = n + 1
+            If n = 1 Then ReDim marked(1 To 1) Else ReDim Preserve marked(1 To n)
+            marked(n) = i
+            i = i - 1
+        Loop
+        n = n + 1
+        If n = 1 Then ReDim marked(1 To 1) Else ReDim Preserve marked(1 To n)
+        marked(n) = r
+        RemoveTotalRows = RemoveTotalRows + 1
+NextMark:
+    Next r
+    For pass = 1 To n
+        best = 0
+        For i = 1 To n
+            If marked(i) > best Then best = marked(i)
+        Next i
+        If best = 0 Then Exit For
+        For i = 1 To n
+            If marked(i) = best Then marked(i) = 0
+        Next i
+        UnmergeHorizontal ws, best
+        ws.Rows(best).Delete Shift:=xlUp
+    Next pass
+End Function
+
+Private Function PlaceTotalRow(ByVal ws As Worksheet, ByVal cols As Object, ByVal lastSec As Long) As Long
+    Dim footer As Long
+    Dim target As Long
+    footer = FirstFooterRow(ws, cols, lastSec)
+    If footer = lastSec + 1 Then
+        InsertDataRow ws, footer
+        target = footer
+    ElseIf footer > lastSec + 1 Then
+        If RowIsEmpty(ws, lastSec + 1) Then
+            target = lastSec + 1
+        Else
+            InsertDataRow ws, footer
+            target = footer
+        End If
+    ElseIf RowIsEmpty(ws, lastSec + 1) Then
+        target = lastSec + 1
+    Else
+        InsertDataRow ws, lastSec + 1
+        target = lastSec + 1
+    End If
+    PlaceTotalRow = target
+End Function
+
+Private Sub ApplyTotalRow(ByVal ws As Worksheet, ByVal cols As Object, ByVal totalRow As Long, ByVal donorRow As Long, ByVal lastData As Long, ByVal firstData As Long, ByVal label As String, ByVal fillColor As Long, ByRef formulas() As String, ByRef formats() As String, ByRef held() As Variant, ByRef hasHeld() As Boolean, ByVal nForm As Long)
+    Dim c As Long
+    Dim f As String
+    Dim keys As Variant
+    Dim i As Long
+    Dim col As Long
+    UnmergeHorizontal ws, totalRow
+    ws.Range(ws.Cells(totalRow, 1), ws.Cells(totalRow, 120)).ClearContents
+    If Len(label) = 0 Then label = "Всего:"
+    ws.Cells(totalRow, 1).Value = label
+    If nForm > 0 Then
+        For c = 2 To 120
+            If Len(formats(c)) > 0 Then ws.Cells(totalRow, c).NumberFormat = formats(c)
+            If Len(formulas(c)) > 0 Then
+                f = RetargetTotalFormula(formulas(c), donorRow, totalRow, lastData)
+                WriteTotalFormula ws, totalRow, c, f
+            ElseIf hasHeld(c) Then
+                ws.Cells(totalRow, c).Value = held(c)
+            End If
+        Next c
+    Else
+        keys = Array("qtyInit", "qtyFact", "costNom", "costRub", "nkd1", "nkd2", "nkd3", "nkdCoup1", "nkdCoup2", "nkdCoup3", "matBenefit", "commBuy", "commBuy2", "counterBuy", "commExchBuy", "nonmarket", "matTax", "saleQty", "saleAmt1", "saleAmt2", "saleNkd", "saleNkd2", "saleComm", "saleCounter", "commExchSale", "income1530", "expense201", "finrez", "taxSum")
+        For i = LBound(keys) To UBound(keys)
+            col = ColOf(cols, CStr(keys(i)))
+            If col > 1 Then
+                f = "=СУММ(" & ColLetter(col) & CStr(firstData) & ":" & ColLetter(col) & CStr(lastData) & ")"
+                On Error Resume Next
+                ws.Cells(totalRow, col).NumberFormat = ws.Cells(lastData, col).NumberFormat
+                On Error GoTo 0
+                WriteTotalFormula ws, totalRow, col, f
+            End If
+        Next i
+    End If
+    StyleTotalRow ws, totalRow, fillColor
+End Sub
+
+Private Sub WriteTotalFormula(ByVal ws As Worksheet, ByVal rowNum As Long, ByVal col As Long, ByVal formulaText As String)
+    Dim eng As String
+    If col < 1 Or Len(formulaText) = 0 Then Exit Sub
+    On Error Resume Next
+    ws.Cells(rowNum, col).FormulaLocal = formulaText
+    If Left$(CStr(ws.Cells(rowNum, col).Formula), 1) <> "=" And Left$(CStr(ws.Cells(rowNum, col).FormulaLocal), 1) <> "=" Then
+        eng = formulaText
+        eng = Replace(eng, "СУММ", "SUM")
+        eng = Replace(eng, "ОКРУГЛ", "ROUND")
+        eng = Replace(eng, ";", ",")
+        ws.Cells(rowNum, col).Formula = eng
+    End If
+    On Error GoTo 0
+End Sub
+
+Private Sub StyleTotalRow(ByVal ws As Worksheet, ByVal rowNum As Long, ByVal fillColor As Long)
+    Dim rng As Range
+    Dim fill As Long
+    On Error Resume Next
+    Set rng = ws.Range(ws.Cells(rowNum, 1), ws.Cells(rowNum, 120))
+    rng.Font.Name = "Times New Roman"
+    rng.Font.Size = 8
+    rng.Borders.LineStyle = 1
+    rng.Borders.Weight = 2
+    fill = fillColor
+    If fill <= 0 Or fill = 16777215 Then fill = RGB(189, 215, 238)
+    rng.Interior.Color = fill
+    On Error GoTo 0
+End Sub
+
+Private Function LastSecurityRow(ByVal ws As Worksheet, ByVal cols As Object) As Long
+    Dim codeCol As Long
+    Dim r As Long
+    Dim lastRow As Long
+    Dim text As String
+    codeCol = ColOf(cols, "code")
+    If codeCol = 0 Then Exit Function
+    lastRow = ws.Cells(ws.Rows.Count, codeCol).End(xlUp).Row
+    For r = lastRow To CLng(cols("firstData")) Step -1
+        text = LCase$(Trim$(OwnCellText(ws.Cells(r, codeCol))))
+        If Len(text) = 0 Then GoTo NextSec
+        If InStr(text, "всего") > 0 Or InStr(text, "итого") > 0 Then GoTo NextSec
+        LastSecurityRow = r
+        Exit Function
+NextSec:
+    Next r
+End Function
+
+Private Function FirstFooterRow(ByVal ws As Worksheet, ByVal cols As Object, ByVal lastSec As Long) As Long
+    Dim r As Long
+    Dim limit As Long
+    Dim text As String
+    Dim codeCol As Long
+    codeCol = ColOf(cols, "code")
+    limit = lastSec + 40
+    If limit > ws.Rows.Count Then limit = ws.Rows.Count
+    For r = lastSec + 1 To limit
+        If RowIsTotal(ws, cols, r) Then GoTo NextFoot
+        text = Trim$(OwnCellText(ws.Cells(r, 1)))
+        If Len(text) = 0 And codeCol > 1 Then text = Trim$(OwnCellText(ws.Cells(r, codeCol)))
+        If Len(text) > 0 Then
+            FirstFooterRow = r
+            Exit Function
+        End If
+NextFoot:
+    Next r
+End Function
+
+Private Function ScanLimit(ByVal ws As Worksheet, ByVal cols As Object, ByVal firstData As Long) As Long
+    Dim codeCol As Long
+    Dim lastCode As Long
+    Dim lastA As Long
+    codeCol = ColOf(cols, "code")
+    If codeCol = 0 Then codeCol = 1
+    lastCode = ws.Cells(ws.Rows.Count, codeCol).End(xlUp).Row
+    lastA = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    If lastA > lastCode Then lastCode = lastA
+    If lastCode < firstData Then lastCode = firstData
+    ScanLimit = lastCode + 20
+    If ScanLimit > ws.Rows.Count Then ScanLimit = ws.Rows.Count
+End Function
+
+Private Function RowIsTotal(ByVal ws As Worksheet, ByVal cols As Object, ByVal rowNum As Long) As Boolean
+    Dim text As String
+    Dim codeCol As Long
+    text = LCase$(Trim$(OwnCellText(ws.Cells(rowNum, 1))))
+    codeCol = ColOf(cols, "code")
+    If codeCol > 1 Then text = text & " " & LCase$(Trim$(OwnCellText(ws.Cells(rowNum, codeCol))))
+    RowIsTotal = (InStr(text, "всего") > 0 Or InStr(text, "итого") > 0)
+End Function
+
+Private Function RowIsEmpty(ByVal ws As Worksheet, ByVal rowNum As Long) As Boolean
+    Dim c As Long
+    If rowNum < 1 Then Exit Function
+    For c = 1 To 120
+        If Len(FormulaOf(ws, rowNum, c)) > 0 Then Exit Function
+        If Len(Trim$(OwnCellText(ws.Cells(rowNum, c)))) > 0 Then Exit Function
+    Next c
+    RowIsEmpty = True
+End Function
+
+Private Function FormulaOf(ByVal ws As Worksheet, ByVal rowNum As Long, ByVal col As Long) As String
+    Dim cell As Range
+    On Error GoTo None
+    Set cell = TopCell(ws.Cells(rowNum, col))
+    If cell Is Nothing Then Exit Function
+    If cell.Row <> rowNum Or cell.Column <> col Then Exit Function
+    FormulaOf = CStr(cell.FormulaLocal)
+    If Left$(FormulaOf, 1) <> "=" Then FormulaOf = CStr(cell.Formula)
+    If Left$(FormulaOf, 1) <> "=" Then FormulaOf = ""
+    Exit Function
+None:
+    FormulaOf = ""
+End Function
+
+Private Function TopCell(ByVal cell As Range) As Range
+    On Error GoTo None
+    If cell.MergeCells Then
+        Set TopCell = cell.MergeArea.Cells(1, 1)
+    Else
+        Set TopCell = cell
+    End If
+    Exit Function
+None:
+    Set TopCell = Nothing
+End Function
+
+Private Sub UnmergeHorizontal(ByVal ws As Worksheet, ByVal rowNum As Long)
+    Dim c As Long
+    Dim area As Range
+    For c = 1 To 120
+        On Error GoTo NextMerge
+        If ws.Cells(rowNum, c).MergeCells Then
+            Set area = ws.Cells(rowNum, c).MergeArea
+            If area.Rows.Count = 1 Then area.UnMerge
+        End If
+NextMerge:
+        Err.Clear
+    Next c
+    On Error GoTo 0
+End Sub
+
+Private Function RetargetTotalFormula(ByVal formulaText As String, ByVal oldRow As Long, ByVal newRow As Long, ByVal lastData As Long) As String
     Dim i As Long
     Dim ch As String
     Dim acc As String
@@ -750,27 +1053,33 @@ Private Function StretchFormulaRows(ByVal formulaText As String, ByVal lastData 
     Dim out As String
     Dim afterColon As Boolean
     Dim n As Long
-    out = ""
     i = 1
     Do While i <= Len(formulaText)
         ch = Mid$(formulaText, i, 1)
-        If ch = ":" Then
+        If ch = "$" Or (ch >= "A" And ch <= "Z") Or (ch >= "a" And ch <= "z") Then
             If Len(num) > 0 Then
+                n = CLng(num)
+                If afterColon And n > 1 Then
+                    num = CStr(lastData)
+                ElseIf oldRow > 0 And n = oldRow Then
+                    num = CStr(newRow)
+                End If
                 out = out & acc & num
                 acc = ""
                 num = ""
+                afterColon = False
             End If
-            out = out & acc & ch
-            acc = ""
-            afterColon = True
-        ElseIf (ch >= "A" And ch <= "Z") Or (ch >= "a" And ch <= "z") Then
             acc = acc & ch
         ElseIf ch >= "0" And ch <= "9" And Len(acc) > 0 Then
             num = num & ch
         Else
             If Len(num) > 0 Then
                 n = CLng(num)
-                If afterColon And n > 1 And n < lastData Then num = CStr(lastData)
+                If afterColon And n > 1 Then
+                    num = CStr(lastData)
+                ElseIf oldRow > 0 And n = oldRow Then
+                    num = CStr(newRow)
+                End If
                 out = out & acc & num
                 acc = ""
                 num = ""
@@ -779,15 +1088,19 @@ Private Function StretchFormulaRows(ByVal formulaText As String, ByVal lastData 
                 acc = ""
             End If
             out = out & ch
-            afterColon = False
+            afterColon = (ch = ":")
         End If
         i = i + 1
     Loop
     If Len(num) > 0 Then
         n = CLng(num)
-        If afterColon And n > 1 And n < lastData Then num = CStr(lastData)
+        If afterColon And n > 1 Then
+            num = CStr(lastData)
+        ElseIf oldRow > 0 And n = oldRow Then
+            num = CStr(newRow)
+        End If
     End If
-    StretchFormulaRows = out & acc & num
+    RetargetTotalFormula = out & acc & num
 End Function
 
 Private Function EarliestOpenLot(ByVal ws As Worksheet, ByVal cols As Object, ByVal isin As String) As Long
@@ -1950,11 +2263,15 @@ Private Function NewPaperRow(ByVal ws As Worksheet, ByVal cols As Object) As Lon
         Exit Function
     End If
     r = lastRow + 1
-    Do While RowIsBlank(ws, cols, r)
+    If RowIsBlank(ws, cols, r) Then
         NewPaperRow = r
         Exit Function
-    Loop
+    End If
     text = LCase$(Trim$(CStr(ws.Cells(r, 1).Value) & " " & CStr(ws.Cells(r, codeCol).Value)))
+    If InStr(text, "всего") > 0 Or InStr(text, "итого") > 0 Then
+        NewPaperRow = r
+        Exit Function
+    End If
     NewPaperRow = r
 End Function
 
