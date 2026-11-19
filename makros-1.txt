@@ -141,7 +141,6 @@ End Sub
 Private Function TransferDeals(ByVal brokerWs As Worksheet, ByVal regWs As Worksheet, ByVal cem As Object, ByVal rates As Object) As Boolean
     Dim sec2 As Object
     Dim deals As Collection
-    Dim sec5 As Collection
     Dim cols As Object
     Dim item As Variant
     Dim deal As Object
@@ -162,8 +161,6 @@ Private Function TransferDeals(ByVal brokerWs As Worksheet, ByVal regWs As Works
 
     stepName = "чтение раздела 4"
     Set deals = ReadSection(brokerWs, "4.", "совершен", False)
-    stepName = "чтение раздела 5"
-    Set sec5 = ReadSection(brokerWs, "5.", "заключен", True)
     SortDeals deals
 
     For Each item In deals
@@ -179,12 +176,6 @@ Private Function TransferDeals(ByVal brokerWs As Worksheet, ByVal regWs As Works
         Else
             LogDeal deal, "", "", "error", "направление не покупка и не продажа: " & CStr(deal("direction")), ""
         End If
-    Next item
-
-    For Each item In sec5
-        Set deal = item
-        ResolvePaper deal, sec2
-        LogDeal deal, "", "", "error", "раздел 5, сделка заключена и еще не рассчитана", "на примере 85 и 15 штук фактическое количество и стоимость разошлись, раздел 5 не записывается"
     Next item
 
     stepName = "строка Всего"
