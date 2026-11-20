@@ -490,17 +490,19 @@ End Sub
 
 Private Sub SplitNkdRow(ByVal ws As Worksheet, ByVal cols As Object, ByVal soldRow As Long, ByVal tailRow As Long, ByVal take As Double, ByVal oldQty As Double, ByVal mQty As Double)
     Dim orig As Double
-    If mQty <= 0 Then Exit Sub
-    If ColOf(cols, "nkd1") > 0 Then
-        orig = NumVal(ws.Cells(soldRow, ColOf(cols, "nkd1")).Value)
-    ElseIf ColOf(cols, "nkd2") > 0 Then
-        orig = NumVal(ws.Cells(soldRow, ColOf(cols, "nkd2")).Value)
-        If oldQty > 0 Then orig = CDbl(Application.WorksheetFunction.Round(orig * mQty / oldQty, 2))
+    If mQty > 0 Then
+        If ColOf(cols, "nkd1") > 0 Then
+            orig = NumVal(ws.Cells(soldRow, ColOf(cols, "nkd1")).Value)
+        ElseIf ColOf(cols, "nkd2") > 0 Then
+            orig = NumVal(ws.Cells(soldRow, ColOf(cols, "nkd2")).Value)
+            If oldQty > 0 Then orig = CDbl(Application.WorksheetFunction.Round(orig * mQty / oldQty, 2))
+        End If
+        PutNum ws, cols, soldRow, "nkd2", CDbl(Application.WorksheetFunction.Round(orig * take / mQty, 2))
+        PutNum ws, cols, tailRow, "nkd2", CDbl(Application.WorksheetFunction.Round(orig * (oldQty - take) / mQty, 2))
+        WriteRateProduct ws, cols, soldRow, "nkd3", "nkd2", "rateBuy"
+        WriteRateProduct ws, cols, tailRow, "nkd3", "nkd2", "rateBuy"
     End If
-    PutNum ws, cols, soldRow, "nkd2", CDbl(Application.WorksheetFunction.Round(orig * take / mQty, 2))
-    PutNum ws, cols, tailRow, "nkd2", CDbl(Application.WorksheetFunction.Round(orig * (oldQty - take) / mQty, 2))
-    WriteRateProduct ws, cols, soldRow, "nkd3", "nkd2", "rateBuy"
-    WriteRateProduct ws, cols, tailRow, "nkd3", "nkd2", "rateBuy"
+    WriteRateProduct ws, cols, tailRow, "nkdCoup3", "nkdCoup2", "rateBuy"
 End Sub
 
 Private Sub RedistributePaperComm(ByVal ws As Worksheet, ByVal cols As Object, ByVal isin As String)
@@ -3159,3 +3161,21 @@ Private Function PickFolder(ByVal title As String) As String
         If .Show = -1 Then PickFolder = .SelectedItems(1)
     End With
 End Function
+
+
+Если в отчёте есть только первая часть РЕПО, писать строку сразу или ждать, пока в разделе 4 появятся обе части?
+16. Если у одной части несколько строк с одним номером сделки, схлопывать их в одну строку регистра?
+17. В колонку «Код валюты номинала» всегда писать 810, когда номинал рублёвый? На листе Петрова там 810, а в «Валюта цены сделки» и «Валюта расчётов сделки» стоит 643.
+18. В колонку «Комиссия брокера, руб.» брать комиссию из строки «1-я часть» отчёта, из строки «2-я часть» или сумму обеих?
+19. Из какой колонки отчёта брать сумму в колонку «Комиссия ПАО Московская биржа, уплаченная при реализации, руб.», когда она не ноль?
+20. Из какой колонки отчёта брать сумму в колонку «Депозитарные/иные расходы», когда она не ноль?
+21. Из какой строки отчёта брать НКД в колонки «НКД уплаченный по сделке»? На листе 36 525 и 3 630.
+22. Откуда брать текст в колонку «Режим торгов»? На листе стоит «РЕПО-М»: из отчёта, из файла CEM или это постоянный текст?
+23. В колонки «Курс ЦБ РФ на дату оплаты» и «Курс ЦБ РФ на дату расчётов» для валюты, отличной от рубля, брать курс на дату оплаты этой ноги из того же файла ЦБ?
+24. Число 16,5 в формулах предела (=16,5*1,8 и =16,5*0,8) макрос не меняет и только копирует формулу на новую строку?
+25. Новую строку собирать копированием формул со строки выше? У строки 24 сумма первой части без ОКРУГЛ, у строки 25 с ОКРУГЛ.
+26. Лист в книге РЕПО выбирать так же, как в обычном регистре: по ФИО или по пятизначному коду клиента?
+27. Если номер сделки РЕПО уже есть на листе, пропускать строку и писать об этом в «Лог»?
+28. Заявку из раздела 3 «продажа с обратным выкупом» по-прежнему не писать в регистр РЕПО?
+29. Новую строку вставлять над «Всего» и расширять формулу СУММ?
+30. Колонку «Убыток в части обращающихся бумаг» на новой строке оставлять пустой и не исправлять #ССЫЛКА! в итоге?
